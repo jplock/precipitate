@@ -81,8 +81,60 @@ Verify anything marked (unverified) before relying on it.
 * AWS Migration Evaluator, Azure Migrate, RVTools-driven sizing: ingest
   inventory, right-size, produce a target bill of materials.
 
-== Open items to verify
+== Resolved open items
 
-* Current max disks per instance in the latest release.
-* Whether `instance_update` (ncpus, memory) requires a stopped instance.
-* EC2 VM export constraints (which instance types and AMIs can be exported).
+Checked against Omicron `main` as of 2026-10-12. These are the values in the
+code; confirm against the release a customer actually runs.
+
+=== Instance limits (Omicron source)
+
+* Max disks per instance: *12* (`MAX_DISKS_PER_INSTANCE` in
+  `nexus/db-queries/src/db/queries/disk.rs`). RFD 595's figure of 8 is out
+  of date.
+* Max vCPU per instance: *254* (`MAX_VCPU_PER_INSTANCE`,
+  `nexus/src/app/mod.rs`). The 64 in older release notes is out of date.
+* Memory per instance: *1 GiB to 1.5 TiB*. The source comment says the cap
+  keeps sizes "in ranges that we've tested", not to prevent overallocation.
+* Disk size: *1 GiB to 1023 GiB*.
+* Max NICs per instance: *8* (`nexus/db-model/src/network_interface.rs`).
+* Max external IPs per instance: *32*, of which at most 2 ephemeral.
+
+=== Changes that require a stopped instance (Omicron source)
+
+* Changing CPU or memory: "instance must be stopped to change CPU or memory"
+  (`nexus/db-queries/src/db/datastore/instance.rs`).
+* Setting the boot disk: "instance must be stopped to set boot disk".
+* Attaching disks: allowed only in `Creating` or `NoVmm` (stopped) states;
+  source comment: "We currently only permit attaching disks to stopped
+  instances" (`nexus/db-queries/src/db/datastore/disk.rs`).
+* Attaching or updating network interfaces: instance must be stopped
+  (`nexus/db-queries/src/db/queries/network_interface.rs`,
+  `datastore/network_interface.rs`).
+
+=== EC2 VM export constraints (AWS VM Import/Export)
+
+Source: https://docs.aws.amazon.com/vm-import/latest/userguide/limits-image-export.html
+
+* Output formats: VHD, stream-optimized VMDK, or raw. Raw avoids a
+  `qemu-img` conversion step for Oxide.
+* Destination: an S3 bucket in the same account; SSE-KMS encrypted buckets
+  are not supported.
+* Cannot export:
+** images containing AWS-provided third-party software (e.g. Windows, SQL
+   Server) or created from an AWS Marketplace image;
+** images with encrypted EBS snapshots in the block device mapping;
+** AMIs shared from another account.
+* The instance's base AMI must still exist.
+* Only EBS volumes in the launch-time block device mapping are exported;
+  volumes attached after launch are not.
+* Volumes larger than 1 TiB are not supported (Oxide's per-disk max is
+  1023 GiB, so the two limits nearly coincide).
+* Boot: GRUB2 enabled for BIOS or UEFI, not both.
+* One export task per AMI at a time; 5 concurrent conversion tasks per
+  region by default (raisable to 20).
+
+Implication for precip: Windows instances, Marketplace-derived instances and
+anything on encrypted EBS (common, often by default) cannot use VM export.
+Those need another path (rebuild from source images, or block-level copy
+from a snapshot into a raw image), and the report should flag them
+separately.
