@@ -1,0 +1,24 @@
+= Design documents
+
+These are design documents for this repository, written in the style of
+Oxide's https://rfd.shared.oxide.computer/rfd/0001[Requests for Discussion].
+They are numbered in this repository's own series and are not Oxide RFDs.
+
+[cols="1,3,1"]
+|===
+|Number |Title |State
+
+|link:0001/README.adoc[0001]
+|precip: AWS-to-Oxide scanner and rack sizing
+|prediscussion
+
+|link:0002/README.adoc[0002]
+|patina: a local Oxide API emulator
+|prediscussion
+|===
+
+States follow RFD 1: `prediscussion`, `ideation`, `discussion`,
+`published`, `committed`, `abandoned`.
+
+Each directory has a `notes.adoc` with collected facts and sources. The notes
+are working material, not part of the design document.

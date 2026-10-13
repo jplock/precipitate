@@ -1,0 +1,97 @@
+= 0002 working notes: facts and sources
+
+Collected facts for writing RFD 0002. Not part of the design document.
+Verify anything marked (unverified) before relying on it.
+
+== Motivation
+
+* RFD 4 (User Facing API): "We could make a playground for the Oxide API
+  where people can perform API calls without modifying actual
+  infrastructure. This would make the life of upstream consumers of our API a
+  lot easier." Cites Stripe test mode. Also asks that API behavior be defined
+  for upstream consumers (Kubernetes, Terraform).
+  Source: https://rfd.shared.oxide.computer/rfd/0004
+* Comparable tools for AWS: LocalStack, Floci (MIT, single container,
+  port 4566, Testcontainers modules). Source: https://floci.io/floci/
+
+== What exists at Oxide today
+
+* Omicron simulated mode (`cargo xtask omicron-dev run-all`): real Nexus
+  logic, CockroachDB, ClickHouse, simulated sled agent; external API on
+  127.0.0.1:12220. Heavy Rust build.
+  Source: Omicron `docs/how-to-run-simulated.adoc`
+* Simulated sled agent `SimMode`: `Auto` (timer completes transitions "a few
+  seconds" later) and `Explicit` (tests poke via `/vmms/{id}/poke`,
+  `poke-single-step` on the internal API). Dev environment uses Auto; Nexus
+  tests use Explicit.
+  Source: Omicron `sled-agent/src/sim/config.rs`, `collection.rs`,
+  `nexus/test-utils/src/nexus_test.rs`
+* Simulator fault knobs (Rust-only): `set_instance_ensure_state_error`,
+  `set_local_storage_error_count` (next N ops return 503),
+  `set_region_creation_error`, `set_region_deletion_error`,
+  `set_creating_a_running_snapshot_should_fail`, `sim-migration-source`.
+  Source: Omicron `sled-agent/src/sim/sled_agent.rs`, `storage.rs`
+* Steno: `inject_error`, `inject_error_undo`, `inject_repeat`; used by
+  Nexus saga unwind tests (`nexus/src/app/sagas/test_helpers.rs`).
+* oxide.rs `mock-server` crate: a Dropshot server using `oxide::types`,
+  one endpoint (update repository upload). Precedent for this approach.
+  Also `sdk-httpmock` for per-test request mocking.
+  Source: https://github.com/oxidecomputer/oxide.rs
+
+== API definition and versioning
+
+* `nexus-external-api` defines the external API as a Dropshot trait
+  (`NexusExternalApi`, ~537 endpoints); depends on Omicron workspace crates
+  and `omicron-workspace-hack`, so not practical to depend on externally.
+* Published spec: Omicron `openapi/nexus/nexus-latest.json`; current version
+  `2026091500.0.0`; older versions kept as `.gitstub` files (RFD 634).
+* The SDK sends an `api-version` header on every request.
+* RFD 479: API traits; `stub_api_description` generates OpenAPI without an
+  implementation; names "an in-memory fake for tests" as a reason for traits.
+* RFD 619: managing types across versions; RFD 532: versioning internal APIs.
+* Sources: https://rfd.shared.oxide.computer/rfd/0479,
+  https://rfd.shared.oxide.computer/rfd/0619,
+  https://rfd.shared.oxide.computer/rfd/0634
+
+== Sagas vs. reconcilers (RFD 704)
+
+* Guidance: "New work should at the very least carefully consider using
+  background tasks over sagas. When in doubt, prefer the background task."
+* Background task pattern: fetch intended state, fetch current state, take
+  one next step; rely on being activated again.
+* Benefits: responds to changing conditions; decision logic can be a pure
+  function tested with property-based tests; no undo-action invariants.
+* Failure classes worth emulating: indeterminate failures must be retried;
+  permanent failures that look transient must not be.
+* Source: https://rfd.shared.oxide.computer/rfd/0704; see also RFD 373
+  (reliable persistent workflows), RFD 419 (saga correctness)
+
+== Behavior to enforce
+
+* HTTP status codes: 401 bad/missing credentials; 403 authenticated but not
+  authorized and existence may be revealed; 404 when existence must not be
+  revealed (e.g. a project). Source: Omicron `docs/http-status-codes.adoc`
+* Firewall: default rules on VPC create (SSH, ICMP, intra-VPC inbound);
+  priority 0-65535; deny wins ties; whole-set updates. Sources: RFD 21,
+  https://docs.oxide.computer/guides/configuring-guest-networking
+* Disks: attach and detach only while stopped; no resize (RFD 595).
+* Silos: siloed vs. non-siloed resources (RFD 297).
+* Hardware inventory: `Baseboard {part, revision, serial}` under
+  `/v1/system/hardware/...`.
+
+== Implementation guidance
+
+* Async: RFD 609 (Futurelock), RFD 397 and RFD 400 (cancel safety). Avoid
+  awaiting in a `tokio::select!` branch while another branch holds a `&mut`
+  future; prefer spawning tasks.
+* Webhooks (stretch): RFD 538, signed delivery, retries, liveness probes.
+* Conventions: rustfmt `max_width = 80`, `use_small_heuristics = "max"`;
+  pinned toolchain; workspace clippy lints; `thiserror` by default; `camino`
+  paths; `cargo-nextest`. Source: Omicron `rustfmt.toml`, `clippy.toml`,
+  `Cargo.toml`, `docs/error-types-and-logging.adoc`
+
+== Open items to verify
+
+* How Nexus responds to an unsupported `api-version`.
+* Whether `oxide::types` covers every request body patina needs.
+* Exact error codes Nexus returns for limit violations (e.g. too many disks).

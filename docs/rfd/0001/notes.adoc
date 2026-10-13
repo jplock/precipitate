@@ -1,0 +1,88 @@
+= 0001 working notes: facts and sources
+
+Collected facts for writing RFD 0001. Not part of the design document.
+Verify anything marked (unverified) before relying on it.
+
+== Oxide hardware and limits
+
+* Rack: up to 32 Gen 1 sleds or up to 24 Gen 2 sleds.
+  Source: https://oxide.computer/product/specifications
+* Gen 1 sled: AMD EPYC 7713P (64 cores), 512 GiB or 1 TiB DRAM.
+* Gen 2 sled: one AMD EPYC 9005 (up to 192 cores), 768 GiB, 1152 GiB or
+  1.5 TiB DDR5, ten NVMe bays, 2 x 100 GbE.
+* Per rack, guest resources: up to 7,875 vCPU, 30.6 TiB memory, 1.7 PiB NVMe
+  block storage. Up to 91% of sled DRAM provisionable to guests.
+* Per-instance vCPU cap: 64 in older release notes vs. 254 in the current
+  console. Release-dependent.
+  Source: https://docs.oxide.computer/release-notes/system
+* Per-instance memory: up to 1.5 TiB on sleds with 2 TiB DRAM.
+* Disks per instance: 12 in current docs vs. 8 in RFD 595.
+* Max disk size 1023 GiB; disks are thick-provisioned.
+* Disks cannot be resized after creation: no resize endpoint in
+  `nexus-latest.json` (2026091500.0.0); also RFD 595.
+* Disk attach and detach require the instance to be stopped (RFD 595).
+* Disk types: `distributed` (Crucible) and `local` (blank only).
+  Source: `DiskBackend` schema in Omicron `openapi/nexus/nexus-latest.json`
+* Crucible keeps three copies on separate sleds (secondary source: Series D
+  press coverage; treat as a parameter).
+
+== Images and migration path
+
+* Oxide imports RAW images only; convert with
+  `qemu-img convert -f vmdk|qcow2 -O raw`.
+* Guests need UEFI boot, cloud-init with a NoCloud config drive, virtio
+  drivers.
+* `oxide disk import` uploads in chunks via bulk-write endpoints; URL import
+  was removed in release 5.
+  Sources: https://docs.oxide.computer/guides/creating-and-sharing-images,
+  https://docs.oxide.computer/cli/disk/import
+* No Oxide-published migration tooling or guide was found.
+
+== Capacity principles (RFD 70)
+
+* "Do not over-provision or allow for over-provisioning."
+* Terms: in-use, provisioned, reserved, capacity, utilization, threshold.
+* Always tell the user which utilization formula was used.
+* Default threshold: 75% of capacity.
+* Show remaining capacity as "how many instances of what size remain".
+* Source: https://rfd.shared.oxide.computer/rfd/0070 (state: discussion)
+
+== Units (RFD 203)
+
+* Memory and storage: bytes with base-2 prefixes (KiB, MiB, GiB, TiB, PiB).
+* Network throughput: bits per second with base-10 prefixes (Kbit/s).
+* Vendor base-10 capacity: show both, e.g. "3.2 TB (2.9 TiB)".
+* Source: https://rfd.shared.oxide.computer/rfd/0203
+
+== Networking (RFD 21 and current docs)
+
+* Firewall rules are stateful; priority 0-65535, lowest evaluated first;
+  deny wins ties at equal priority; allow and deny actions.
+* Targets and filters: `vpc`, `subnet`, `instance`, `ip`, `ip_net`
+  (`VpcFirewallRuleTarget` in `nexus-latest.json`). No tags; no equivalent of
+  one security group referencing another.
+* New VPCs get default inbound rules: SSH (TCP 22), ICMP, and intra-VPC
+  traffic. Implicit rules: allow all outbound, deny all inbound.
+* Rule updates go through `vpc_firewall_rules_update` (whole set).
+* Sources: https://rfd.shared.oxide.computer/rfd/0021,
+  https://docs.oxide.computer/guides/configuring-guest-networking
+* AWS contrast: security groups are allow-only, stateful, attached per ENI,
+  unioned across groups; NACLs are stateless with deny.
+
+== Tenancy (RFD 297)
+
+* Siloed resources (projects, instances, disks) are fully isolated per silo.
+* Non-siloed resources (racks, sleds, global images) look the same in every
+  silo.
+* Source: https://rfd.shared.oxide.computer/rfd/0297
+
+== Comparable tools
+
+* AWS Migration Evaluator, Azure Migrate, RVTools-driven sizing: ingest
+  inventory, right-size, produce a target bill of materials.
+
+== Open items to verify
+
+* Current max disks per instance in the latest release.
+* Whether `instance_update` (ncpus, memory) requires a stopped instance.
+* EC2 VM export constraints (which instance types and AMIs can be exported).

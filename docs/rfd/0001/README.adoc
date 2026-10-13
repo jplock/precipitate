@@ -1,0 +1,133 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: prediscussion
+:discussion: https://github.com/jplock/precipitate/issues/1
+:revremark: State: {state} | {discussion}
+:authors: Justin Plock <justin@plock.net>
+
+= 0001 precip: AWS-to-Oxide scanner and rack sizing
+{authors}
+
+// SCAFFOLD: the NOTE blocks below are prompts. Replace each one with your own
+// prose and delete it. See notes.adoc for collected facts and sources.
+
+== Background
+
+[NOTE]
+====
+* What question does a prospect ask before buying a rack, and who asks it?
+* How is it answered today, and what goes wrong (spreadsheets, guesswork,
+  surprises after purchase)?
+* Why is a fixed-capacity purchase different from cloud sizing?
+* What did you see firsthand (AWS, RTX) that makes this real?
+====
+
+== Goals and non-goals
+
+[NOTE]
+====
+* Goals: what must a user be able to answer after one session?
+* Non-goals: what will precip deliberately not do (live migration, cost
+  modeling, non-AWS sources in v1, ...)? Say why for each.
+====
+
+== Determinations
+
+[NOTE]
+====
+State each decision in one or two sentences, then justify it in the Design or
+Alternatives sections. Candidates:
+
+* Scanning is read-only and offline-capable (portable inventory file).
+* No overprovisioning by default.
+* Limits live in versioned profiles, not code.
+* Units follow RFD 203.
+* Generated Terraform owns the complete firewall rule set.
+====
+
+== Design
+
+=== Scanning and the inventory file
+
+[NOTE]
+====
+* What is collected, from which APIs, with what IAM permissions?
+* Why separate `scan` from `tui`? Who runs each?
+* What goes in the inventory file, and what is deliberately left out
+  (secrets, tags, PII)?
+====
+
+=== Sizing model
+
+[NOTE]
+====
+* Walk through the arithmetic: per-instance fit, then sled packing, then
+  rack count. Which constraints bind first?
+* How are headroom (N+1), growth and right-sizing applied, and in what order?
+* How is storage sized given replication and thick provisioning?
+* Which utilization formula does each number use?
+====
+
+=== Fit checks and blockers
+
+[NOTE]
+====
+* What makes a workload clean-fit, needs-remediation or blocked?
+* How are managed-service dependencies reported?
+====
+
+=== Mapping AWS resources to Oxide
+
+[NOTE]
+====
+* Accounts and organizations to silos and projects: what is the default and
+  why?
+* Security groups to firewall rules: where is the translation lossy, and how
+  is that surfaced to the user?
+* Disks: how is growth headroom chosen when disks cannot be resized later?
+====
+
+=== Outputs
+
+[NOTE]
+====
+* Report, JSON, Terraform, runbook: who consumes each and what must each
+  guarantee?
+* How is the Terraform validated (patina in CI)?
+====
+
+== Alternatives considered
+
+[NOTE]
+====
+* Overcommit ratio as a sizing input (and why it was rejected).
+* A web UI instead of a TUI.
+* Live AWS API access only, with no inventory file.
+* Hard-coded limits instead of versioned profiles.
+====
+
+== Open questions
+
+[NOTE]
+====
+* Which limits are uncertain or release-dependent (vCPU cap, disks per
+  instance)?
+* What would you want to ask Oxide's SEs about how they size today?
+====
+
+== Security considerations
+
+[NOTE]
+====
+* Scope of the IAM policy; what the inventory file reveals about an estate.
+* Risk of generated firewall rules being more permissive than the source.
+====
+
+== External references
+
+[NOTE]
+====
+List the RFDs, docs and source files you relied on (see notes.adoc).
+====
