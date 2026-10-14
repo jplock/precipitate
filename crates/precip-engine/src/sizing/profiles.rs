@@ -5,16 +5,16 @@ use precip_types::Profile;
 use precip_types::profile::ProfileError;
 
 const GEN1_1024: &str = include_str!("../../profiles/gen1-1024.toml");
+const GEN2_1152: &str = include_str!("../../profiles/gen2-1152.toml");
 
-/// Only profiles whose every figure is on docs.oxide.computer or in
-/// Omicron on GitHub ship here; the file says where each comes from.
-/// `profiles/examples/` has others to point `--profile` at once their
-/// figures are confirmed.
-pub const NAMES: &[&str] = &["gen1-1024"];
+/// One profile per sled generation Oxide sells, current one first. Each
+/// file says where every figure comes from.
+pub const NAMES: &[&str] = &["gen2-1152", "gen1-1024"];
 
 pub fn builtin(name: &str) -> Option<Result<Profile, ProfileError>> {
     let text = match name {
         "gen1-1024" => GEN1_1024,
+        "gen2-1152" => GEN2_1152,
         _ => return None,
     };
     Some(Profile::from_toml(text))
@@ -23,14 +23,6 @@ pub fn builtin(name: &str) -> Option<Result<Profile, ProfileError>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_example_profile_parses() {
-        Profile::from_toml(include_str!(
-            "../../profiles/examples/gen2-1152.toml"
-        ))
-        .expect("parses");
-    }
 
     #[test]
     fn every_builtin_profile_parses() {
