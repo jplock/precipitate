@@ -161,8 +161,9 @@ pub struct Schedule {
     /// Pairs that could not be placed, with why (a dependency cycle, a
     /// dependency in a later wave, or nothing valid within two years).
     pub unplaced: Vec<((String, String), String)>,
-    /// Confirmed dates that break the plan: starting before an earlier
-    /// wave ends, or before a dependency. Reported, never moved.
+    /// Confirmed dates that break the plan: over a capacity limit, on a
+    /// day the rules exclude, inside a freeze, before an earlier wave ends,
+    /// or before a dependency. Reported, never moved.
     pub conflicts: Vec<((String, String), String)>,
 }
 
@@ -204,6 +205,98 @@ impl Capacity<'_> {
             let Ok(next) = d.tomorrow() else { break };
             d = next;
         }
+    }
+}
+
+impl Capacity<'_> {
+    /// Why `weight` more on day `d` breaks a limit, if it does.
+    fn over_limit(&self, d: Date, weight: u32) -> Option<String> {
+        let used = |n: Option<&u32>| n.copied().unwrap_or(0);
+        let r = self.rules;
+        let day = used(self.per_day.get(&d));
+        if day + weight > r.per_day {
+            return Some(format!(
+                "{d} already has {day} agreed; the limit is {} per day",
+                r.per_day
+            ));
+        }
+        let week = used(self.per_week.get(&week_key(d)));
+        if week + weight > r.per_week {
+            return Some(format!(
+                "the week of {d} already has {week} agreed; the limit is {} per week",
+                r.per_week
+            ));
+        }
+        let month = used(self.per_month.get(&(d.year(), d.month())));
+        if month + weight > r.per_month {
+            return Some(format!(
+                "{} already has {month} agreed; the limit is {} per month",
+                d.strftime("%B %Y"),
+                r.per_month
+            ));
+        }
+        None
+    }
+}
+
+/// Why an agreed date for `pair` starting on `start` breaks the rules,
+/// given the capacity other agreed dates already hold: a weekday the
+/// rules exclude, a freeze, or a limit. `None` when it is allowed.
+fn agreed_date_problem(
+    start: Date,
+    pair: &PairInput,
+    rules: &GlobalRules,
+    blackouts: &[Blackout],
+    cap: &Capacity<'_>,
+) -> Option<String> {
+    let mut d = start;
+    let end = pair.span_end(start);
+    while d <= end {
+        if !weekday_allowed(d, pair, rules) {
+            return Some(format!(
+                "{d} is a {}, which the rules exclude",
+                d.strftime("%A")
+            ));
+        }
+        if let Some(name) = blacked_out(d, pair, blackouts) {
+            return Some(format!("{d} is inside the {name} freeze"));
+        }
+        if let Some(why) = cap.over_limit(d, pair.weight.max(1)) {
+            return Some(why);
+        }
+        let Ok(next) = d.tomorrow() else { break };
+        d = next;
+    }
+    None
+}
+
+/// Check a date before it is agreed: it must follow every rule given the
+/// dates already agreed for the other pairs. Returns the reason when not.
+pub fn check_agreed_date(
+    pair: &PairInput,
+    start: Date,
+    pairs: &[PairInput],
+    rules: &GlobalRules,
+    blackouts: &[Blackout],
+) -> Result<(), String> {
+    let mut cap = Capacity {
+        rules,
+        per_day: HashMap::new(),
+        per_week: HashMap::new(),
+        per_month: HashMap::new(),
+    };
+    for q in pairs.iter().filter(|q| {
+        q.status == Status::Confirmed
+            && (q.workload != pair.workload
+                || q.environment != pair.environment)
+    }) {
+        if let Some(d) = q.locked {
+            cap.take_span(q, d);
+        }
+    }
+    match agreed_date_problem(start, pair, rules, blackouts, &cap) {
+        Some(why) => Err(why),
+        None => Ok(()),
     }
 }
 
@@ -361,9 +454,25 @@ pub fn compute(
     let limit = today.checked_add(jiff::Span::new().years(2)).unwrap_or(today);
     let cal = Calendar { rules, blackouts, limit };
 
-    // Confirmed dates first; they consume capacity and never move.
-    for p in effective.iter().filter(|p| p.status == Status::Confirmed) {
+    // Confirmed dates first; they consume capacity and never move. One
+    // that breaks a rule, because the rules changed after it was agreed,
+    // is kept and reported.
+    let mut locks: Vec<&PairInput> = effective
+        .iter()
+        .filter(|p| p.status == Status::Confirmed && p.locked.is_some())
+        .collect();
+    locks.sort_by(|a, b| {
+        (a.locked, &a.workload, &a.environment).cmp(&(
+            b.locked,
+            &b.workload,
+            &b.environment,
+        ))
+    });
+    for p in locks {
         let Some(d) = p.locked else { continue };
+        if let Some(why) = agreed_date_problem(d, p, rules, blackouts, &cap) {
+            out.conflicts.push((key(p), why));
+        }
         cap.take_span(p, d);
         settled.insert(key(p), p.span_end(d));
         out.slots.push(Slot {
@@ -939,5 +1048,68 @@ mod tests {
         );
         assert!(s.expired.is_empty(), "still inside its 12-14 span");
         assert!(s.slots[0].locked);
+    }
+
+    #[test]
+    fn agreed_dates_must_follow_the_rules() {
+        let mut a = pair("a", "dev");
+        a.status = Status::Confirmed;
+        a.locked = Some(date(2026, 10, 20));
+        let b = pair("b", "dev");
+        let rules = GlobalRules {
+            weekdays: vec![Weekday::Tuesday, Weekday::Wednesday],
+            ..GlobalRules::default()
+        };
+        let freeze = Blackout {
+            name: "close".into(),
+            start: date(2026, 10, 27),
+            end: date(2026, 10, 27),
+            pair: None,
+        };
+        let pairs = [a.clone(), b.clone()];
+        let check = |d| {
+            check_agreed_date(
+                &b,
+                d,
+                &pairs,
+                &rules,
+                std::slice::from_ref(&freeze),
+            )
+        };
+        assert!(
+            check(date(2026, 10, 20))
+                .unwrap_err()
+                .contains("limit is 1 per day")
+        );
+        assert!(check(date(2026, 10, 22)).unwrap_err().contains("Thursday"));
+        assert!(
+            check(date(2026, 10, 27)).unwrap_err().contains("close freeze")
+        );
+        assert!(check(date(2026, 10, 21)).is_ok());
+        // Re-agreeing a pair's own date does not count against itself.
+        assert!(
+            check_agreed_date(&a, date(2026, 10, 20), &pairs, &rules, &[])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn agreed_dates_that_break_a_later_rule_are_conflicts() {
+        let lock = |w: &str| {
+            let mut p = pair(w, "dev");
+            p.status = Status::Confirmed;
+            p.locked = Some(date(2026, 10, 20));
+            p
+        };
+        let s = compute(
+            &[lock("a"), lock("b")],
+            &GlobalRules::default(),
+            &[],
+            date(2026, 10, 14),
+        );
+        assert_eq!(s.slots.len(), 2, "both kept");
+        assert_eq!(s.conflicts.len(), 1);
+        assert_eq!(s.conflicts[0].0, ("b".to_string(), "dev".to_string()));
+        assert!(s.conflicts[0].1.contains("limit is 1 per day"));
     }
 }

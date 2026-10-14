@@ -1967,6 +1967,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_pairs_cannot_be_agreed_on_one_day_at_one_per_day() {
+        use jiff::civil::date;
+        use precip_engine::schedule::Status;
+        let (store, _) = grouped(fixture(
+            "s",
+            vec![
+                inst("i-1", &[("app", "shop-dev")]),
+                inst("i-2", &[("app", "blog-dev")]),
+            ],
+            vec![],
+        ))
+        .await;
+        let today = date(2026, 10, 14);
+        let day = Some(date(2026, 10, 20));
+        store
+            .set_pair_status("shop", "dev", Status::Confirmed, day, today, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.set_pair_status("blog", "dev", Status::Confirmed, day, today, None).await,
+            Err(DbError::Invalid(msg)) if msg.contains("limit is 1 per day")
+        ));
+        store
+            .set_pair_status(
+                "blog",
+                "dev",
+                Status::Confirmed,
+                Some(date(2026, 10, 21)),
+                today,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn senseless_status_changes_are_refused() {
         use jiff::civil::date;
         use precip_engine::schedule::Status;
