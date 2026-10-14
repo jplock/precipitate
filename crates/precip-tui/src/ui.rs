@@ -1257,6 +1257,7 @@ fn draw_hints(app: &App, frame: &mut Frame, area: Rect) {
         spans.extend(key("g/G", "growth"));
         spans.extend(key("t", "threshold"));
         spans.extend(key("n", "N+"));
+        spans.extend(key("p", "profile"));
         spans.extend(key("e", "export"));
     }
     spans.extend(key("↑ ↓", "select"));

@@ -4,13 +4,18 @@
 use precip_types::Profile;
 use precip_types::profile::ProfileError;
 
+const GEN2_768: &str = include_str!("../../profiles/gen2-768.toml");
 const GEN2_1152: &str = include_str!("../../profiles/gen2-1152.toml");
+const GEN2_1536: &str = include_str!("../../profiles/gen2-1536.toml");
 
-pub const NAMES: &[&str] = &["gen2-1152"];
+/// Gen 2 sleds by DRAM option, smallest first.
+pub const NAMES: &[&str] = &["gen2-768", "gen2-1152", "gen2-1536"];
 
 pub fn builtin(name: &str) -> Option<Result<Profile, ProfileError>> {
     let text = match name {
+        "gen2-768" => GEN2_768,
         "gen2-1152" => GEN2_1152,
+        "gen2-1536" => GEN2_1536,
         _ => return None,
     };
     Some(Profile::from_toml(text))

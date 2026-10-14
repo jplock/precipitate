@@ -71,6 +71,14 @@ struct ScanArgs {
 }
 
 impl ScanArgs {
+    /// No selection flags given, only (perhaps) a credentials profile.
+    fn is_default(&self) -> bool {
+        self.member_roles.is_empty()
+            && self.accounts.is_empty()
+            && self.exclude_accounts.is_empty()
+            && !self.single_account
+    }
+
     fn options(&self) -> precip_aws::Options {
         let defaults = precip_aws::Options::default();
         precip_aws::Options {
@@ -138,8 +146,9 @@ enum Command {
     /// Size the rehost and relocate workloads of the latest scan.
     Size {
         /// Built-in profile name, or a path to a profile TOML file.
-        #[arg(long, default_value = "gen2-1152")]
-        profile: String,
+        /// Defaults to the workspace's choice, else gen2-1152.
+        #[arg(long)]
+        profile: Option<String>,
         /// Multiplier on demand.
         #[arg(long, default_value_t = 1.0)]
         growth: f64,
@@ -162,8 +171,13 @@ enum Command {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
-    /// List built-in Oxide profiles.
-    Profiles,
+    /// List built-in Oxide profiles, or choose the one the workspace
+    /// sizes with.
+    Profiles {
+        /// Make this the workspace's profile.
+        #[arg(long)]
+        use_profile: Option<String>,
+    },
     /// Write the workloads, the sizing or the schedule to a file, or to
     /// standard output. The format follows the file's extension (.csv,
     /// .json, .ics) or --format.
@@ -175,8 +189,8 @@ enum Command {
         #[arg(long)]
         format: Option<String>,
         /// Sizing profile, growth, threshold and headroom as for `size`.
-        #[arg(long, default_value = "gen2-1152")]
-        profile: String,
+        #[arg(long)]
+        profile: Option<String>,
         #[arg(long, default_value_t = 1.0)]
         growth: f64,
         #[arg(long, default_value_t = 0.75)]
@@ -362,6 +376,10 @@ async fn scan_and_store(
     store: precip_db::Store,
     progress: Option<precip_aws::ProgressSender>,
 ) -> anyhow::Result<precip_db::ScanStats> {
+    store
+        .save_scan_options(&serde_json::to_string(&opts)?)
+        .await
+        .context("saving the scan selection")?;
     let scan = precip_aws::scan_estate(&config, &opts, progress)
         .await
         .context("scanning estate")?;
@@ -881,7 +899,22 @@ async fn main() -> anyhow::Result<()> {
             let store = precip_db::Store::open(&db)
                 .await
                 .with_context(|| format!("opening {db}"))?;
-            scan_and_store(config, args.options(), store, None).await?;
+            // With no selection on the command line, repeat the last one.
+            let opts = if args.is_default() {
+                match store.saved_scan_options().await? {
+                    Some(json) => {
+                        tracing::info!(
+                            "using the workspace's saved scan selection"
+                        );
+                        serde_json::from_str(&json)
+                            .context("reading the saved scan selection")?
+                    }
+                    None => args.options(),
+                }
+            } else {
+                args.options()
+            };
+            scan_and_store(config, opts, store, None).await?;
         }
         None => {
             // Logs would corrupt the terminal; the activity feed replaces
@@ -1147,7 +1180,14 @@ async fn main() -> anyhow::Result<()> {
                 .into_iter()
                 .next()
                 .context("no scans in this workspace")?;
-            let profile = load_profile(&profile)?;
+            let name = match profile {
+                Some(p) => p,
+                None => store
+                    .sizing_profile()
+                    .await?
+                    .unwrap_or_else(|| "gen2-1152".into()),
+            };
+            let profile = load_profile(&name)?;
             let assumptions = precip_engine::sizing::Assumptions {
                 growth_factor: growth,
                 threshold,
@@ -1312,7 +1352,14 @@ async fn main() -> anyhow::Result<()> {
                     )?
                 }
                 (ExportWhat::Sizing, "csv" | "json") => {
-                    let profile = load_profile(&profile)?;
+                    let name = match profile {
+                        Some(p) => p,
+                        None => store
+                            .sizing_profile()
+                            .await?
+                            .unwrap_or_else(|| "gen2-1152".into()),
+                    };
+                    let profile = load_profile(&name)?;
                     let assumptions = precip_engine::sizing::Assumptions {
                         growth_factor: growth,
                         threshold,
@@ -1368,9 +1415,17 @@ async fn main() -> anyhow::Result<()> {
                 None => print_line(format_args!("{text}")),
             }
         }
-        Some(Command::Profiles) => {
-            for name in precip_engine::sizing::profiles::NAMES {
-                out!("{name}");
+        Some(Command::Profiles { use_profile }) => {
+            if let Some(name) = use_profile {
+                load_profile(&name)?;
+                let store =
+                    open_store(chosen_db, "profiles --use-profile").await?;
+                store.set_sizing_profile(&name).await?;
+                out!("sizing with {name}");
+            } else {
+                for name in precip_engine::sizing::profiles::NAMES {
+                    out!("{name}");
+                }
             }
         }
     }

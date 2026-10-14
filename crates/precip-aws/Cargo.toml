@@ -29,6 +29,7 @@ aws-sdk-resourcegroupstagging = { workspace = true, features = ["rt-tokio", "def
 aws-sdk-sts = { workspace = true, features = ["rt-tokio", "default-https-client"] }
 jiff = { workspace = true, features = ["std"] }
 precip-types.workspace = true
+serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["rt", "sync"] }

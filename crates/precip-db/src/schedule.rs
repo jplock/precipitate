@@ -439,6 +439,25 @@ impl Store {
         Ok(())
     }
 
+    /// The scan selection last used, as JSON of the scanner's options,
+    /// so a headless rescan repeats what was chosen in the interface.
+    pub async fn saved_scan_options(&self) -> Result<Option<String>, DbError> {
+        self.setting("scan.options").await
+    }
+
+    pub async fn save_scan_options(&self, json: &str) -> Result<(), DbError> {
+        self.set_setting("scan.options", json).await
+    }
+
+    /// The sizing profile the workspace sizes with.
+    pub async fn sizing_profile(&self) -> Result<Option<String>, DbError> {
+        self.setting("sizing.profile").await
+    }
+
+    pub async fn set_sizing_profile(&self, name: &str) -> Result<(), DbError> {
+        self.set_setting("sizing.profile", name).await
+    }
+
     pub async fn global_rules(&self) -> Result<GlobalRules, DbError> {
         let d = GlobalRules::default();
         let num = |v: Option<String>, default: u32| {

@@ -1,0 +1,27 @@
+# Oxide Gen 2 sled, 1536 GiB DRAM. Values from the Oxide product
+# specifications page, the operator resource-management guide and Omicron
+# source as of 2026-10-13. See docs/rfd/0001/notes.adoc for sources.
+name = "gen2-1536"
+oxide_release = "21"
+sleds_per_rack = 24
+
+[sled]
+cores = 192
+threads_per_core = 2
+dram_gib = 1536
+reservation_gib = 44
+reservoir_pct = 0.91
+nvme_bays = 10
+bay_size_tib = 2.9
+
+[instance]
+max_vcpu = 254
+max_memory_gib = 1536
+max_disks = 12
+max_disk_gib = 1023
+max_nics = 8
+
+[storage]
+# Unconfirmed. The operator guide gives 26.6 TiB usable per sled; this
+# factor must reproduce that from the raw NVMe capacity.
+replication_factor = 3

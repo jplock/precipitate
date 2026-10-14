@@ -898,6 +898,27 @@ impl App {
         Ok(())
     }
 
+    /// The next built-in profile, saved as the workspace's choice.
+    fn next_profile(&mut self) -> Result<(), TuiError> {
+        let Some(store) = &self.store else { return Ok(()) };
+        let Some(v) = &self.sizing else { return Ok(()) };
+        let names = precip_engine::sizing::profiles::NAMES;
+        let i = names.iter().position(|n| *n == v.profile.name).unwrap_or(0);
+        let next = names[(i + 1) % names.len()];
+        tokio::runtime::Handle::current()
+            .block_on(store.set_sizing_profile(next))?;
+        self.refresh()?;
+        if let Some(v) = &self.sizing {
+            self.note(format!(
+                "sizing with {}: {} GiB per sled, release {}",
+                v.profile.name,
+                v.profile.sled.dram_gib,
+                v.profile.oxide_release
+            ));
+        }
+        Ok(())
+    }
+
     fn adjust_sizing(
         &mut self,
         change: impl FnOnce(&mut precip_engine::sizing::Assumptions),
@@ -1056,10 +1077,13 @@ impl App {
         // Keep the assumptions the user has set across refreshes.
         let assumptions =
             self.sizing.as_ref().map(|v| v.assumptions).unwrap_or_default();
+        let profile_name = rt
+            .block_on(store.sizing_profile())?
+            .unwrap_or_else(|| "gen2-1152".into());
         self.sizing = match self.scans.first() {
             Some(s) => {
                 let profile =
-                    precip_engine::sizing::profiles::builtin("gen2-1152")
+                    precip_engine::sizing::profiles::builtin(&profile_name)
                         .and_then(Result::ok);
                 match profile {
                     Some(profile) => {
@@ -2651,6 +2675,9 @@ impl App {
                 }
                 KeyCode::Char('n') if self.tab == Tab::Sizing => {
                     self.adjust_sizing(|a| a.headroom = (a.headroom + 1) % 3);
+                }
+                KeyCode::Char('p') if self.tab == Tab::Sizing => {
+                    self.next_profile()?;
                 }
                 KeyCode::Tab | KeyCode::Right => {
                     self.tab = self.tab.next();
