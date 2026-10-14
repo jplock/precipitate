@@ -2,6 +2,7 @@
 //! list; the shipped IAM policy grants nothing else.
 
 pub mod accounts;
+pub mod arn;
 pub mod autoscaling;
 pub mod cloudformation;
 pub mod collect;
@@ -478,8 +479,9 @@ async fn scan_region(
     });
     let collectors = collect::all();
     let total = collectors.len();
-    let (second, first): (Vec<_>, Vec<_>) =
-        collectors.into_iter().partition(|c| c.needs_prior());
+    let (second, first): (Vec<_>, Vec<_>) = collectors
+        .into_iter()
+        .partition(|c| c.stage() == collect::Stage::Second);
 
     let mut failures: Vec<String> = Vec::new();
     let empty = std::sync::Arc::new(collect::Collected::default());
@@ -490,7 +492,10 @@ async fn scan_region(
     // each reading everything collected before it.
     for c in second {
         match c.collect(&ctx, &so_far).await {
-            Ok(got) => so_far.absorb(got),
+            Ok(got) => {
+                log_collected(c.name(), &got);
+                so_far.absorb(got);
+            }
             Err(e) => record_failure(&mut failures, c.name(), &e),
         }
     }
@@ -550,11 +555,25 @@ async fn run_stage(
     let mut out = collect::Collected::default();
     for (_, name, result) in results {
         match result {
-            Ok(got) => out.absorb(got),
+            Ok(got) => {
+                log_collected(name, &got);
+                out.absorb(got);
+            }
             Err(e) => record_failure(failures, name, &e),
         }
     }
     out
+}
+
+/// Log what one collector brought back.
+fn log_collected(api: &'static str, got: &collect::Collected) {
+    tracing::info!(
+        api,
+        resources = got.resources.len(),
+        relationships = got.relationships.len(),
+        tag_updates = got.tag_updates.len(),
+        "collected"
+    );
 }
 
 /// Note a failed collector for the region's report.
@@ -570,50 +589,40 @@ fn record_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collect::{
-        BoxFuture, CollectError, Collected, Collector, RegionContext,
-    };
+    use collect::{Collect, CollectError, Collected, RegionContext};
 
     struct Panics;
 
-    impl Collector for Panics {
-        fn name(&self) -> &'static str {
-            "test:Panics"
-        }
+    impl Collect for Panics {
+        const API: &'static str = "test:Panics";
 
-        fn collect<'a>(
-            &'a self,
-            _ctx: &'a RegionContext,
-            _prior: &'a Collected,
-        ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-            Box::pin(async move { panic!("collector bug") })
+        async fn collect(
+            &self,
+            _ctx: &RegionContext,
+            _prior: &Collected,
+        ) -> Result<Collected, CollectError> {
+            panic!("collector bug")
         }
     }
 
     struct Works;
 
-    impl Collector for Works {
-        fn name(&self) -> &'static str {
-            "test:Works"
-        }
+    impl Collect for Works {
+        const API: &'static str = "test:Works";
 
-        fn collect<'a>(
-            &'a self,
-            ctx: &'a RegionContext,
-            _prior: &'a Collected,
-        ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-            Box::pin(async move {
-                let mut out = Collected::default();
-                out.resources.push(Resource {
-                    arn: ctx.arn("ec2", "instance/i-1"),
-                    kind: precip_types::ResourceKind::Ec2Instance,
-                    account_id: ctx.identity.account_id.clone(),
-                    region: ctx.region.clone(),
-                    tags: Default::default(),
-                    body: serde_json::json!({}),
-                });
-                Ok(out)
-            })
+        async fn collect(
+            &self,
+            ctx: &RegionContext,
+            _prior: &Collected,
+        ) -> Result<Collected, CollectError> {
+            let mut out = Collected::default();
+            out.resources.push(ctx.resource(
+                ctx.arn(arn::ArnType::Instance, "i-1"),
+                precip_types::ResourceKind::Ec2Instance,
+                Default::default(),
+                serde_json::json!({}),
+            ));
+            Ok(out)
         }
     }
 

@@ -75,8 +75,10 @@ impl Explorer {
             }
         };
         let aggregator_region = indexes.indexes().iter().find_map(|i| {
-            let is_aggregator =
-                i.r#type().is_some_and(|t| t.as_str() == "AGGREGATOR");
+            let is_aggregator = i.r#type()
+                == Some(
+                    &aws_sdk_resourceexplorer2::types::IndexType::Aggregator,
+                );
             is_aggregator.then(|| i.region().map(str::to_string)).flatten()
         })?;
 

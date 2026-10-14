@@ -2587,6 +2587,7 @@ dependencies = [
  "aws-sdk-resourceexplorer2",
  "aws-sdk-resourcegroupstagging",
  "aws-sdk-sts",
+ "aws-smithy-async",
  "jiff",
  "precip-types",
  "serde",

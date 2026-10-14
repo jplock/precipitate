@@ -43,6 +43,9 @@ aws-sdk-rds = { version = "=1.154.0", default-features = false }
 aws-sdk-resourceexplorer2 = { version = "=1.119.0", default-features = false }
 aws-sdk-resourcegroupstagging = { version = "=1.114.0", default-features = false }
 aws-sdk-sts = { version = "=1.119.0", default-features = false }
+# The pagination stream type the SDK crates return; pinned to the version
+# they use so one helper can page through any of them.
+aws-smithy-async = { version = "=1.3.0", default-features = false }
 camino = { version = "=1.2.6", default-features = false }
 jiff = { version = "=0.2.38", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false }
