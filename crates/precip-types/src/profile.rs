@@ -22,8 +22,8 @@ pub struct Sled {
     /// Memory held back for the control plane before the reservoir
     /// percentage is applied.
     pub reservation_gib: u64,
-    /// Share of the remaining DRAM available to guests.
-    pub reservoir_pct: f64,
+    /// Share of the remaining DRAM available to guests, from 0 to 1.
+    pub reservoir_fraction: f64,
     pub nvme_bays: u32,
     pub bay_size_tib: f64,
     /// Usable guest memory per sled as published by Oxide. When set it is

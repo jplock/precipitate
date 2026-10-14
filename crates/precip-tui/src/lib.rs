@@ -16,6 +16,7 @@ use precip_db::{
     DispositionChange, MemberDetail, Overview, ScanStats, ScanSummary, Store,
     WorkloadSummary,
 };
+use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_types::scan::TargetStatus;
 use precip_types::{Disposition, ScanEvent};
 use ratatui::DefaultTerminal;
@@ -194,14 +195,14 @@ pub struct SizingView {
 impl SizingView {
     fn compute(&mut self) {
         let inputs: Vec<precip_engine::sizing::Instance> =
-            self.instances.iter().map(|i| i.to_instance()).collect();
-        self.result = precip_engine::sizing::size(
+            self.instances.iter().map(Into::into).collect();
+        self.result = precip_engine::sizing::Sizing::new(
             &self.profile,
             &inputs,
             &self.assumptions,
         );
         self.demand =
-            precip_engine::sizing::demand_by_workload(&self.instances);
+            precip_engine::sizing::WorkloadDemand::by_pair(&self.instances);
     }
 }
 
@@ -886,11 +887,14 @@ impl App {
     fn next_profile(&mut self) -> Result<(), TuiError> {
         let Some(store) = &self.store else { return Ok(()) };
         let Some(v) = &self.sizing else { return Ok(()) };
-        let names = precip_engine::sizing::profiles::NAMES;
-        let i = names.iter().position(|n| *n == v.profile.name).unwrap_or(0);
-        let next = names[(i + 1) % names.len()];
+        let next = v
+            .profile
+            .name
+            .parse::<BuiltinProfile>()
+            .unwrap_or(BuiltinProfile::DEFAULT)
+            .next();
         tokio::runtime::Handle::current()
-            .block_on(store.set_sizing_profile(next))?;
+            .block_on(store.set_sizing_profile(next.as_str()))?;
         self.refresh()?;
         if let Some(v) = &self.sizing {
             self.note(format!(
@@ -1063,38 +1067,32 @@ impl App {
             self.sizing.as_ref().map(|v| v.assumptions).unwrap_or_default();
         // The remembered profile, or the built-in when it is not one any
         // more.
-        let names = precip_engine::sizing::profiles::NAMES;
-        let profile_name = rt
+        let builtin = rt
             .block_on(store.sizing_profile())?
-            .filter(|n| names.contains(&n.as_str()))
-            .unwrap_or_else(|| names[0].to_string());
+            .and_then(|n| n.parse::<BuiltinProfile>().ok())
+            .unwrap_or(BuiltinProfile::DEFAULT);
         self.sizing = match self.scans.first() {
-            Some(s) => {
-                let profile =
-                    precip_engine::sizing::profiles::builtin(&profile_name)
-                        .and_then(Result::ok);
-                match profile {
-                    Some(profile) => {
-                        let instances = rt
-                            .block_on(store.sized_instances(&s.id, &profile))?;
-                        let result = precip_engine::sizing::size(
-                            &profile,
-                            &[],
-                            &assumptions,
-                        );
-                        let mut view = SizingView {
-                            profile,
-                            assumptions,
-                            instances,
-                            result,
-                            demand: Vec::new(),
-                        };
-                        view.compute();
-                        Some(view)
-                    }
-                    None => None,
+            Some(s) => match builtin.profile().ok() {
+                Some(profile) => {
+                    let instances =
+                        rt.block_on(store.sized_instances(&s.id, &profile))?;
+                    let result = precip_engine::sizing::Sizing::new(
+                        &profile,
+                        &[],
+                        &assumptions,
+                    );
+                    let mut view = SizingView {
+                        profile,
+                        assumptions,
+                        instances,
+                        result,
+                        demand: Vec::new(),
+                    };
+                    view.compute();
+                    Some(view)
                 }
-            }
+                None => None,
+            },
             None => None,
         };
         if self.workload_selected.selected().is_none()

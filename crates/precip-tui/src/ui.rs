@@ -1918,7 +1918,7 @@ fn draw_sizing(app: &App, frame: &mut Frame, area: Rect) {
             Line::from(vec![
                 tag,
                 Span::raw(format!("{} ({}) ", i.name, i.instance_type)),
-                Span::styled(i.findings.join("; "), dim()),
+                Span::styled(i.findings_text(), dim()),
             ])
         })
         .collect();

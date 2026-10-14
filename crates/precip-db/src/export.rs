@@ -90,7 +90,7 @@ pub fn sizing_csv(instances: &[SizedInstance]) -> String {
                     i.disposition.to_string(),
                     i.name.clone(),
                     i.instance_type.clone(),
-                    i.architecture.clone(),
+                    i.architecture.to_string(),
                     i.vcpus.to_string(),
                     i.memory_gib.to_string(),
                     i.disk_gib.to_string(),
