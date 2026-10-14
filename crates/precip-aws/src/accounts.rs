@@ -46,15 +46,13 @@ pub async fn caller_identity(
         .send()
         .await
         .map_err(|e| ScanError::CallerIdentity(Box::new(e)))?;
-    let arn = out.arn().unwrap_or_default().to_string();
+    let arn = out.arn().ok_or(ScanError::IdentityField("Arn"))?.to_string();
+    let account_id =
+        out.account().ok_or(ScanError::IdentityField("Account"))?.to_string();
     let partition = partition_of(&arn)
         .ok_or_else(|| ScanError::Partition(arn.clone()))?
         .to_string();
-    Ok(CallerIdentity {
-        account_id: out.account().unwrap_or_default().to_string(),
-        arn,
-        partition,
-    })
+    Ok(CallerIdentity { account_id, arn, partition })
 }
 
 /// Whether the caller is the management account of an Organization.
@@ -70,7 +68,13 @@ pub async fn is_management_account(
             .organization()
             .and_then(|o| o.master_account_id())
             .is_some_and(|id| id == account_id),
-        Err(_) => false,
+        Err(e) => {
+            tracing::debug!(
+                error = %crate::error_chain(&e),
+                "organizations:DescribeOrganization failed; scanning as a single account"
+            );
+            false
+        }
     }
 }
 
@@ -143,25 +147,42 @@ pub async fn list_accounts(
         let limit = limit.clone();
         tasks.spawn(async move {
             let _permit = limit.acquire_owned().await;
-            let parent =
-                orgs.list_parents().child_id(&id).send().await.ok().and_then(
-                    |p| {
-                        p.parents()
-                            .first()
-                            .and_then(|x| x.id().map(str::to_string))
-                    },
-                );
+            let parent = match orgs.list_parents().child_id(&id).send().await
+            {
+                Ok(p) => p
+                    .parents()
+                    .first()
+                    .and_then(|x| x.id().map(str::to_string)),
+                Err(e) => {
+                    tracing::warn!(
+                        account = %id,
+                        error = %crate::error_chain(&e),
+                        "organizations:ListParents failed; parent left blank"
+                    );
+                    None
+                }
+            };
             let parent_name = match &parent {
-                Some(pid) if pid.starts_with("ou-") => orgs
-                    .describe_organizational_unit()
-                    .organizational_unit_id(pid)
-                    .send()
-                    .await
-                    .ok()
-                    .and_then(|o| {
-                        o.organizational_unit()
-                            .and_then(|u| u.name().map(str::to_string))
-                    }),
+                Some(pid) if pid.starts_with("ou-") => {
+                    match orgs
+                        .describe_organizational_unit()
+                        .organizational_unit_id(pid)
+                        .send()
+                        .await
+                    {
+                        Ok(o) => o
+                            .organizational_unit()
+                            .and_then(|u| u.name().map(str::to_string)),
+                        Err(e) => {
+                            tracing::warn!(
+                                ou = %pid,
+                                error = %crate::error_chain(&e),
+                                "organizations:DescribeOrganizationalUnit failed; OU name left blank"
+                            );
+                            None
+                        }
+                    }
+                }
                 Some(_) => Some("root".to_string()),
                 None => None,
             };
@@ -169,9 +190,14 @@ pub async fn list_accounts(
         });
     }
     while let Some(joined) = tasks.join_next().await {
-        if let Ok((i, parent, parent_name)) = joined {
-            accounts[i].parent_id = parent;
-            accounts[i].parent_name = parent_name;
+        match joined {
+            Ok((i, parent, parent_name)) => {
+                accounts[i].parent_id = parent;
+                accounts[i].parent_name = parent_name;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "account parent lookup panicked");
+            }
         }
     }
     accounts.sort_by(|a, b| a.id.cmp(&b.id));

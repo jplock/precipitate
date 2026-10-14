@@ -83,21 +83,7 @@ impl Collector for StackResources {
             if stacks.is_empty() {
                 return Ok(out);
             }
-            // Resources whose ARN embeds a name rather than an id are
-            // matched by name against what was collected.
-            let by_name: std::collections::HashMap<(ResourceKind, &str), &str> =
-                prior
-                    .resources
-                    .iter()
-                    .filter_map(|r| {
-                        let key = match r.kind {
-                            ResourceKind::ElasticIp => "public_ip",
-                            _ => "name",
-                        };
-                        let name = r.body.get(key)?.as_str()?;
-                        Some(((r.kind, name), r.arn.as_str()))
-                    })
-                    .collect();
+            let by_name = arns_by_name(&prior.resources);
             let client = aws_sdk_cloudformation::Client::new(&ctx.config);
             for stack in stacks {
                 let mut pages = client
@@ -133,13 +119,39 @@ impl Collector for StackResources {
     }
 }
 
+/// Collected ARNs keyed by kind, managed service and name.
+type ByName<'a> = std::collections::HashMap<
+    (ResourceKind, Option<&'a str>, &'a str),
+    &'a str,
+>;
+
+/// Resources whose ARN embeds a name rather than an id are matched by name
+/// against what was collected. Managed services share one kind, so the
+/// service is part of the key: an ElastiCache cluster and an RDS instance
+/// with the same name stay apart.
+fn arns_by_name(resources: &[Resource]) -> ByName<'_> {
+    resources
+        .iter()
+        .filter_map(|r| {
+            let key = if r.kind == ResourceKind::ElasticIp {
+                "public_ip"
+            } else {
+                "name"
+            };
+            let name = r.body.get(key)?.as_str()?;
+            let service = r.body.get("service").and_then(|v| v.as_str());
+            Some(((r.kind, service, name), r.arn.as_str()))
+        })
+        .collect()
+}
+
 /// The ARN precip uses for a stack resource, from its CloudFormation type
 /// and physical id. Types precip does not collect return `None`.
 fn member_arn(
     ctx: &RegionContext,
     resource_type: &str,
     physical_id: &str,
-    by_name: &std::collections::HashMap<(ResourceKind, &str), &str>,
+    by_name: &ByName<'_>,
 ) -> Option<String> {
     let ec2 = |resource: String| Some(ctx.arn("ec2", &resource));
     match resource_type {
@@ -153,7 +165,7 @@ fn member_arn(
         // Physical id of an EIP is its address, matched below by name map
         // keyed on public_ip.
         "AWS::EC2::EIP" => by_name
-            .get(&(ResourceKind::ElasticIp, physical_id))
+            .get(&(ResourceKind::ElasticIp, None, physical_id))
             .map(|a| a.to_string()),
         "AWS::Lambda::Function" => {
             Some(ctx.arn("lambda", &format!("function:{physical_id}")))
@@ -180,11 +192,71 @@ fn member_arn(
         }
         // Physical id is a name; the ARN carries an opaque id.
         "AWS::AutoScaling::AutoScalingGroup" => by_name
-            .get(&(ResourceKind::AutoScalingGroup, physical_id))
+            .get(&(ResourceKind::AutoScalingGroup, None, physical_id))
             .map(|a| a.to_string()),
         "AWS::ElastiCache::CacheCluster" => by_name
-            .get(&(ResourceKind::ManagedService, physical_id))
+            .get(&(
+                ResourceKind::ManagedService,
+                Some("elasticache"),
+                physical_id,
+            ))
             .map(|a| a.to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn managed(service: &str, name: &str, arn: &str) -> Resource {
+        Resource {
+            arn: arn.into(),
+            kind: ResourceKind::ManagedService,
+            account_id: "123456789012".into(),
+            region: "us-east-1".into(),
+            tags: Default::default(),
+            body: serde_json::json!({ "service": service, "name": name }),
+        }
+    }
+
+    #[test]
+    fn cache_clusters_resolve_only_to_elasticache() {
+        let ctx = RegionContext {
+            config: aws_config::SdkConfig::builder().build(),
+            identity: crate::accounts::CallerIdentity {
+                account_id: "123456789012".into(),
+                arn: "arn:aws:iam::123456789012:user/x".into(),
+                partition: "aws".into(),
+            },
+            region: "us-east-1".into(),
+        };
+        let cache = "arn:aws:elasticache:us-east-1:123456789012:cluster:shared";
+        let rds = "arn:aws:rds:us-east-1:123456789012:db:shared";
+        let resources = vec![
+            managed("rds", "shared", rds),
+            managed("elasticache", "shared", cache),
+        ];
+        let by_name = arns_by_name(&resources);
+        assert_eq!(
+            member_arn(
+                &ctx,
+                "AWS::ElastiCache::CacheCluster",
+                "shared",
+                &by_name
+            ),
+            Some(cache.to_string())
+        );
+        let only_rds = vec![managed("rds", "shared", rds)];
+        let by_name = arns_by_name(&only_rds);
+        assert_eq!(
+            member_arn(
+                &ctx,
+                "AWS::ElastiCache::CacheCluster",
+                "shared",
+                &by_name
+            ),
+            None
+        );
     }
 }

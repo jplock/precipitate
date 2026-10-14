@@ -25,6 +25,8 @@ pub enum ScanError {
     Regions(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("listing organization accounts")]
     Organization(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("sts:GetCallerIdentity returned no {0}")]
+    IdentityField(&'static str),
     #[error("caller ARN has no partition: {0}")]
     Partition(String),
     #[error("scan task failed: {0}")]
@@ -360,12 +362,14 @@ async fn scan_account(
     let limit =
         std::sync::Arc::new(tokio::sync::Semaphore::new(REGION_CONCURRENCY));
     let mut tasks = tokio::task::JoinSet::new();
+    let mut task_regions = std::collections::HashMap::new();
     for region in regions {
         let config = config.clone();
         let identity = identity.clone();
         let limit = limit.clone();
         let progress = progress.clone();
-        tasks.spawn(async move {
+        let task_region = region.clone();
+        let handle = tasks.spawn(async move {
             let _permit = limit.acquire_owned().await;
             let outcome = scan_region(&config, identity.clone(), region).await;
             emit(
@@ -379,6 +383,7 @@ async fn scan_account(
             );
             outcome
         });
+        task_regions.insert(handle.id(), task_region);
     }
 
     let mut outcomes = Vec::new();
@@ -386,7 +391,27 @@ async fn scan_account(
         match joined {
             Ok(outcome) => outcomes.push(outcome),
             Err(e) => {
-                tracing::error!(error = %e, "region task panicked");
+                let region = task_regions.remove(&e.id()).unwrap_or_default();
+                tracing::error!(%region, error = %e, "region task panicked");
+                // The region is reported as failed rather than left out,
+                // so the scan does not read as complete.
+                let status =
+                    TargetStatus::Failed(format!("region scan panicked: {e}"));
+                emit(
+                    &progress,
+                    ScanEvent::RegionFinished {
+                        account_id: identity.account_id.clone(),
+                        region: region.clone(),
+                        status: status.clone(),
+                        resources: 0,
+                    },
+                );
+                outcomes.push(RegionOutcome {
+                    region,
+                    status,
+                    resources: Vec::new(),
+                    relationships: Vec::new(),
+                });
             }
         }
     }
@@ -460,12 +485,13 @@ async fn scan_region(
     let mut so_far = run_stage(first, &ctx, &empty, &mut failures).await;
 
     // Second-stage collectors may depend on each other (instance types
-    // come from launch templates), so they run one at a time in order.
+    // come from launch templates), so they run one at a time in order,
+    // each reading everything collected before it.
     for c in second {
-        let prior = std::sync::Arc::new(so_far);
-        let got = run_stage(vec![c], &ctx, &prior, &mut failures).await;
-        so_far = std::sync::Arc::try_unwrap(prior).unwrap_or_default();
-        so_far.absorb(got);
+        match c.collect(&ctx, &so_far).await {
+            Ok(got) => so_far.absorb(got),
+            Err(e) => record_failure(&mut failures, c.name(), &e),
+        }
     }
 
     let status = if failures.is_empty() {
@@ -492,23 +518,30 @@ async fn run_stage(
     failures: &mut Vec<String>,
 ) -> collect::Collected {
     let mut tasks = tokio::task::JoinSet::new();
+    let mut names = std::collections::HashMap::new();
     for (i, c) in collectors.into_iter().enumerate() {
         let ctx = ctx.clone();
         let prior = prior.clone();
         let span = tracing::Span::current();
-        tasks.spawn(
+        let name = c.name();
+        let handle = tasks.spawn(
             async move {
                 let result = c.collect(&ctx, &prior).await;
                 (i, c.name(), result)
             }
             .instrument(span),
         );
+        names.insert(handle.id(), name);
     }
     let mut results = Vec::new();
     while let Some(joined) = tasks.join_next().await {
         match joined {
             Ok(r) => results.push(r),
-            Err(e) => tracing::error!(error = %e, "collector task panicked"),
+            Err(e) => {
+                let name = names.get(&e.id()).copied().unwrap_or("collector");
+                tracing::error!(api = name, error = %e, "collector task panicked");
+                failures.push(format!("{name}: collector panicked: {e}"));
+            }
         }
     }
     results.sort_by_key(|(i, _, _)| *i);
@@ -517,15 +550,94 @@ async fn run_stage(
     for (_, name, result) in results {
         match result {
             Ok(got) => out.absorb(got),
-            Err(e) => {
-                tracing::warn!(api = name, error = %e.source, "collector failed");
-                failures.push(format!(
-                    "{}: {}",
-                    e.api,
-                    error_chain(&*e.source)
-                ));
-            }
+            Err(e) => record_failure(failures, name, &e),
         }
     }
     out
+}
+
+/// Note a failed collector for the region's report.
+fn record_failure(
+    failures: &mut Vec<String>,
+    name: &'static str,
+    e: &collect::CollectError,
+) {
+    tracing::warn!(api = name, error = %e.source, "collector failed");
+    failures.push(format!("{}: {}", e.api, error_chain(&*e.source)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use collect::{
+        BoxFuture, CollectError, Collected, Collector, RegionContext,
+    };
+
+    struct Panics;
+
+    impl Collector for Panics {
+        fn name(&self) -> &'static str {
+            "test:Panics"
+        }
+
+        fn collect<'a>(
+            &'a self,
+            _ctx: &'a RegionContext,
+            _prior: &'a Collected,
+        ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+            Box::pin(async move { panic!("collector bug") })
+        }
+    }
+
+    struct Works;
+
+    impl Collector for Works {
+        fn name(&self) -> &'static str {
+            "test:Works"
+        }
+
+        fn collect<'a>(
+            &'a self,
+            ctx: &'a RegionContext,
+            _prior: &'a Collected,
+        ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+            Box::pin(async move {
+                let mut out = Collected::default();
+                out.resources.push(Resource {
+                    arn: ctx.arn("ec2", "instance/i-1"),
+                    kind: precip_types::ResourceKind::Ec2Instance,
+                    account_id: ctx.identity.account_id.clone(),
+                    region: ctx.region.clone(),
+                    tags: Default::default(),
+                    body: serde_json::json!({}),
+                });
+                Ok(out)
+            })
+        }
+    }
+
+    #[test]
+    fn a_panicking_collector_is_recorded_as_a_failure() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let ctx = std::sync::Arc::new(RegionContext {
+            config: SdkConfig::builder().build(),
+            identity: accounts::CallerIdentity {
+                account_id: "123456789012".into(),
+                arn: "arn:aws:iam::123456789012:user/x".into(),
+                partition: "aws".into(),
+            },
+            region: "us-east-1".into(),
+        });
+        let prior = std::sync::Arc::new(Collected::default());
+        let mut failures = Vec::new();
+        let got = rt.block_on(run_stage(
+            vec![std::sync::Arc::new(Panics), std::sync::Arc::new(Works)],
+            &ctx,
+            &prior,
+            &mut failures,
+        ));
+        assert_eq!(got.resources.len(), 1);
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].starts_with("test:Panics: collector panicked"));
+    }
 }
