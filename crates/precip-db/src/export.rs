@@ -150,10 +150,10 @@ pub fn schedule_csv(schedule: &Schedule) -> String {
                     s.date.to_string(),
                     s.end.to_string(),
                     s.wave.to_string(),
-                    s.workload.clone(),
-                    s.environment.clone(),
-                    if s.locked { "agreed".into() } else { "proposed".into() },
-                    s.reason.clone(),
+                    s.pair.workload.to_string(),
+                    s.pair.environment.to_string(),
+                    s.state_label().to_string(),
+                    s.reason(),
                     s.alternatives
                         .iter()
                         .map(ToString::to_string)
@@ -183,28 +183,25 @@ pub fn schedule_ics(
     out.push_str(&format!("X-WR-CALNAME:{}\r\n", ics_text(calendar_name)));
     for s in &schedule.slots {
         let after_end = s.end.tomorrow().unwrap_or(s.end);
-        let state = if s.locked { "agreed" } else { "proposed" };
+        let state = if s.agreed { "agreed" } else { "proposed" };
         out.push_str("BEGIN:VEVENT\r\n");
         out.push_str(&format!(
             "UID:{}-{}@precip\r\n",
-            uid_part(&s.workload),
-            uid_part(&s.environment)
+            uid_part(s.pair.workload.as_str()),
+            uid_part(s.pair.environment.as_str())
         ));
         out.push_str(&format!("DTSTAMP:{stamp}\r\n"));
         out.push_str(&format!("DTSTART;VALUE=DATE:{}\r\n", day(s.date)));
         out.push_str(&format!("DTEND;VALUE=DATE:{}\r\n", day(after_end)));
         out.push_str(&format!(
             "SUMMARY:{}\r\n",
-            ics_text(&format!(
-                "Migrate {} / {} ({state})",
-                s.workload, s.environment
-            ))
+            ics_text(&format!("Migrate {} ({state})", s.pair))
         ));
         out.push_str(&format!(
             "DESCRIPTION:{}\r\n",
-            ics_text(&format!("Wave {}. {}.", s.wave, s.reason))
+            ics_text(&format!("Wave {}. {}.", s.wave, s.reason()))
         ));
-        out.push_str(if s.locked {
+        out.push_str(if s.agreed {
             "STATUS:CONFIRMED\r\n"
         } else {
             "STATUS:TENTATIVE\r\n"
@@ -261,14 +258,14 @@ mod tests {
     fn ics_has_one_all_day_event_per_slot() {
         let schedule = Schedule {
             slots: vec![Slot {
-                workload: "shop".into(),
-                environment: "prod".into(),
+                pair: precip_types::PairKey::new("shop", "prod"),
                 wave: 1,
                 date: date(2026, 11, 7),
                 end: date(2026, 11, 8),
                 weight: 1,
-                locked: true,
-                reason: "confirmed".into(),
+                agreed: true,
+                placement: precip_engine::schedule::Placement::Agreed,
+                reopened: None,
                 alternatives: Vec::new(),
             }],
             ..Default::default()

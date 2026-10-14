@@ -1,6 +1,9 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand};
+use precip_engine::schedule::gantt::Gantt;
+use precip_engine::schedule::{Weekdays, day_name};
+use precip_types::PairKey;
 
 /// `println!` that stops quietly when the reader has gone away, so
 /// `precip ... | head` ends like any other command instead of panicking.
@@ -221,7 +224,7 @@ enum ScheduleCommand {
         per_month: Option<u32>,
         /// "weekdays", "weekends", "any", or a comma list such as tue,thu.
         #[arg(long)]
-        weekdays: Option<String>,
+        weekdays: Option<Weekdays>,
         /// YYYY-MM-DD; "none" clears it.
         #[arg(long)]
         target_end: Option<String>,
@@ -264,8 +267,10 @@ enum ScheduleCommand {
     Rule {
         workload: String,
         environment: String,
+        /// "weekdays", "weekends", or a comma list such as tue,thu; "any"
+        /// or leaving it out follows the plan's days.
         #[arg(long)]
-        weekdays: Option<String>,
+        weekdays: Option<Weekdays>,
         #[arg(long)]
         earliest: Option<String>,
         #[arg(long, default_value_t = 0)]
@@ -538,7 +543,7 @@ async fn print_schedule(
         rules.per_day,
         rules.per_week,
         rules.per_month,
-        weekday_rule_label(&rules.weekdays),
+        rules.weekdays,
         rules
             .target_end
             .map(|d| format!("  target end {d}"))
@@ -560,32 +565,32 @@ async fn print_schedule(
     for s in &schedule.slots {
         let alts: Vec<String> =
             s.alternatives.iter().map(|d| d.to_string()).collect();
-        let days = (s.end - s.date).get_days() + 1;
+        let days = s.days();
         out!(
             "{:<5} {:<12} {:<4} {:<6} {:<28} {:<10} {:<10} {}  ({})",
             s.wave,
             s.date,
-            precip_db::weekday_name(s.date.weekday()),
+            day_name(s.date.weekday()),
             if s.weight > 1 {
                 format!("{days}x{}", s.weight)
             } else {
                 days.to_string()
             },
-            s.workload,
-            s.environment,
-            if s.locked { "confirmed" } else { "proposed" },
+            s.pair.workload,
+            s.pair.environment,
+            s.state_label(),
             alts.join(" or "),
-            s.reason
+            s.reason()
         );
     }
     for (wave, end) in &schedule.wave_ends {
         out!("wave {wave} ends {end}");
     }
-    for ((w, e), why) in &schedule.conflicts {
-        out!("CONFLICT {w} / {e}: {why}");
+    for (pair, why) in &schedule.conflicts {
+        out!("CONFLICT {pair}: {why}");
     }
-    for ((w, e), why) in &schedule.unplaced {
-        out!("UNPLACED {w} / {e}: {why}");
+    for (pair, why) in &schedule.unplaced {
+        out!("UNPLACED {pair}: {why}");
     }
     if let Some(end) = schedule.ends {
         out!("");
@@ -601,9 +606,9 @@ async fn print_schedule(
             }
         );
     }
-    for (w, e) in &schedule.expired {
+    for pair in &schedule.expired {
         out!(
-            "expired: {w} / {e} confirmed date passed without a migration; rescheduled"
+            "expired: {pair} confirmed date passed without a migration; rescheduled"
         );
     }
     Ok(())
@@ -634,7 +639,7 @@ async fn run_schedule(
                 rules.per_month = v;
             }
             if let Some(v) = weekdays {
-                rules.weekdays = precip_db::weekdays_from_spec(&v);
+                rules.weekdays = v;
             }
             if let Some(v) = target_end {
                 rules.target_end =
@@ -659,7 +664,9 @@ async fn run_schedule(
                 name,
                 start,
                 end: end.map(|e| parse_date(&e)).transpose()?.unwrap_or(start),
-                pair: workload.zip(environment),
+                pair: workload
+                    .zip(environment)
+                    .map(|(w, e)| PairKey::new(w, e)),
             };
             if remove {
                 store.remove_blackout(&b).await?;
@@ -679,7 +686,7 @@ async fn run_schedule(
                     b.end,
                     b.name,
                     b.pair
-                        .map(|(w, e)| format!("  (only {w} / {e})"))
+                        .map(|pair| format!("  (only {pair})"))
                         .unwrap_or_default()
                 );
             }
@@ -727,15 +734,13 @@ async fn run_schedule(
             earliest,
             priority,
         } => {
-            let days = weekdays
-                .map(|w| precip_db::weekdays_from_spec(&w))
-                .unwrap_or_default();
+            let days = weekdays.filter(|w| !w.is_any());
             let earliest = earliest.map(|e| parse_date(&e)).transpose()?;
             store
                 .set_pair_rule(
                     &workload,
                     &environment,
-                    &days,
+                    days.as_ref(),
                     earliest,
                     priority,
                 )
@@ -876,12 +881,8 @@ async fn run_schedule(
         ScheduleCommand::Gantt { width } => {
             let (_, schedule) =
                 store.compute_schedule(today(), "command").await?;
-            let gantt = precip_engine::schedule::gantt::build(
-                &schedule,
-                today(),
-                width,
-            );
-            for line in precip_engine::schedule::gantt::render(&gantt, 32) {
+            let gantt = Gantt::new(&schedule, today(), width);
+            for line in gantt.render(32) {
                 out!("{line}");
             }
         }
@@ -1537,16 +1538,5 @@ fn print_metrics(m: &precip_db::Metrics) {
                 _ => String::new(),
             }
         );
-    }
-}
-
-fn weekday_rule_label(days: &[jiff::civil::Weekday]) -> String {
-    match precip_db::weekday_preset(days) {
-        Some(preset) => preset.to_string(),
-        None => days
-            .iter()
-            .map(|d| precip_db::weekday_name(*d))
-            .collect::<Vec<_>>()
-            .join(","),
     }
 }

@@ -2,10 +2,10 @@
 //! feed, key hints.
 
 use crate::{
-    ALL_WEEKDAYS, App, DISPOSITIONS, Fields, PairRow, RuleRow, ScheduleView,
-    Screen, Tab, WEEKDAY_ROWS, disposition_help, logo, next_step,
-    weekday_rule_label,
+    App, DISPOSITIONS, Fields, PairRow, RuleRow, ScheduleView, Screen, Tab,
+    WEEKDAY_ROWS, disposition_help, logo, next_step,
 };
+use precip_engine::schedule::{WeekdayPreset, Weekdays, day_name};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Clear, Gauge, List, ListItem, Padding, Paragraph, Row,
@@ -92,7 +92,7 @@ fn draw_date_picker(app: &mut App, frame: &mut Frame) {
         .map(|(i, d)| {
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!("{d}  {}", precip_db::weekday_name(d.weekday())),
+                    format!("{d}  {}", day_name(d.weekday())),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -107,9 +107,9 @@ fn draw_date_picker(app: &mut App, frame: &mut Frame) {
         })
         .collect();
     let title = if p.replacing {
-        format!(" Re-confirm {} / {} ", p.workload, p.environment)
+        format!(" Re-confirm {} ", p.pair)
     } else {
-        format!(" Confirm {} / {} ", p.workload, p.environment)
+        format!(" Confirm {} ", p.pair)
     };
     frame.render_stateful_widget(
         List::new(items)
@@ -367,9 +367,7 @@ fn draw_rules_editor(app: &mut App, frame: &mut Frame) {
                 RuleRow::PerMonth => {
                     field("Per month", r.per_month.to_string())
                 }
-                RuleRow::Weekdays => {
-                    field("Days", weekday_rule_label(&r.weekdays))
-                }
+                RuleRow::Weekdays => field("Days", r.weekdays.to_string()),
                 RuleRow::TargetEnd => field(
                     "Done by",
                     typed(
@@ -391,7 +389,7 @@ fn draw_rules_editor(app: &mut App, frame: &mut Frame) {
                 RuleRow::Blackout(i) => {
                     let b = &ed.blackouts[i];
                     let who = match &b.pair {
-                        Some((w, e)) => format!("   only {w} / {e}"),
+                        Some(pair) => format!("   only {pair}"),
                         None => String::new(),
                     };
                     Line::from(vec![
@@ -486,10 +484,9 @@ fn draw_pair_editor(app: &mut App, frame: &mut Frame) {
                 PairRow::Wave => field("Wave", p.wave.to_string()),
                 PairRow::Weekdays => field(
                     "Days",
-                    if p.weekdays.is_empty() {
-                        "as the plan allows".into()
-                    } else {
-                        weekday_rule_label(&p.weekdays)
+                    match &p.weekdays {
+                        None => "as the plan allows".into(),
+                        Some(days) => days.to_string(),
                     },
                 ),
                 PairRow::Earliest => field(
@@ -503,19 +500,16 @@ fn draw_pair_editor(app: &mut App, frame: &mut Frame) {
                     ),
                 ),
                 PairRow::Duration => {
-                    field("Days in a row", p.duration_days.to_string())
+                    field("Days in a row", p.duration.to_string())
                 }
                 PairRow::Weight => {
                     field("Counts as", format!("{} migration(s)", p.weight))
                 }
                 PairRow::Priority => field("Priority", p.priority.to_string()),
-                PairRow::Dependency(i) => {
-                    let (w, e) = &p.depends_on[i];
-                    Line::from(vec![
-                        Span::raw("  "),
-                        value(format!("{w} / {e}")),
-                    ])
-                }
+                PairRow::Dependency(i) => Line::from(vec![
+                    Span::raw("  "),
+                    value(p.depends_on[i].to_string()),
+                ]),
                 PairRow::AddDependency => {
                     add_row("wait for another pair", &ed.input, editing)
                 }
@@ -554,11 +548,7 @@ fn draw_pair_editor(app: &mut App, frame: &mut Frame) {
         editor_hint(what, ed.input.is_some(), ed.confirming_delete);
     frame.render_stateful_widget(
         List::new(items)
-            .block(popup_block(
-                format!("{} / {}", p.workload, p.environment),
-                hint,
-                style,
-            ))
+            .block(popup_block(p.key.to_string(), hint, style))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
         popup,
         &mut ed.state,
@@ -653,7 +643,7 @@ fn draw_depends_picker(app: &mut App, frame: &mut Frame) {
     let items: Vec<ListItem> = p
         .candidates
         .iter()
-        .map(|(w, e)| ListItem::new(Line::from(format!("{w} / {e}"))))
+        .map(|pair| ListItem::new(Line::from(pair.to_string())))
         .collect();
     frame.render_stateful_widget(
         List::new(items)
@@ -695,64 +685,35 @@ fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
 /// The schedule as bars: agreed in green, proposed dimmed, today marked,
 /// months along the top, and how the projected end has moved below.
 fn draw_gantt(v: &ScheduleView, frame: &mut Frame, area: Rect) {
-    use precip_engine::schedule::gantt::{self, Cell};
+    use precip_engine::schedule::gantt::Gantt;
     let label_width: u16 = 30;
+    let width = usize::from(label_width);
     let inner = area.width.saturating_sub(label_width + 4);
-    let g = gantt::build(&v.schedule, v.today, usize::from(inner.max(1)));
-    let mut months = vec![' '; g.columns];
-    for (col, label) in &g.months {
-        for (i, c) in label.chars().enumerate() {
-            if let Some(cell) = months.get_mut(col + i) {
-                *cell = c;
-            }
-        }
-    }
-    let mut today_row = vec![' '; g.columns];
-    if let Some(col) = g.today {
-        today_row[col] = '▼';
-    }
+    let g = Gantt::new(&v.schedule, v.today, usize::from(inner.max(1)));
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
-                format!(
-                    "{:<label_width$}",
-                    format!("each cell is {}", gantt::unit(g.days_per_cell)),
-                    label_width = usize::from(label_width)
-                ),
+                format!("{:<width$}", format!("each cell is {}", g.unit)),
                 dim(),
             ),
             Span::raw(" "),
-            Span::styled(months.into_iter().collect::<String>(), dim()),
+            Span::styled(g.month_line(), dim()),
         ]),
         Line::from(vec![
-            Span::styled(
-                format!(
-                    "{:<label_width$}",
-                    "today",
-                    label_width = usize::from(label_width)
-                ),
-                dim(),
-            ),
+            Span::styled(format!("{:<width$}", "today"), dim()),
             Span::raw(" "),
-            Span::styled(today_row.into_iter().collect::<String>(), accent()),
+            Span::styled(g.today_line(), accent()),
         ]),
     ];
     for r in &g.rows {
-        let label = format!("{} {} / {}", r.wave, r.workload, r.environment);
         let label: String =
-            label.chars().take(usize::from(label_width)).collect();
-        let bar: String = r
-            .cells
-            .iter()
-            .map(|c| if *c == Cell::Span { '█' } else { ' ' })
-            .collect();
+            format!("{} {}", r.wave, r.pair).chars().take(width).collect();
+        let bar: String =
+            r.cells.iter().map(|on| if *on { '█' } else { ' ' }).collect();
         lines.push(Line::from(vec![
-            Span::raw(format!(
-                "{label:<label_width$}",
-                label_width = usize::from(label_width)
-            )),
+            Span::raw(format!("{label:<width$}")),
             Span::raw(" "),
-            Span::styled(bar, if r.locked { accent() } else { dim() }),
+            Span::styled(bar, if r.agreed { accent() } else { dim() }),
         ]));
     }
     let m = &v.metrics;
@@ -887,10 +848,12 @@ fn draw_weekday_picker(app: &mut App, frame: &mut Frame) {
         .enumerate()
         .map(|(i, label)| {
             let on = match i {
-                0 => p.days.is_empty(),
-                1 => p.days == ALL_WEEKDAYS[..5],
-                2 => p.days == ALL_WEEKDAYS[5..],
-                _ => p.days.contains(&ALL_WEEKDAYS[i - 3]),
+                0 => p.days.preset() == Some(WeekdayPreset::Any),
+                1 => p.days.preset() == Some(WeekdayPreset::Weekdays),
+                2 => p.days.preset() == Some(WeekdayPreset::Weekends),
+                _ => Weekdays::EVERY_DAY
+                    .get(i - 3)
+                    .is_some_and(|d| p.days.contains(*d)),
             };
             let mark = if on { "[x] " } else { "[ ] " };
             let style = if on { accent() } else { Style::default() };
@@ -2004,7 +1967,7 @@ fn draw_schedule(app: &mut App, frame: &mut Frame, area: Rect) {
         }
         (None, _) => Span::styled("nothing to schedule", dim()),
     };
-    let weekdays = weekday_rule_label(&r.weekdays);
+    let weekdays = r.weekdays.to_string();
     let m = &v.metrics;
     let pct = |r: f64| format!("{:.0}%", r * 100.0);
     let drift = match m.end_drift_days {
@@ -2091,42 +2054,35 @@ fn draw_schedule(app: &mut App, frame: &mut Frame, area: Rect) {
         draw_gantt(v, frame, table_area);
         return;
     }
-    let confirmed = s.slots.iter().filter(|x| x.locked).count();
+    let confirmed = s.slots.iter().filter(|x| x.agreed).count();
     let rows: Vec<Row> = s
         .slots
         .iter()
         .map(|x| {
-            let state = if x.locked {
-                "confirmed"
-            } else if x.reason.starts_with("rescheduled") {
-                "rescheduled"
-            } else {
-                "proposed"
-            };
             let alts: Vec<String> =
                 x.alternatives.iter().map(|d| d.to_string()).collect();
-            let style = if x.locked {
+            let style = if x.agreed {
                 accent()
             } else if r.target_end.is_some_and(|t| x.date > t) {
                 Style::default().fg(logo::OX_YELLOW)
             } else {
                 Style::default()
             };
-            let days = (x.end - x.date).get_days() + 1;
+            let days = x.days();
             Row::new(vec![
                 x.wave.to_string(),
                 x.date.to_string(),
-                precip_db::weekday_name(x.date.weekday()).to_string(),
+                day_name(x.date.weekday()).to_string(),
                 if x.weight > 1 {
                     format!("{days}x{}", x.weight)
                 } else {
                     days.to_string()
                 },
-                x.workload.clone(),
-                x.environment.clone(),
-                state.to_string(),
+                x.pair.workload.to_string(),
+                x.pair.environment.to_string(),
+                x.state_label().to_string(),
                 alts.join(" or "),
-                x.reason.clone(),
+                x.reason(),
             ])
             .style(style)
         })

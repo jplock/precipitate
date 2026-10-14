@@ -10,20 +10,12 @@ pub struct Holiday {
     pub date: Date,
 }
 
-/// The `n`th `weekday` of a month, or the last when `n` is 0.
-fn nth_weekday(year: i16, month: i8, weekday: Weekday, n: u8) -> Date {
-    if n == 0 {
-        let mut d = date(year, month, 1).last_of_month();
-        while d.weekday() != weekday {
-            d = d.yesterday().unwrap_or(d);
-        }
-        return d;
-    }
-    let mut d = date(year, month, 1);
-    while d.weekday() != weekday {
-        d = d.tomorrow().unwrap_or(d);
-    }
-    d.checked_add(jiff::Span::new().weeks(i64::from(n) - 1)).unwrap_or(d)
+/// The `n`th `weekday` of a month, counting from the end when `n` is
+/// negative: -1 is the last. Every rule below names a weekday that every
+/// month has, so the first of the month is never the answer.
+fn nth_weekday(year: i16, month: i8, weekday: Weekday, n: i8) -> Date {
+    let first = date(year, month, 1);
+    first.nth_weekday_of_month(n, weekday).unwrap_or(first)
 }
 
 /// Fixed-date holidays are observed on the nearest weekday when they fall
@@ -53,7 +45,7 @@ pub fn us_federal(year: i16) -> Vec<Holiday> {
         },
         Holiday {
             name: "Memorial Day",
-            date: nth_weekday(year, 5, Weekday::Monday, 0),
+            date: nth_weekday(year, 5, Weekday::Monday, -1),
         },
         Holiday { name: "Juneteenth", date: observed(date(year, 6, 19)) },
         Holiday { name: "Independence Day", date: observed(date(year, 7, 4)) },

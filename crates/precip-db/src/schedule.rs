@@ -7,10 +7,12 @@ use crate::schema::{
     WorkloadEnvironments, WorkloadMembers,
 };
 use crate::{DbError, Store};
-use jiff::civil::{Date, Weekday};
+use jiff::civil::Date;
 use precip_engine::schedule::{
-    Blackout, GlobalRules, PairInput, Schedule, Status, Wave,
+    Blackout, GlobalRules, PairInput, PairState, Plan, Schedule, Status, Wave,
+    Weekdays,
 };
+use precip_types::PairKey;
 use sea_query::{
     Alias, Expr, ExprTrait, Func, OnConflict, Order, Query, SqliteQueryBuilder,
     UnionType,
@@ -18,6 +20,7 @@ use sea_query::{
 use sea_query_sqlx::SqlxBinder;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection};
+use std::num::NonZeroU32;
 
 /// Build a query and bind it, the one way every statement here runs.
 macro_rules! bound {
@@ -27,31 +30,12 @@ macro_rules! bound {
     }};
 }
 
-fn parse_weekdays(s: &str) -> Vec<Weekday> {
-    s.split(',')
-        .filter_map(|t| match t.trim().to_lowercase().as_str() {
-            "mon" | "monday" => Some(Weekday::Monday),
-            "tue" | "tuesday" => Some(Weekday::Tuesday),
-            "wed" | "wednesday" => Some(Weekday::Wednesday),
-            "thu" | "thursday" => Some(Weekday::Thursday),
-            "fri" | "friday" => Some(Weekday::Friday),
-            "sat" | "saturday" => Some(Weekday::Saturday),
-            "sun" | "sunday" => Some(Weekday::Sunday),
-            _ => None,
-        })
-        .collect()
-}
-
-pub fn weekday_name(w: Weekday) -> &'static str {
-    match w {
-        Weekday::Monday => "mon",
-        Weekday::Tuesday => "tue",
-        Weekday::Wednesday => "wed",
-        Weekday::Thursday => "thu",
-        Weekday::Friday => "fri",
-        Weekday::Saturday => "sat",
-        Weekday::Sunday => "sun",
+/// A pair's stored weekday rule: empty follows the global rule.
+fn pair_weekdays(spec: &str) -> Result<Option<Weekdays>, DbError> {
+    if spec.trim().is_empty() {
+        return Ok(None);
     }
+    Ok(Some(spec.parse()?))
 }
 
 fn parse_date(s: &str) -> Result<Date, DbError> {
@@ -152,13 +136,11 @@ pub enum PlanEvent {
 
 impl PlanEvent {
     fn rules(rules: &GlobalRules) -> Self {
-        let days: Vec<&str> =
-            rules.weekdays.iter().map(|w| weekday_name(*w)).collect();
         PlanEvent::RulesSet {
             per_day: rules.per_day,
             per_week: rules.per_week,
             per_month: rules.per_month,
-            weekdays: days.join(","),
+            weekdays: rules.weekdays.to_spec(),
             target_end: rules.target_end,
             nonprod_before_prod: rules.nonprod_before_prod,
         }
@@ -166,7 +148,9 @@ impl PlanEvent {
 
     fn blackout(b: &Blackout, added: bool) -> Self {
         let (workload, environment) = match &b.pair {
-            Some((w, e)) => (Some(w.clone()), Some(e.clone())),
+            Some(p) => {
+                (Some(p.workload.to_string()), Some(p.environment.to_string()))
+            }
             None => (None, None),
         };
         if added {
@@ -384,6 +368,20 @@ pub struct PairStatus {
     pub migrated_date: Option<Date>,
 }
 
+impl PairStatus {
+    /// The scheduler's view. An agreed status is always written with its
+    /// date; one read without a date has nothing to hold and is proposed.
+    pub fn state(&self) -> PairState {
+        match (self.status, self.confirmed_date) {
+            (Status::Confirmed, Some(d)) => PairState::Confirmed(d),
+            (Status::Confirmed | Status::Proposed, _) => PairState::Proposed,
+            (Status::Missed, _) => PairState::Missed,
+            (Status::Migrated, _) => PairState::Migrated,
+            (Status::RolledBack, _) => PairState::RolledBack,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationEvent {
     pub event: String,
@@ -496,11 +494,10 @@ impl Store {
                 Self::setting_in(conn, "schedule.per_month").await?,
                 d.per_month,
             ),
-            weekdays: parse_weekdays(
-                &Self::setting_in(conn, "schedule.weekdays")
-                    .await?
-                    .unwrap_or_default(),
-            ),
+            weekdays: Self::setting_in(conn, "schedule.weekdays")
+                .await?
+                .unwrap_or_default()
+                .parse()?,
             target_end,
             nonprod_before_prod: Self::setting_in(
                 conn,
@@ -529,9 +526,8 @@ impl Store {
             &rules.per_month.to_string(),
         )
         .await?;
-        let days: Vec<&str> =
-            rules.weekdays.iter().map(|w| weekday_name(*w)).collect();
-        Self::set_setting(conn, "schedule.weekdays", &days.join(",")).await?;
+        Self::set_setting(conn, "schedule.weekdays", &rules.weekdays.to_spec())
+            .await?;
         Self::set_setting(
             conn,
             "schedule.target_end",
@@ -565,8 +561,8 @@ impl Store {
                     b.name.clone().into(),
                     b.start.to_string().into(),
                     b.end.to_string().into(),
-                    b.pair.as_ref().map(|p| p.0.clone()).into(),
-                    b.pair.as_ref().map(|p| p.1.clone()).into(),
+                    b.pair.as_ref().map(|p| p.workload.to_string()).into(),
+                    b.pair.as_ref().map(|p| p.environment.to_string()).into(),
                 ])
         )
         .execute(&mut *conn)
@@ -588,12 +584,12 @@ impl Store {
                 Expr::col(ScheduleBlackouts::EndDate).eq(b.end.to_string()),
             );
         match &b.pair {
-            Some((w, e)) => {
+            Some(PairKey { workload: w, environment: e }) => {
                 q.and_where(
-                    Expr::col(ScheduleBlackouts::Workload).eq(w.clone()),
+                    Expr::col(ScheduleBlackouts::Workload).eq(w.as_str()),
                 )
                 .and_where(
-                    Expr::col(ScheduleBlackouts::Environment).eq(e.clone()),
+                    Expr::col(ScheduleBlackouts::Environment).eq(e.as_str()),
                 );
             }
             None => {
@@ -638,7 +634,7 @@ impl Store {
                     name: r.get("name"),
                     start: parse_date(&r.get::<String, _>("start_date"))?,
                     end: parse_date(&r.get::<String, _>("end_date"))?,
-                    pair: w.zip(e),
+                    pair: w.zip(e).map(|(w, e)| PairKey::new(w, e)),
                 })
             })
             .collect()
@@ -648,12 +644,12 @@ impl Store {
         conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
-        weekdays: &[Weekday],
+        weekdays: Option<&Weekdays>,
         earliest: Option<Date>,
         priority: i32,
     ) -> Result<(), DbError> {
-        let days: Vec<&str> =
-            weekdays.iter().map(|w| weekday_name(*w)).collect();
+        // An empty list stored means the pair follows the global rule.
+        let days = weekdays.map(Weekdays::to_spec).unwrap_or_default();
         bound!(
             Query::insert()
                 .into_table(ScheduleRules::Table)
@@ -667,7 +663,7 @@ impl Store {
                 .values_panic([
                     workload.into(),
                     environment.into(),
-                    days.join(",").into(),
+                    days.into(),
                     earliest.map(|d| d.to_string()).into(),
                     priority.into(),
                 ])
@@ -992,28 +988,25 @@ impl Store {
         // the screen can show, so a slip of the hand changes nothing.
         let refuse = |why: &str| Err(DbError::Invalid(why.to_string()));
         if validate && status == Status::Confirmed {
-            if let Some((w, e)) =
+            if let Some(dep) =
                 Self::unfinished_dependencies_in(conn, workload, environment)
                     .await?
                     .first()
             {
                 return refuse(&format!(
-                    "it waits for {w} / {e}, which has not migrated; agree that date first"
+                    "it waits for {dep}, which has not migrated; agree that date first"
                 ));
             }
             let pairs = Self::schedule_inputs_in(conn).await?;
             let rules = Self::global_rules_in(conn).await?;
             let blackouts = Self::blackouts_in(conn).await?;
-            if let (Some(me), Some(start)) = (
-                pairs.iter().find(|p| {
-                    p.workload == workload && p.environment == environment
-                }),
-                date,
-            ) {
-                if let Err(why) = precip_engine::schedule::check_agreed_date(
-                    me, start, &pairs, &rules, &blackouts,
-                ) {
-                    return refuse(&why);
+            let plan =
+                Plan { pairs: &pairs, rules: &rules, blackouts: &blackouts };
+            if let (Some(me), Some(start)) =
+                (pairs.iter().find(|p| p.key.is(workload, environment)), date)
+            {
+                if let Err(why) = plan.check_agreed_date(me, start) {
+                    return refuse(&why.to_string());
                 }
             }
         }
@@ -1186,7 +1179,7 @@ impl Store {
         &self,
         workload: &str,
         environment: &str,
-    ) -> Result<Vec<(String, String)>, DbError> {
+    ) -> Result<Vec<PairKey>, DbError> {
         let mut conn = self.pool.acquire().await?;
         Self::unfinished_dependencies_in(&mut conn, workload, environment).await
     }
@@ -1195,25 +1188,15 @@ impl Store {
         conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
-    ) -> Result<Vec<(String, String)>, DbError> {
+    ) -> Result<Vec<PairKey>, DbError> {
         let pairs = Self::schedule_inputs_in(conn).await?;
         let rules = Self::global_rules_in(conn).await?;
-        let Some(me) = pairs
-            .iter()
-            .find(|p| p.workload == workload && p.environment == environment)
+        let Some(me) = pairs.iter().find(|p| p.key.is(workload, environment))
         else {
             return Ok(Vec::new());
         };
-        Ok(precip_engine::schedule::dependencies_of(me, &pairs, &rules)
-            .into_iter()
-            .filter(|d| {
-                pairs.iter().any(|p| {
-                    (p.workload.as_str(), p.environment.as_str())
-                        == (d.0.as_str(), d.1.as_str())
-                        && p.status != Status::Migrated
-                })
-            })
-            .collect())
+        let plan = Plan { pairs: &pairs, rules: &rules, blackouts: &[] };
+        Ok(plan.unfinished_dependencies(me))
     }
 
     /// Every pair that migrates (any disposition but retire and retain),
@@ -1233,7 +1216,7 @@ impl Store {
                 continue;
             }
             let (workload, environment) =
-                (pair.workload.into_string(), pair.environment.into_string());
+                (pair.workload.to_string(), pair.environment.to_string());
             let rule = bound!(
                 Query::select()
                     .columns([
@@ -1255,25 +1238,28 @@ impl Store {
             )
             .fetch_optional(&mut *conn)
             .await?;
-            let small = |r: &sqlx::sqlite::SqliteRow, col: &str| -> u32 {
-                Ord::max(r.get::<i64, _>(col).try_into().unwrap_or(1), 1)
-            };
-            let (weekdays, earliest, priority, wave, duration_days, weight) =
-                match rule {
-                    Some(r) => {
-                        let e: Option<String> = r.get("earliest");
-                        (
-                            parse_weekdays(&r.get::<String, _>("weekdays")),
-                            e.as_deref().map(parse_date).transpose()?,
-                            r.get::<i64, _>("priority").try_into().unwrap_or(0),
-                            small(&r, "wave"),
-                            small(&r, "duration_days"),
-                            small(&r, "weight"),
-                        )
-                    }
-                    None => (Vec::new(), None, 0, 1, 1, 1),
+            let mut input = PairInput::new(pair);
+            if let Some(r) = rule {
+                // Stored as at least 1 by set_pair_plan; anything else
+                // reads as 1.
+                let count = |col: &str| {
+                    u32::try_from(r.get::<i64, _>(col))
+                        .ok()
+                        .and_then(NonZeroU32::new)
+                        .unwrap_or(NonZeroU32::MIN)
                 };
-            let deps = bound!(
+                let earliest: Option<String> = r.get("earliest");
+                input.weekdays =
+                    pair_weekdays(&r.get::<String, _>("weekdays"))?;
+                input.earliest =
+                    earliest.as_deref().map(parse_date).transpose()?;
+                input.priority =
+                    i32::try_from(r.get::<i64, _>("priority")).unwrap_or(0);
+                input.wave = count("wave").get();
+                input.duration = count("duration_days");
+                input.weight = count("weight");
+            }
+            let deps: Vec<PairKey> = bound!(
                 Query::select()
                     .columns([
                         ScheduleDependencies::OnWorkload,
@@ -1292,23 +1278,18 @@ impl Store {
             .fetch_all(&mut *conn)
             .await?
             .into_iter()
-            .map(|r| (r.get("on_workload"), r.get("on_environment")))
+            .map(|r| {
+                PairKey::new(
+                    r.get::<String, _>("on_workload"),
+                    r.get::<String, _>("on_environment"),
+                )
+            })
             .collect();
-            let status =
-                Self::pair_status_in(conn, &workload, &environment).await?;
-            out.push(PairInput {
-                workload,
-                environment,
-                wave,
-                priority,
-                duration_days,
-                weight,
-                weekdays,
-                earliest,
-                status: status.status,
-                locked: status.confirmed_date,
-                depends_on: deps,
-            });
+            input.depends_on = deps;
+            input.state = Self::pair_status_in(conn, &workload, &environment)
+                .await?
+                .state();
+            out.push(input);
         }
         Ok(out)
     }
@@ -1337,17 +1318,23 @@ impl Store {
         let rules = Self::global_rules_in(conn).await?;
         let blackouts = Self::blackouts_in(conn).await?;
         let schedule =
-            precip_engine::schedule::compute(&pairs, &rules, &blackouts, today);
+            Plan { pairs: &pairs, rules: &rules, blackouts: &blackouts }
+                .compute(today);
 
         // A confirmed date that passed is itself a change to the plan,
         // recorded like any other, without computing again.
-        for (w, e) in &schedule.expired {
-            let prior = Self::pair_status_in(conn, w, e).await?;
+        for pair in &schedule.expired {
+            let prior = Self::pair_status_in(
+                conn,
+                pair.workload.as_str(),
+                pair.environment.as_str(),
+            )
+            .await?;
             Self::record(
                 conn,
                 &PlanEvent::StatusChanged {
-                    workload: w.clone(),
-                    environment: e.clone(),
+                    workload: pair.workload.to_string(),
+                    environment: pair.environment.to_string(),
                     status: Status::Missed,
                     date: prior.confirmed_date,
                     note: Some(
@@ -1409,13 +1396,13 @@ impl Store {
                     ])
                     .values_panic([
                         id.into(),
-                        s.workload.clone().into(),
-                        s.environment.clone().into(),
+                        s.pair.workload.as_str().into(),
+                        s.pair.environment.as_str().into(),
                         s.date.to_string().into(),
                         s.end.to_string().into(),
                         s.wave.into(),
-                        i32::from(s.locked).into(),
-                        s.reason.clone().into(),
+                        i32::from(s.agreed).into(),
+                        s.reason().into(),
                         alts.join(",").into(),
                     ])
             )
@@ -1456,10 +1443,13 @@ impl Store {
         let Some(r) = row else { return Ok(None) };
         let json: Option<String> = r.get("schedule");
         let Some(json) = json else { return Ok(None) };
+        // A version stored before the schedule's shape last changed does
+        // not read back; the caller computes a fresh one instead.
+        let Ok(schedule) = serde_json::from_str(&json) else { return Ok(None) };
         Ok(Some((
             r.get("id"),
             parse_date(&r.get::<String, _>("as_of"))?,
-            serde_json::from_str(&json)?,
+            schedule,
         )))
     }
 
@@ -1540,7 +1530,7 @@ impl Store {
                         per_day: *per_day,
                         per_week: *per_week,
                         per_month: *per_month,
-                        weekdays: parse_weekdays(weekdays),
+                        weekdays: weekdays.parse()?,
                         target_end: *target_end,
                         nonprod_before_prod: *nonprod_before_prod,
                     },
@@ -1560,7 +1550,10 @@ impl Store {
                         name: name.clone(),
                         start: *start,
                         end: *end,
-                        pair: workload.clone().zip(environment.clone()),
+                        pair: workload
+                            .clone()
+                            .zip(environment.clone())
+                            .map(|(w, e)| PairKey::new(w, e)),
                     },
                 )
                 .await
@@ -1578,7 +1571,10 @@ impl Store {
                         name: name.clone(),
                         start: *start,
                         end: *end,
-                        pair: workload.clone().zip(environment.clone()),
+                        pair: workload
+                            .clone()
+                            .zip(environment.clone())
+                            .map(|(w, e)| PairKey::new(w, e)),
                     },
                 )
                 .await
@@ -1594,7 +1590,7 @@ impl Store {
                     conn,
                     workload,
                     environment,
-                    &parse_weekdays(weekdays),
+                    pair_weekdays(weekdays)?.as_ref(),
                     *earliest,
                     *priority,
                 )
@@ -1942,16 +1938,14 @@ impl Store {
         &self,
         workload: &str,
         environment: &str,
-        weekdays: &[Weekday],
+        weekdays: Option<&Weekdays>,
         earliest: Option<Date>,
         priority: i32,
     ) -> Result<(), DbError> {
-        let days: Vec<&str> =
-            weekdays.iter().map(|w| weekday_name(*w)).collect();
         self.apply(PlanEvent::PairRuleSet {
             workload: workload.into(),
             environment: environment.into(),
-            weekdays: days.join(","),
+            weekdays: weekdays.map(Weekdays::to_spec).unwrap_or_default(),
             earliest,
             priority,
         })
@@ -2311,7 +2305,7 @@ impl Store {
         };
 
         for p in &pairs {
-            match p.status {
+            match p.state.status() {
                 Status::Migrated => m.migrated += 1,
                 Status::Confirmed => m.confirmed += 1,
                 Status::Proposed => m.proposed += 1,
@@ -2338,8 +2332,12 @@ impl Store {
         let window_start =
             today.checked_sub(jiff::Span::new().days(30)).unwrap_or(today);
         for p in &pairs {
-            let events =
-                self.migration_events(&p.workload, &p.environment).await?;
+            let events = self
+                .migration_events(
+                    p.key.workload.as_str(),
+                    p.key.environment.as_str(),
+                )
+                .await?;
             let first_confirmed = events
                 .iter()
                 .find(|e| e.event == "confirmed")
@@ -2374,7 +2372,7 @@ impl Store {
             if rolled {
                 ever_rolled_back += 1;
             }
-            if p.status != Status::Migrated {
+            if p.state != PairState::Migrated {
                 continue;
             }
             if !moved && !rolled {
@@ -2509,7 +2507,7 @@ impl Store {
             let in_wave = pairs.iter().filter(|p| p.wave == w.number);
             let total = in_wave.clone().count();
             let migrated =
-                in_wave.filter(|p| p.status == Status::Migrated).count();
+                in_wave.filter(|p| p.state == PairState::Migrated).count();
             if total == 0 && w.name.is_empty() {
                 continue;
             }
@@ -2523,63 +2521,5 @@ impl Store {
             });
         }
         Ok(m)
-    }
-}
-
-const WEEKDAYS: [Weekday; 5] = [
-    Weekday::Monday,
-    Weekday::Tuesday,
-    Weekday::Wednesday,
-    Weekday::Thursday,
-    Weekday::Friday,
-];
-const WEEKENDS: [Weekday; 2] = [Weekday::Saturday, Weekday::Sunday];
-
-/// The preset name for a weekday rule, if it matches one.
-pub fn weekday_preset(days: &[Weekday]) -> Option<&'static str> {
-    if days.is_empty() {
-        Some("any day")
-    } else if days == WEEKDAYS {
-        Some("weekdays")
-    } else if days == WEEKENDS {
-        Some("weekends")
-    } else {
-        None
-    }
-}
-
-/// Parse a weekday list with presets: `any`, `weekdays`, `weekends`, or a
-/// comma list such as `sat,sun`.
-pub fn weekdays_from_spec(spec: &str) -> Vec<Weekday> {
-    match spec.trim().to_lowercase().as_str() {
-        "any" | "all" | "" => Vec::new(),
-        "weekdays" => vec![
-            Weekday::Monday,
-            Weekday::Tuesday,
-            Weekday::Wednesday,
-            Weekday::Thursday,
-            Weekday::Friday,
-        ],
-        "weekends" | "weekend" => vec![Weekday::Saturday, Weekday::Sunday],
-        other => parse_weekdays(other),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn weekday_specs_and_presets() {
-        assert!(weekdays_from_spec("any").is_empty());
-        assert_eq!(
-            weekdays_from_spec("weekends"),
-            vec![Weekday::Saturday, Weekday::Sunday]
-        );
-        assert_eq!(weekdays_from_spec("weekdays").len(), 5);
-        assert_eq!(
-            weekdays_from_spec("Tue, thu"),
-            vec![Weekday::Tuesday, Weekday::Thursday]
-        );
     }
 }
