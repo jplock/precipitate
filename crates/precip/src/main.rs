@@ -235,9 +235,11 @@ enum ScheduleCommand {
         start: String,
         /// Defaults to the start: a one-day freeze.
         end: Option<String>,
-        #[arg(long)]
+        /// Freeze only this workload; needs --environment.
+        #[arg(long, requires = "environment")]
         workload: Option<String>,
-        #[arg(long)]
+        /// Freeze only this environment; needs --workload.
+        #[arg(long, requires = "workload")]
         environment: Option<String>,
         #[arg(long)]
         remove: bool,
@@ -440,7 +442,6 @@ async fn scan_and_store(
     Ok(stats)
 }
 
-/// A built-in profile by name, or a TOML file by path.
 /// The profile to size with: the flag, else the workspace's remembered
 /// choice, else the built-in. A remembered choice that no longer loads
 /// falls back to the built-in rather than stopping the command.
@@ -456,8 +457,10 @@ async fn choose_profile(
         Some(name) => match load_profile(&name) {
             Ok(p) => Ok(p),
             Err(e) => {
-                out!(
-                    "profile {name} cannot be loaded ({e:#}); sizing with {default}"
+                tracing::warn!(
+                    profile = %name,
+                    error = format!("{e:#}"),
+                    "remembered profile cannot be loaded; sizing with {default}"
                 );
                 load_profile(default)
             }
@@ -466,6 +469,7 @@ async fn choose_profile(
     }
 }
 
+/// A built-in profile by name, or a TOML file by path.
 fn load_profile(name_or_path: &str) -> anyhow::Result<precip_types::Profile> {
     if let Some(built_in) =
         precip_engine::sizing::profiles::builtin(name_or_path)
@@ -601,9 +605,6 @@ async fn print_schedule(
         out!(
             "expired: {w} / {e} confirmed date passed without a migration; rescheduled"
         );
-    }
-    for ((w, e), why) in &schedule.unplaced {
-        out!("unplaced: {w} / {e}: {why}");
     }
     Ok(())
 }
@@ -1212,6 +1213,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Command::Size { profile, growth, threshold, headroom }) => {
+            init_tracing();
             let db = chosen_db
                 .context("size needs --workspace <name> or --db <path>")?;
             let store = precip_db::Store::open(&db)
@@ -1367,6 +1369,9 @@ async fn main() -> anyhow::Result<()> {
             threshold,
             headroom,
         }) => {
+            // Warnings go to stderr so they never mix into an export
+            // written to stdout.
+            init_tracing();
             let store = open_store(chosen_db, "export").await?;
             let format = match (&format, &out) {
                 (Some(f), _) => f.to_lowercase(),
