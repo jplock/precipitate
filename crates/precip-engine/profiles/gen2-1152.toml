@@ -1,6 +1,11 @@
-# Oxide Gen 2 sled, 1152 GiB DRAM. Values from the Oxide product
-# specifications page, the operator resource-management guide and Omicron
-# source as of 2026-10-13. See docs/rfd/0001/notes.adoc for sources.
+# Oxide Gen 2 sled, 1152 GiB DRAM. Each figure's source, as of
+# 2026-10-13, is noted beside it; docs/rfd/0001/notes.adoc has the links.
+#   Omicron source on GitHub: reservation_gib, reservoir_pct (PR 10791),
+#     every [instance] limit.
+#   oxide.computer product specifications page: sleds_per_rack, cores,
+#     dram_gib, nvme_bays, bay_size_tib.
+#   Operator resource-management guide: the 26.6 TiB usable storage the
+#     replication factor is meant to reproduce.
 name = "gen2-1152"
 oxide_release = "21"
 sleds_per_rack = 24
