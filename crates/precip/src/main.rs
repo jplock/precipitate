@@ -146,7 +146,7 @@ enum Command {
     /// Size the rehost and relocate workloads of the latest scan.
     Size {
         /// Built-in profile name, or a path to a profile TOML file.
-        /// Defaults to the workspace's choice, else gen1-1024.
+        /// Defaults to the workspace's choice, else the built-in.
         #[arg(long)]
         profile: Option<String>,
         /// Multiplier on demand.
@@ -441,6 +441,31 @@ async fn scan_and_store(
 }
 
 /// A built-in profile by name, or a TOML file by path.
+/// The profile to size with: the flag, else the workspace's remembered
+/// choice, else the built-in. A remembered choice that no longer loads
+/// falls back to the built-in rather than stopping the command.
+async fn choose_profile(
+    store: &precip_db::Store,
+    flag: Option<String>,
+) -> anyhow::Result<precip_types::Profile> {
+    if let Some(name) = flag {
+        return load_profile(&name);
+    }
+    let default = precip_engine::sizing::profiles::NAMES[0];
+    match store.sizing_profile().await? {
+        Some(name) => match load_profile(&name) {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                out!(
+                    "profile {name} cannot be loaded ({e:#}); sizing with {default}"
+                );
+                load_profile(default)
+            }
+        },
+        None => load_profile(default),
+    }
+}
+
 fn load_profile(name_or_path: &str) -> anyhow::Result<precip_types::Profile> {
     if let Some(built_in) =
         precip_engine::sizing::profiles::builtin(name_or_path)
@@ -1198,14 +1223,7 @@ async fn main() -> anyhow::Result<()> {
                 .into_iter()
                 .next()
                 .context("no scans in this workspace")?;
-            let name = match profile {
-                Some(p) => p,
-                None => store
-                    .sizing_profile()
-                    .await?
-                    .unwrap_or_else(|| "gen1-1024".into()),
-            };
-            let profile = load_profile(&name)?;
+            let profile = choose_profile(&store, profile).await?;
             let assumptions = precip_engine::sizing::Assumptions {
                 growth_factor: growth,
                 threshold,
@@ -1370,14 +1388,7 @@ async fn main() -> anyhow::Result<()> {
                     )?
                 }
                 (ExportWhat::Sizing, "csv" | "json") => {
-                    let name = match profile {
-                        Some(p) => p,
-                        None => store
-                            .sizing_profile()
-                            .await?
-                            .unwrap_or_else(|| "gen1-1024".into()),
-                    };
-                    let profile = load_profile(&name)?;
+                    let profile = choose_profile(&store, profile).await?;
                     let assumptions = precip_engine::sizing::Assumptions {
                         growth_factor: growth,
                         threshold,

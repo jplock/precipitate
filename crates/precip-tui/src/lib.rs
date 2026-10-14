@@ -1079,9 +1079,13 @@ impl App {
         // Keep the assumptions the user has set across refreshes.
         let assumptions =
             self.sizing.as_ref().map(|v| v.assumptions).unwrap_or_default();
+        // The remembered profile, or the built-in when it is not one any
+        // more.
+        let names = precip_engine::sizing::profiles::NAMES;
         let profile_name = rt
             .block_on(store.sizing_profile())?
-            .unwrap_or_else(|| "gen1-1024".into());
+            .filter(|n| names.contains(&n.as_str()))
+            .unwrap_or_else(|| names[0].to_string());
         self.sizing = match self.scans.first() {
             Some(s) => {
                 let profile =
