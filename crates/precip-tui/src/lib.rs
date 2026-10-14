@@ -1054,6 +1054,17 @@ impl App {
         Ok(())
     }
 
+    /// A session left open past midnight computes the new day's
+    /// schedule, so expired confirmations and today's row stay right.
+    fn refresh_on_new_day(&mut self) -> Result<(), TuiError> {
+        let today = jiff::Zoned::now().date();
+        if self.schedule.as_ref().is_some_and(|v| v.today != today) {
+            self.note(format!("new day, {today}: schedule recomputed"));
+            self.recompute_schedule("open")?;
+        }
+        Ok(())
+    }
+
     /// Recompute the calendar from today and keep the selection.
     fn recompute_schedule(&mut self, trigger: &str) -> Result<(), TuiError> {
         let Some(store) = &self.store else { return Ok(()) };
@@ -1254,7 +1265,20 @@ impl App {
         let (w, e) = (m.workload.clone(), m.environment.clone());
         self.action_menu = None;
         match action {
-            Action::AgreeDate | Action::ChangeDate => self.open_date_picker(),
+            Action::AgreeDate | Action::ChangeDate => {
+                let waiting = match &self.store {
+                    Some(store) => tokio::runtime::Handle::current()
+                        .block_on(store.unfinished_dependencies(&w, &e))?,
+                    None => Vec::new(),
+                };
+                if let Some((dw, de)) = waiting.first() {
+                    self.note(format!(
+                        "{w} / {e} waits for {dw} / {de}, which has not migrated; agree that date first"
+                    ));
+                } else {
+                    self.open_date_picker();
+                }
+            }
             Action::Done => self.change_status(
                 &w,
                 &e,
@@ -2095,6 +2119,7 @@ impl App {
             self.poll()?;
             terminal.draw(|frame| ui::draw(self, frame))?;
             if !event::poll(Duration::from_millis(100))? {
+                self.refresh_on_new_day()?;
                 continue;
             }
             let key = match event::read()? {
@@ -2505,7 +2530,7 @@ pub fn next_step(v: &ScheduleView) -> String {
     let m = &v.metrics;
     if !v.findings.is_empty() {
         return format!(
-            "{} pair(s) marked done still have servers in AWS. Select one below and press enter.",
+            "{} pair(s) marked done still have resources in AWS. Select one below and press enter.",
             v.findings.len()
         );
     }

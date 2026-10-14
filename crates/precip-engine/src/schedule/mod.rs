@@ -392,23 +392,7 @@ pub fn compute(
         settled.insert(key(p), today.yesterday().unwrap_or(today));
     }
 
-    // Dependencies: explicit ones plus, by rule, prod after its siblings.
-    let deps_of = |p: &PairInput| -> Vec<(String, String)> {
-        let mut deps = p.depends_on.clone();
-        if rules.nonprod_before_prod && p.environment == "prod" {
-            deps.extend(
-                effective
-                    .iter()
-                    .filter(|q| {
-                        q.workload == p.workload && q.environment != "prod"
-                    })
-                    .map(key),
-            );
-        }
-        deps.sort();
-        deps.dedup();
-        deps
-    };
+    let deps_of = |p: &PairInput| dependencies_of(p, &effective, rules);
     let wave_of: HashMap<(String, String), u32> =
         effective.iter().map(|p| (key(p), p.wave)).collect();
 
@@ -594,6 +578,27 @@ pub fn compute(
             .collect();
     }
     out
+}
+
+/// What a pair waits for: its explicit dependencies plus, by rule, the
+/// other environments of its workload when it is production.
+pub fn dependencies_of(
+    p: &PairInput,
+    pairs: &[PairInput],
+    rules: &GlobalRules,
+) -> Vec<(String, String)> {
+    let mut deps = p.depends_on.clone();
+    if rules.nonprod_before_prod && p.environment == "prod" {
+        deps.extend(
+            pairs
+                .iter()
+                .filter(|q| q.workload == p.workload && q.environment != "prod")
+                .map(key),
+        );
+    }
+    deps.sort();
+    deps.dedup();
+    deps
 }
 
 /// Slots grouped by start date, for a calendar view.

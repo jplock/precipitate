@@ -1937,7 +1937,7 @@ fn draw_schedule(app: &mut App, frame: &mut Frame, area: Rect) {
                 "migrated?".to_string(),
                 String::new(),
                 format!(
-                    "{} server(s) still in the latest scan; press enter",
+                    "{} resource(s) still in the latest scan; press enter",
                     f.remaining
                 ),
             ])

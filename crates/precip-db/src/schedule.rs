@@ -914,6 +914,17 @@ impl Store {
         // Transitions that cannot mean anything are refused with a reason
         // the screen can show, so a slip of the hand changes nothing.
         let refuse = |why: &str| Err(DbError::Invalid(why.to_string()));
+        if validate && status == Status::Confirmed {
+            if let Some((w, e)) = self
+                .unfinished_dependencies(workload, environment)
+                .await?
+                .first()
+            {
+                return refuse(&format!(
+                    "it waits for {w} / {e}, which has not migrated; agree that date first"
+                ));
+            }
+        }
         if validate {
             match (current.status, status) {
                 (Status::Migrated, Status::Migrated) => {
@@ -1072,6 +1083,32 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// The pairs this one waits for that have not migrated yet.
+    pub async fn unfinished_dependencies(
+        &self,
+        workload: &str,
+        environment: &str,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        let pairs = self.schedule_inputs().await?;
+        let rules = self.global_rules().await?;
+        let Some(me) = pairs
+            .iter()
+            .find(|p| p.workload == workload && p.environment == environment)
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(precip_engine::schedule::dependencies_of(me, &pairs, &rules)
+            .into_iter()
+            .filter(|d| {
+                pairs.iter().any(|p| {
+                    (p.workload.as_str(), p.environment.as_str())
+                        == (d.0.as_str(), d.1.as_str())
+                        && p.status != Status::Migrated
+                })
+            })
+            .collect())
     }
 
     /// Every pair that migrates (any disposition but retire and retain),
@@ -1971,14 +2008,14 @@ pub struct WaveMetrics {
 pub struct Verification {
     pub workload: String,
     pub environment: String,
-    /// EC2 instances not terminated, plus auto scaling groups, still seen.
+    /// Resources still placed in the pair, except terminated instances.
     pub remaining: usize,
 }
 
 impl Store {
-    /// Migrated pairs that still have instances or auto scaling groups
-    /// in the given scan. A migration that left compute behind is either
-    /// incomplete or was never done.
+    /// Migrated pairs that still have resources in the given scan. A
+    /// migration that left things behind is either incomplete or was
+    /// never done.
     pub async fn verify_migrated(
         &self,
         scan_id: &str,
@@ -2048,18 +2085,15 @@ impl Store {
                     ))
                     .eq("migrated"),
                 )
+                // Every resource still placed in the pair counts, except
+                // an instance that has been terminated and only lingers.
                 .and_where(
                     Expr::col((
                         ResourceVersions::Table,
                         ResourceVersions::Kind
                     ))
-                    .eq("auto_scaling_group")
-                    .or(Expr::col((
-                        ResourceVersions::Table,
-                        ResourceVersions::Kind,
-                    ))
-                    .eq("ec2_instance")
-                    .and(state.if_null("").ne("terminated"))),
+                    .ne("ec2_instance")
+                    .or(state.if_null("").ne("terminated")),
                 )
                 .group_by_col((
                     WorkloadMembers::Table,

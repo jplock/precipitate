@@ -763,7 +763,7 @@ async fn run_schedule(
             }
             for f in findings {
                 out!(
-                    "{} / {}: marked migrated but {} instance(s) or groups still in scan #{}",
+                    "{} / {}: marked migrated but {} resource(s) still in scan #{}",
                     f.workload,
                     f.environment,
                     f.remaining,
