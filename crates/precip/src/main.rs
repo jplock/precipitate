@@ -265,8 +265,9 @@ enum ScheduleCommand {
         workload: String,
         environment: String,
         date: String,
+        /// Why, when this replaces an agreed date. See `schedule reasons`.
         #[arg(long)]
-        note: Option<String>,
+        reason: Option<String>,
     },
     /// Mark a pair migrated, today unless a date is given.
     Migrated {
@@ -279,9 +280,12 @@ enum ScheduleCommand {
     Missed {
         workload: String,
         environment: String,
+        /// Why. See `schedule reasons` for the usual ones.
         #[arg(long)]
-        note: Option<String>,
+        reason: Option<String>,
     },
+    /// The usual reasons an agreed date moves, for --reason.
+    Reasons,
     /// A migrated pair moved back to AWS; a new date is proposed.
     RolledBack {
         workload: String,
@@ -699,7 +703,7 @@ async fn run_schedule(
                 .await?;
             print_schedule(store, None).await?;
         }
-        ScheduleCommand::Confirm { workload, environment, date, note } => {
+        ScheduleCommand::Confirm { workload, environment, date, reason } => {
             store
                 .set_pair_status(
                     &workload,
@@ -707,7 +711,7 @@ async fn run_schedule(
                     precip_engine::schedule::Status::Confirmed,
                     Some(parse_date(&date)?),
                     today(),
-                    note.as_deref(),
+                    reason.as_deref(),
                 )
                 .await?;
             print_schedule(store, None).await?;
@@ -726,7 +730,7 @@ async fn run_schedule(
                 .await?;
             print_schedule(store, None).await?;
         }
-        ScheduleCommand::Missed { workload, environment, note } => {
+        ScheduleCommand::Missed { workload, environment, reason } => {
             store
                 .set_pair_status(
                     &workload,
@@ -734,10 +738,15 @@ async fn run_schedule(
                     precip_engine::schedule::Status::Missed,
                     None,
                     today(),
-                    note.as_deref(),
+                    reason.as_deref(),
                 )
                 .await?;
             print_schedule(store, None).await?;
+        }
+        ScheduleCommand::Reasons => {
+            for r in precip_db::RESCHEDULE_REASONS {
+                out!("{r}");
+            }
         }
         ScheduleCommand::RolledBack { workload, environment, note } => {
             store
@@ -1304,6 +1313,14 @@ fn print_metrics(m: &precip_db::Metrics) {
         pct(m.rollback_rate),
         m.rolled_back
     );
+    if !m.reschedule_reasons.is_empty() {
+        let list: Vec<String> = m
+            .reschedule_reasons
+            .iter()
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect();
+        out!("why dates moved   {}", list.join(", "));
+    }
     for w in &m.waves {
         out!(
             "wave {:<3} {:<16} {}/{} migrated  ends {}{}",

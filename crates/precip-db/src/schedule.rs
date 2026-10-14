@@ -1952,6 +1952,16 @@ impl Store {
     }
 }
 
+/// Why an agreed date moved. The same list in every view, so the
+/// reschedule rate can be split by cause.
+pub const RESCHEDULE_REASONS: [&str; 5] = [
+    "owners asked to move it",
+    "technical problem found",
+    "freeze or holiday added",
+    "waiting on another migration",
+    "not ready in time",
+];
+
 /// Headline numbers for the migration, derived from the versions, slots,
 /// events and status tables. Rates are in `0.0..=1.0`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1988,6 +1998,9 @@ pub struct Metrics {
     pub capacity_last_30_days: u32,
     pub target_end: Option<Date>,
     pub waves: Vec<WaveMetrics>,
+    /// Missed and re-agreed dates by reason, most common first. A move
+    /// recorded without a reason counts under "no reason given".
+    pub reschedule_reasons: Vec<(String, usize)>,
 }
 
 /// Progress of one wave.
@@ -2158,6 +2171,7 @@ impl Store {
         let mut recent = 0usize;
         let mut ever_migrated = 0usize;
         let mut ever_rolled_back = 0usize;
+        let mut reasons: Vec<(String, usize)> = Vec::new();
         let window_start =
             today.checked_sub(jiff::Span::new().days(30)).unwrap_or(today);
         for p in &pairs {
@@ -2175,6 +2189,20 @@ impl Store {
                 .any(|e| e.event == "missed" || e.event == "reconfirmed");
             if moved {
                 m.rescheduled += 1;
+            }
+            for e in events
+                .iter()
+                .filter(|e| e.event == "missed" || e.event == "reconfirmed")
+            {
+                let why = e
+                    .note
+                    .clone()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "no reason given".into());
+                match reasons.iter_mut().find(|(r, _)| *r == why) {
+                    Some((_, n)) => *n += 1,
+                    None => reasons.push((why, 1)),
+                }
             }
             let rolled = events.iter().any(|e| e.event == "rolled_back");
             if events.iter().any(|e| e.event == "migrated") {
@@ -2203,6 +2231,8 @@ impl Store {
                 }
             }
         }
+        reasons.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        m.reschedule_reasons = reasons;
         m.reschedule_rate = if m.scheduled == 0 {
             0.0
         } else {

@@ -68,6 +68,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     draw_depends_picker(app, frame);
     draw_holiday_picker(app, frame);
     draw_merge_prompt(app, frame);
+    draw_reason_picker(app, frame);
     draw_action_menu(app, frame);
 }
 
@@ -590,6 +591,48 @@ fn draw_holiday_picker(app: &mut App, frame: &mut Frame) {
             .block(popup_block(
                 format!("Which US federal holidays of {} do you observe?", p.year),
                 "space to tick or untick   enter to add the ticked ones   esc to cancel".into(),
+                dim(),
+            ))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        popup,
+        &mut p.state,
+    );
+}
+
+fn draw_reason_picker(app: &mut App, frame: &mut Frame) {
+    let Some(p) = app.reason_picker.as_mut() else { return };
+    let popup = popup_rect(
+        frame,
+        64,
+        u16::try_from(crate::ReasonPicker::rows()).unwrap_or(6) + 5,
+    );
+    frame.render_widget(Clear, popup);
+    let mut items: Vec<ListItem> = precip_db::RESCHEDULE_REASONS
+        .iter()
+        .map(|r| ListItem::new(Line::from((*r).to_string())))
+        .collect();
+    items.push(ListItem::new(Line::from(match &p.custom {
+        Some(text) => vec![Span::raw("other: "), value(format!("{text}_"))],
+        None => vec![Span::styled("other, typed in", dim())],
+    })));
+    let (what, title) = match &p.pending {
+        crate::Pending::Missed { workload, environment } => {
+            ("didn't happen", format!("{workload} / {environment}"))
+        }
+        crate::Pending::Reconfirm { workload, environment, date } => {
+            ("moves", format!("{workload} / {environment} to {date}"))
+        }
+    };
+    let hint = if p.custom.is_some() {
+        "type the reason, enter to save   esc to pick from the list"
+    } else {
+        "enter to choose   esc to cancel"
+    };
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(popup_block(
+                format!("Why it {what}: {title}"),
+                hint.into(),
                 dim(),
             ))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
@@ -1793,8 +1836,10 @@ fn draw_schedule(app: &mut App, frame: &mut Frame, area: Rect) {
         );
         return;
     };
+    let header_rows =
+        if v.metrics.reschedule_reasons.is_empty() { 8 } else { 9 };
     let [rules_area, table_area] =
-        Layout::vertical([Constraint::Length(8), Constraint::Min(6)])
+        Layout::vertical([Constraint::Length(header_rows), Constraint::Min(6)])
             .areas(area);
 
     let r = &v.rules;
@@ -1879,6 +1924,18 @@ fn draw_schedule(app: &mut App, frame: &mut Frame, area: Rect) {
         ]),
         Line::from(wave_spans(m)),
     ];
+    let mut lines = lines;
+    if !m.reschedule_reasons.is_empty() {
+        let list: Vec<String> = m
+            .reschedule_reasons
+            .iter()
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect();
+        lines.push(Line::from(vec![
+            Span::styled("why moved  ", dim()),
+            Span::raw(list.join("   ")),
+        ]));
+    }
     frame.render_widget(
         Paragraph::new(lines).block(
             panel(&format!("Schedule   version #{}", v.version))

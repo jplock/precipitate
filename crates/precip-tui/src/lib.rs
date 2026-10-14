@@ -600,6 +600,27 @@ pub struct HolidayPicker {
     pub state: ListState,
 }
 
+/// What a reason is being asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    Missed { workload: String, environment: String },
+    Reconfirm { workload: String, environment: String, date: jiff::civil::Date },
+}
+
+/// Why an agreed date moved: the usual reasons, or typed.
+pub struct ReasonPicker {
+    pub pending: Pending,
+    pub state: ListState,
+    /// Text being typed for the "other" row.
+    pub custom: Option<String>,
+}
+
+impl ReasonPicker {
+    pub fn rows() -> usize {
+        precip_db::RESCHEDULE_REASONS.len() + 1
+    }
+}
+
 /// Pick another pair for the open pair editor to depend on.
 pub struct DependsPicker {
     pub candidates: Vec<(String, String)>,
@@ -716,6 +737,7 @@ pub struct App {
     pub pair_editor: Option<PairEditor>,
     pub depends_picker: Option<DependsPicker>,
     pub holiday_picker: Option<HolidayPicker>,
+    pub reason_picker: Option<ReasonPicker>,
     pub merge_prompt: Option<MergePrompt>,
     pub history: Option<HistoryView>,
     pub weekday_target: WeekdayTarget,
@@ -760,6 +782,7 @@ impl App {
             pair_editor: None,
             depends_picker: None,
             holiday_picker: None,
+            reason_picker: None,
             merge_prompt: None,
             history: None,
             weekday_target: WeekdayTarget::Global,
@@ -1127,6 +1150,7 @@ impl App {
         environment: &str,
         status: precip_engine::schedule::Status,
         date: Option<jiff::civil::Date>,
+        note: Option<&str>,
     ) -> Result<(), TuiError> {
         let Some(store) = &self.store else { return Ok(()) };
         let today = jiff::Zoned::now().date();
@@ -1137,7 +1161,7 @@ impl App {
                 status,
                 date,
                 today,
-                None,
+                note,
             ));
         match result {
             Ok(()) => {
@@ -1170,6 +1194,52 @@ impl App {
 
     /// Open the menu for the selected row: a slot, or a finding below
     /// the slots.
+    fn ask_reason(&mut self, pending: Pending) {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        self.reason_picker =
+            Some(ReasonPicker { pending, state, custom: None });
+    }
+
+    /// Enter in the reason picker: a listed reason applies at once, the
+    /// last row opens a box to type one.
+    fn reason_enter(&mut self) -> Result<(), TuiError> {
+        let Some(p) = self.reason_picker.as_mut() else { return Ok(()) };
+        let i = p.state.selected().unwrap_or(0);
+        let reason = match p.custom.take() {
+            Some(text) => text.trim().to_string(),
+            None if i < precip_db::RESCHEDULE_REASONS.len() => {
+                precip_db::RESCHEDULE_REASONS[i].to_string()
+            }
+            None => {
+                p.custom = Some(String::new());
+                return Ok(());
+            }
+        };
+        if reason.is_empty() {
+            self.note("a reason is needed so the reschedule rate can say why");
+            return Ok(());
+        }
+        let Some(p) = self.reason_picker.take() else { return Ok(()) };
+        match p.pending {
+            Pending::Missed { workload, environment } => self.change_status(
+                &workload,
+                &environment,
+                precip_engine::schedule::Status::Missed,
+                None,
+                Some(&reason),
+            ),
+            Pending::Reconfirm { workload, environment, date } => self
+                .change_status(
+                    &workload,
+                    &environment,
+                    precip_engine::schedule::Status::Confirmed,
+                    Some(date),
+                    Some(&reason),
+                ),
+        }
+    }
+
     /// Open the menu for the selected schedule row: a slot, or a finding
     /// below the slots.
     fn open_action_menu(&mut self) {
@@ -1284,17 +1354,16 @@ impl App {
                 &e,
                 precip_engine::schedule::Status::Migrated,
                 None,
-            )?,
-            Action::DidNotHappen => self.change_status(
-                &w,
-                &e,
-                precip_engine::schedule::Status::Missed,
                 None,
             )?,
+            Action::DidNotHappen => {
+                self.ask_reason(Pending::Missed { workload: w, environment: e })
+            }
             Action::RolledBack => self.change_status(
                 &w,
                 &e,
                 precip_engine::schedule::Status::RolledBack,
+                None,
                 None,
             )?,
             Action::ShowResources => {
@@ -2164,6 +2233,36 @@ impl App {
                 }
                 continue;
             }
+            if let Some(p) = self.reason_picker.as_mut() {
+                if let Some(text) = p.custom.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => p.custom = None,
+                        KeyCode::Backspace => {
+                            text.pop();
+                        }
+                        KeyCode::Char(c) => text.push(c),
+                        KeyCode::Enter => self.reason_enter()?,
+                        _ => {}
+                    }
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc => self.reason_picker = None,
+                    KeyCode::Down => {
+                        let i = p.state.selected().unwrap_or(0);
+                        p.state.select(Some(
+                            (i + 1).min(ReasonPicker::rows() - 1),
+                        ));
+                    }
+                    KeyCode::Up => {
+                        let i = p.state.selected().unwrap_or(0);
+                        p.state.select(Some(i.saturating_sub(1)));
+                    }
+                    KeyCode::Enter => self.reason_enter()?,
+                    _ => {}
+                }
+                continue;
+            }
             if let Some(p) = self.merge_prompt.as_mut() {
                 match key.code {
                     KeyCode::Esc => self.merge_prompt = None,
@@ -2330,14 +2429,24 @@ impl App {
                             .and_then(|i| p.dates.get(i).copied());
                         let (w, e) =
                             (p.workload.clone(), p.environment.clone());
+                        let replacing = p.replacing;
                         self.date_picker = None;
                         if let Some(d) = chosen {
-                            self.change_status(
-                                &w,
-                                &e,
-                                precip_engine::schedule::Status::Confirmed,
-                                Some(d),
-                            )?;
+                            if replacing {
+                                self.ask_reason(Pending::Reconfirm {
+                                    workload: w,
+                                    environment: e,
+                                    date: d,
+                                });
+                            } else {
+                                self.change_status(
+                                    &w,
+                                    &e,
+                                    precip_engine::schedule::Status::Confirmed,
+                                    Some(d),
+                                    None,
+                                )?;
+                            }
                         }
                     }
                     _ => {}

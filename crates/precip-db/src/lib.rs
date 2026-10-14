@@ -13,8 +13,8 @@ mod schema;
 
 pub use schedule::{
     Metrics, MigrationEvent, PairStatus, PlanEvent, PlanEventRecord,
-    ScheduleVersion, Verification, WaveMetrics, weekday_name, weekday_preset,
-    weekdays_from_spec,
+    RESCHEDULE_REASONS, ScheduleVersion, Verification, WaveMetrics,
+    weekday_name, weekday_preset, weekdays_from_spec,
 };
 
 use camino::Utf8Path;
