@@ -1,9 +1,6 @@
 # precip
 
-precip answers one question for a company leaving Amazon Web Services
-(AWS): how many Oxide racks does it need, and when can each workload move?
-
-precip scans the AWS accounts, groups the resources it finds into
+precip scans Amazon Web Services (AWS) accounts, groups the resources it finds into
 workloads, sizes the Oxide sleds and racks those workloads need, and
 schedules each migration on a calendar. It ships as one static binary. The
 binary has a terminal user interface (TUI) and a command line. Both read
