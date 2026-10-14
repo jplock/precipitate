@@ -1,0 +1,39 @@
+[package]
+name = "precip-aws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Read-only AWS discovery for precip"
+
+[dependencies]
+# `default-https-client` selects rustls with aws-lc-rs. The `rustls` feature on
+# these crates is the legacy hyper 0.14 client and pulls in ring; do not enable it.
+aws-config = { workspace = true, features = ["rt-tokio", "default-https-client", "sso", "credentials-process", "credentials-login"] }
+aws-credential-types = { workspace = true }
+aws-sdk-autoscaling = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-cloudformation = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-dynamodb = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-ec2 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-ecs = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-efs = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-eks = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-elasticache = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-elasticloadbalancingv2 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-lambda = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-organizations = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-rds = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-resourceexplorer2 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-resourcegroupstagging = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-sts = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+jiff = { workspace = true, features = ["std"] }
+precip-types.workspace = true
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+uuid = { workspace = true, features = ["std", "v7"] }
+
+[lints]
+workspace = true

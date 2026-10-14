@@ -1,0 +1,515 @@
+//! VPCs, subnets, security groups and their rules.
+
+use precip_types::scan::{Edge, Relationship, ResourceKind};
+
+use crate::collect::{
+    BoxFuture, CollectError, Collected, Collector, RegionContext, tags,
+};
+
+pub struct Vpcs;
+
+impl Collector for Vpcs {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeVpcs"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages = ec2.describe_vpcs().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for vpc in page.vpcs() {
+                    let Some(id) = vpc.vpc_id() else { continue };
+                    let cidrs: Vec<&str> = vpc
+                        .cidr_block_association_set()
+                        .iter()
+                        .filter_map(|c| c.cidr_block())
+                        .collect();
+                    out.resources.push(ctx.resource(
+                        ctx.arn("ec2", &format!("vpc/{id}")),
+                        ResourceKind::Vpc,
+                        tags(vpc.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({
+                            "vpc_id": id,
+                            "cidr_block": vpc.cidr_block(),
+                            "cidr_blocks": cidrs,
+                            "is_default": vpc.is_default(),
+                            "owner_id": vpc.owner_id(),
+                        }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+pub struct Subnets;
+
+impl Collector for Subnets {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeSubnets"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages = ec2.describe_subnets().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for s in page.subnets() {
+                    let Some(id) = s.subnet_id() else { continue };
+                    out.resources.push(ctx.resource(
+                        ctx.arn("ec2", &format!("subnet/{id}")),
+                        ResourceKind::Subnet,
+                        tags(s.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({
+                            "subnet_id": id,
+                            "vpc_id": s.vpc_id(),
+                            "cidr_block": s.cidr_block(),
+                            "ipv6_cidr_blocks": s.ipv6_cidr_block_association_set().iter()
+                                .filter_map(|c| c.ipv6_cidr_block()).collect::<Vec<_>>(),
+                            "availability_zone": s.availability_zone(),
+                            "map_public_ip_on_launch": s.map_public_ip_on_launch(),
+                        }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+pub struct SecurityGroups;
+
+impl Collector for SecurityGroups {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeSecurityGroups"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages =
+                ec2.describe_security_groups().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for sg in page.security_groups() {
+                    let Some(id) = sg.group_id() else { continue };
+                    out.resources.push(ctx.resource(
+                        ctx.arn("ec2", &format!("security-group/{id}")),
+                        ResourceKind::SecurityGroup,
+                        tags(sg.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({
+                            "group_id": id,
+                            "group_name": sg.group_name(),
+                            "description": sg.description(),
+                            "vpc_id": sg.vpc_id(),
+                        }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+/// One row per rule, with the source kept distinct: CIDR, prefix list or
+/// another security group. The group-to-group case is what the firewall
+/// translation has to flag.
+pub struct SecurityGroupRules;
+
+impl Collector for SecurityGroupRules {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeSecurityGroupRules"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages =
+                ec2.describe_security_group_rules().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for rule in page.security_group_rules() {
+                    let Some(id) = rule.security_group_rule_id() else {
+                        continue;
+                    };
+                    let group_arn = rule.group_id().map(|g| {
+                        ctx.arn("ec2", &format!("security-group/{g}"))
+                    });
+                    let arn =
+                        ctx.arn("ec2", &format!("security-group-rule/{id}"));
+                    if let Some(g) = &group_arn {
+                        out.relationships.push(Relationship {
+                            from_arn: arn.clone(),
+                            edge: Edge::RuleOf,
+                            to_arn: g.clone(),
+                        });
+                    }
+                    let referenced_group =
+                        rule.referenced_group_info().and_then(|r| r.group_id());
+                    out.resources.push(ctx.resource(
+                        arn,
+                        ResourceKind::SecurityGroupRule,
+                        tags(rule.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({
+                            "rule_id": id,
+                            "group_id": rule.group_id(),
+                            "egress": rule.is_egress(),
+                            "ip_protocol": rule.ip_protocol(),
+                            "from_port": rule.from_port(),
+                            "to_port": rule.to_port(),
+                            "cidr_ipv4": rule.cidr_ipv4(),
+                            "cidr_ipv6": rule.cidr_ipv6(),
+                            "prefix_list_id": rule.prefix_list_id(),
+                            "referenced_group_id": referenced_group,
+                            "description": rule.description(),
+                        }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+pub struct RouteTables;
+
+impl Collector for RouteTables {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeRouteTables"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages = ec2.describe_route_tables().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for rt in page.route_tables() {
+                    let Some(id) = rt.route_table_id() else { continue };
+                    let routes: Vec<serde_json::Value> = rt
+                        .routes()
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "destination": r.destination_cidr_block()
+                                    .or(r.destination_ipv6_cidr_block())
+                                    .or(r.destination_prefix_list_id()),
+                                "target": r.gateway_id()
+                                    .or(r.nat_gateway_id())
+                                    .or(r.transit_gateway_id())
+                                    .or(r.vpc_peering_connection_id())
+                                    .or(r.instance_id())
+                                    .or(r.network_interface_id()),
+                                "state": r.state().map(|s| s.as_str()),
+                            })
+                        })
+                        .collect();
+                    let subnets: Vec<&str> = rt
+                        .associations()
+                        .iter()
+                        .filter_map(|a| a.subnet_id())
+                        .collect();
+                    let is_main = rt
+                        .associations()
+                        .iter()
+                        .any(|a| a.main() == Some(true));
+                    out.resources.push(ctx.resource(
+                        ctx.arn("ec2", &format!("route-table/{id}")),
+                        ResourceKind::RouteTable,
+                        tags(rt.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({
+                            "route_table_id": id,
+                            "vpc_id": rt.vpc_id(),
+                            "main": is_main,
+                            "subnets": subnets,
+                            "routes": routes,
+                        }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+pub struct InternetGateways;
+
+impl Collector for InternetGateways {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeInternetGateways"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages =
+                ec2.describe_internet_gateways().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for igw in page.internet_gateways() {
+                    let Some(id) = igw.internet_gateway_id() else { continue };
+                    let vpcs: Vec<&str> = igw
+                        .attachments()
+                        .iter()
+                        .filter_map(|a| a.vpc_id())
+                        .collect();
+                    out.resources.push(ctx.resource(
+                        ctx.arn("ec2", &format!("internet-gateway/{id}")),
+                        ResourceKind::InternetGateway,
+                        tags(igw.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({ "internet_gateway_id": id, "vpcs": vpcs }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+pub struct NatGateways;
+
+impl Collector for NatGateways {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeNatGateways"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages = ec2.describe_nat_gateways().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for nat in page.nat_gateways() {
+                    let Some(id) = nat.nat_gateway_id() else { continue };
+                    let public_ips: Vec<&str> = nat
+                        .nat_gateway_addresses()
+                        .iter()
+                        .filter_map(|a| a.public_ip())
+                        .collect();
+                    out.resources.push(ctx.resource(
+                        ctx.arn("ec2", &format!("natgateway/{id}")),
+                        ResourceKind::NatGateway,
+                        tags(nat.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({
+                            "nat_gateway_id": id,
+                            "vpc_id": nat.vpc_id(),
+                            "subnet_id": nat.subnet_id(),
+                            "state": nat.state().map(|s| s.as_str()),
+                            "connectivity": nat.connectivity_type().map(|c| c.as_str()),
+                            "public_ips": public_ips,
+                        }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+pub struct PeeringConnections;
+
+impl Collector for PeeringConnections {
+    fn name(&self) -> &'static str {
+        "ec2:DescribeVpcPeeringConnections"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        _prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let mut out = Collected::default();
+            let mut pages =
+                ec2.describe_vpc_peering_connections().into_paginator().send();
+            while let Some(page) = pages.next().await {
+                let page = page.map_err(CollectError::new(self.name()))?;
+                for pc in page.vpc_peering_connections() {
+                    let Some(id) = pc.vpc_peering_connection_id() else {
+                        continue;
+                    };
+                    let side = |v: Option<
+                        &aws_sdk_ec2::types::VpcPeeringConnectionVpcInfo,
+                    >| {
+                        serde_json::json!({
+                            "vpc_id": v.and_then(|x| x.vpc_id()),
+                            "owner_id": v.and_then(|x| x.owner_id()),
+                            "region": v.and_then(|x| x.region()),
+                            "cidr_block": v.and_then(|x| x.cidr_block()),
+                        })
+                    };
+                    out.resources.push(ctx.resource(
+                        ctx.arn("ec2", &format!("vpc-peering-connection/{id}")),
+                        ResourceKind::VpcPeeringConnection,
+                        tags(pc.tags(), |t| t.key(), |t| t.value()),
+                        serde_json::json!({
+                            "vpc_peering_connection_id": id,
+                            "status": pc.status().and_then(|s| s.code()).map(|c| c.as_str()),
+                            "requester": side(pc.requester_vpc_info()),
+                            "accepter": side(pc.accepter_vpc_info()),
+                        }),
+                    ));
+                }
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}
+
+/// Managed prefix lists with their entries, so a security group rule that
+/// names one can be expanded to CIDRs. Only lists referenced by a rule
+/// are described, in the second stage.
+pub struct PrefixLists;
+
+impl Collector for PrefixLists {
+    fn needs_prior(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "ec2:GetManagedPrefixListEntries"
+    }
+
+    fn collect<'a>(
+        &'a self,
+        ctx: &'a RegionContext,
+        prior: &'a Collected,
+    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
+        Box::pin(async move {
+            let mut out = Collected::default();
+            let ids = prior.distinct_field(
+                ResourceKind::SecurityGroupRule,
+                "prefix_list_id",
+            );
+            if ids.is_empty() {
+                return Ok(out);
+            }
+            let ec2 = aws_sdk_ec2::Client::new(&ctx.config);
+            let lists = ec2
+                .describe_managed_prefix_lists()
+                .set_prefix_list_ids(Some(ids.clone()))
+                .send()
+                .await
+                .map_err(CollectError::new("ec2:DescribeManagedPrefixLists"))?;
+            for pl in lists.prefix_lists() {
+                let Some(id) = pl.prefix_list_id() else { continue };
+                let mut entries = Vec::new();
+                let mut pages = ec2
+                    .get_managed_prefix_list_entries()
+                    .prefix_list_id(id)
+                    .into_paginator()
+                    .send();
+                while let Some(page) = pages.next().await {
+                    let page = page.map_err(CollectError::new(self.name()))?;
+                    entries.extend(
+                        page.entries()
+                            .iter()
+                            .filter_map(|e| e.cidr().map(str::to_string)),
+                    );
+                }
+                let arn =
+                    pl.prefix_list_arn().map(str::to_string).unwrap_or_else(
+                        || ctx.arn("ec2", &format!("prefix-list/{id}")),
+                    );
+                out.resources.push(ctx.resource(
+                    arn,
+                    ResourceKind::PrefixList,
+                    tags(pl.tags(), |t| t.key(), |t| t.value()),
+                    serde_json::json!({
+                        "prefix_list_id": id,
+                        "name": pl.prefix_list_name(),
+                        "owner_id": pl.owner_id(),
+                        "address_family": pl.address_family(),
+                        "entries": entries,
+                    }),
+                ));
+            }
+            tracing::info!(
+                api = self.name(),
+                count = out.resources.len(),
+                "collected"
+            );
+            Ok(out)
+        })
+    }
+}

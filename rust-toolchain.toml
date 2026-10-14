@@ -1,0 +1,9 @@
+[toolchain]
+# A specific toolchain (rather than "stable") for repeatability. Keep this in
+# sync with recently released stable Rust.
+channel = "1.99.0"
+profile = "default"
+targets = [
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+]

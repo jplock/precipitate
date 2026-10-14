@@ -1,0 +1,61 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PrecipReadOnlyScan",
+      "Effect": "Allow",
+      "Action": [
+        "autoscaling:DescribeAutoScalingGroups",
+        "autoscaling:DescribeLaunchConfigurations",
+        "cloudformation:DescribeStacks",
+        "cloudformation:ListStackResources",
+        "dynamodb:ListTables",
+        "ec2:DescribeAddresses",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInternetGateways",
+        "ec2:DescribeLaunchTemplateVersions",
+        "ec2:DescribeManagedPrefixLists",
+        "ec2:DescribeNatGateways",
+        "ec2:DescribeRegions",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVpcPeeringConnections",
+        "ec2:DescribeVpcs",
+        "ec2:GetManagedPrefixListEntries",
+        "ecs:ListClusters",
+        "eks:ListClusters",
+        "elasticache:DescribeCacheClusters",
+        "elasticfilesystem:DescribeFileSystems",
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetHealth",
+        "lambda:ListFunctions",
+        "organizations:DescribeOrganization",
+        "organizations:DescribeOrganizationalUnit",
+        "organizations:ListAccounts",
+        "organizations:ListParents",
+        "rds:DescribeDBInstances",
+        "resource-explorer-2:GetDefaultView",
+        "resource-explorer-2:ListIndexes",
+        "resource-explorer-2:Search",
+        "sts:GetCallerIdentity",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PrecipAssumeMemberRole",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:*:iam::*:role/OrganizationAccountAccessRole",
+        "arn:*:iam::*:role/AWSControlTowerExecution"
+      ]
+    }
+  ]
+}

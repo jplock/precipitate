@@ -1,0 +1,12 @@
+precip
+Copyright (c) 2026 Justin Plock
+Licensed under the Mozilla Public License, v. 2.0. See LICENSE.
+
+Oxide and Oxide Computer are trademarks of Oxide Computer Company.
+precip is an independent project. It is not affiliated with, sponsored
+by, or endorsed by Oxide Computer Company. Oxide's name is used only to
+describe what the tool sizes for.
+
+The terminal palette and the banner rendering follow Omicron's wicket
+(https://github.com/oxidecomputer/omicron), Copyright Oxide Computer
+Company, Mozilla Public License, v. 2.0.

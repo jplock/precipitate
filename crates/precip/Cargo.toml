@@ -1,0 +1,34 @@
+[package]
+name = "precip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Scan an AWS estate and size it for Oxide racks"
+
+[[bin]]
+name = "precip"
+path = "src/main.rs"
+
+[dependencies]
+aws-config = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+anyhow = { workspace = true, features = ["std"] }
+camino = { workspace = true }
+clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context", "suggestions", "color"] }
+jiff = { workspace = true, features = ["std", "tz-system"] }
+mimalloc = { workspace = true, features = ["secure"] }
+precip-aws.workspace = true
+precip-db.workspace = true
+precip-tui.workspace = true
+precip-engine.workspace = true
+precip-types.workspace = true
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tracing = { workspace = true, features = ["std"] }
+xdg = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "ansi", "env-filter", "std"] }
+
+
+[lints]
+workspace = true

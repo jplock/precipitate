@@ -1,0 +1,12 @@
+# Static Linux binaries are built with cargo-zigbuild so that the bundled
+# SQLite C sources link against musl without a cross toolchain:
+#
+#   cargo zigbuild --release --target x86_64-unknown-linux-musl
+#   cargo zigbuild --release --target aarch64-unknown-linux-musl
+#
+# macOS and Windows builds use the host target and are not static.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

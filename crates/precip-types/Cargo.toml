@@ -1,0 +1,18 @@
+[package]
+name = "precip-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Domain types shared across precip crates"
+
+[dependencies]
+jiff = { workspace = true, features = ["std", "serde"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+toml = { workspace = true, features = ["std", "parse", "serde"] }
+
+[lints]
+workspace = true

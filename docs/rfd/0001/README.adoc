@@ -7,127 +7,179 @@
 :revremark: State: {state} | {discussion}
 :authors: Justin Plock <justin@plock.net>
 
-= 0001 precip: AWS-to-Oxide scanner and rack sizing
+= 0001 precip: AWS workload scanner and rack sizing
 {authors}
-
-// SCAFFOLD: the NOTE blocks below are prompts. Replace each one with your own
-// prose and delete it. See notes.adoc for collected facts and sources.
 
 == Background
 
-[NOTE]
-====
-* What question does a prospect ask before buying a rack, and who asks it?
-* How is it answered today, and what goes wrong (spreadsheets, guesswork,
-  surprises after purchase)?
-* Why is a fixed-capacity purchase different from cloud sizing?
-* What did you see firsthand (AWS, RTX) that makes this real?
-====
+Oxide sells racks with a variable number of sleds in each rack. A greenfield deployment is a new data
+center built-out with new infrastructure. A brownfield deployment moves existing workloads onto new
+infrastructure. This RFD focuses on brownfield deployments where a potential customer wants to exit AWS
+and run those workloads on Oxide.
+
+Before a customer can purchase a rack, they and their Oxide Solution Architect need to determine how many
+racks and sleds they will need to run what they have today, what will not be migrating, and have sufficient
+capacity for future growth. Many teams will export lists of workloads into spreadsheets to aid with dispositioning,
+right-sizing, and tracking the migration efforts.
+
+Having worked at AWS, I have seen the reverse migrations of moving workloads into the cloud, being
+managed and sized primarily through Excel spreadsheets (and newer offerings such as AWS Transform MGN).
+Spreadsheets are difficult to keep updated, especially when cloud environments change frequently.
+
+It is important to properly size the Oxide deployment to ensure customers are not undersized and they
+would need to wait for additional capacity to come online. It is also important not to oversize customer
+deployments and have them pay for capacity they do not need.
 
 == Goals and non-goals
 
-[NOTE]
-====
-* Goals: what must a user be able to answer after one session?
-* Non-goals: what will precip deliberately not do (live migration, cost
-  modeling, non-AWS sources in v1, ...)? Say why for each.
-====
+The goal of the workload scanner is to capture a point-in-time representation of a potential customer's
+cloud estate by read-only scanning their AWS accounts. The scanner will operate from the command line
+and be distributed as Linux, MacOS and Windows command-line binaries. The scanner will discover local
+AWS credentials (similar to how the AWS CLI locates credentials), authenticate into the account, and
+discover compute-related resources (EC2 instances, EBS volumes, VPC configurations, etc.). The tool will
+output the total number of scanned vCPU, memory GiB, storage GiB broken down by account, workload and
+environment.
+
+Sled counts and rack counts will be computed with assumptions around growth, and the output will state
+whether CPU, memory or storage was the resource that set the count. Each workload/environment pair will
+be flagged on whether it can be migrated as-is, needs changes, or that it cannot move. The scanner will
+also document which workloads depend on managed services with no Oxide equivalent.
+
+The tool will then persist this information in a format that allows lineage tracking over time, so the
+same tool can be used to monitor migration progress as well.
+
+The tool will output projections around how many Oxide racks and sleds should be purchased based on the
+workload dispositions (retire, retain, rehost, relocate, refactor, repurchase, or replatform) (from AWS' own
+https://docs.aws.amazon.com/prescriptive-guidance/latest/large-migration-guide/migration-strategies.html[migration strategies])
+documentation.
+
+=== Non-goals
+
+The tool will not be responsible for the actual migration of resources. Workload migrations require
+coordinating with stakeholders, aligning around business events, and other activities outside the
+scope of migration tracking. The tool will also target AWS-based workloads initially, but be built
+in a way to support other cloud providers (or VMware) in the future.
 
 == Determinations
 
-[NOTE]
-====
-State each decision in one or two sentences, then justify it in the Design or
-Alternatives sections. Candidates:
+* Scanning will be read-only and support scanning one or more AWS Accounts, either individually or
+by assuming IAM roles through an AWS Organization.
+* The Terminal User Interface (TUI) is the main interface.
+* No overprovisioning by default. We will provision based on sizes, not observed utilization.
+* Units will follow RFD 203 <<rfd203>>
+* State will be appended locally and can be exported (CSV)
+* A workload may span multiple environments and accounts. The workload is the unit for sizing.
 
-* Scanning is read-only and offline-capable (portable inventory file).
-* No overprovisioning by default.
-* Limits live in versioned profiles, not code.
-* Units follow RFD 203.
-* Generated Terraform owns the complete firewall rule set.
-====
+== Scanning
 
-== Design
+Upon first execution, the tool will prompt the user for which AWS CLI profile they'd like to use
+and record that decision. If the profile belongs to an AWS Organization management account, the tool
+will list the member accounts by organizational unit and prompt for which to include, then assume
+the `OrganizationAccountAccessRole` (or a configured role) in each one. The recorded selection can be
+replayed without the TUI for scheduled rescans. The tool will then execute read-only AWS calls across
+the selected AWS Accounts inventorying in-scope resources and persisting that information into the
+local data store. AWS Resource Explorer will be used to speed up discovery if it has been enabled, but
+the EC2, EBS and VPC describe calls are still required for instance types, volume sizes and security
+group rules.
 
-=== Scanning and the inventory file
+Scans are never overwritten so the estate lineage can be tracked over time.
 
-[NOTE]
-====
-* What is collected, from which APIs, with what IAM permissions?
-* Why separate `scan` from `tui`? Who runs each?
-* What goes in the inventory file, and what is deliberately left out
-  (secrets, tags, PII)?
-====
+== Workloads
 
-=== Sizing model
+A best-effort grouping of workloads will be attempted by inspecting AWS CloudFormation Stacks,
+EC2 AutoScaling Groups (ASG), load balancer target groups, and resource tags. Workloads will also be organized
+into separate environments under the same workload. The environment will be determined from tags such
+as `Environment`, from the account or organizational unit name, or from a prefix or suffix on the
+workload name (for example `-prod` or `-dev`).
 
-[NOTE]
-====
-* Walk through the arithmetic: per-instance fit, then sled packing, then
-  rack count. Which constraints bind first?
-* How are headroom (N+1), growth and right-sizing applied, and in what order?
-* How is storage sized given replication and thick provisioning?
-* Which utilization formula does each number use?
-====
+== Sizing
 
-=== Fit checks and blockers
+To properly size an Oxide deployment, we will use the discovered AWS resources as input. vCPU and memory
+will come from provisioned EC2 instances, disk sizes from EBS volumes, and the maximum capacity of an ASG
+will provide instance counts. Only workloads dispositioned as rehost or relocate will be counted.
 
-[NOTE]
-====
-* What makes a workload clean-fit, needs-remediation or blocked?
-* How are managed-service dependencies reported?
-====
+The Oxide rack profile is stored in a local TOML file per Oxide release as the specifications change
+(such as the vCPU cap increasing from 64 to 254, disks per instance from 8 to 12, the guest memory
+reservoir from 86.3% to 91%, and usable memory per sled from 809 GiB to 853 GiB between releases
+<<oxide-rm>>). It will store fields for sleds per rack, cores, threads
+per core, DRAM, the control plane memory reservation and reservoir percentage, NVMe bays and size,
+per-instance caps, and replication factor.
 
-=== Mapping AWS resources to Oxide
+To calculate the number of racks required, we'll calculate each of these variables in order:
 
-[NOTE]
-====
-* Accounts and organizations to silos and projects: what is the default and
-  why?
-* Security groups to firewall rules: where is the translation lossy, and how
-  is that surfaced to the user?
-* Disks: how is growth headroom chosen when disks cannot be resized later?
-====
+. Demand per instance. Instances flagged "cannot move" are recorded and excluded from packing.
++
+----
+vcpu = instance_type.vcpus
+mem  = instance_type.memory_gib
+disk = sum(ebs volume sizes, rounded up to GiB)
+ASG: multiply by max capacity
+----
 
-=== Outputs
+. Growth, per workload or the whole plan.
++
+----
+demand = demand * growth_factor    (default 1.0)
+----
 
-[NOTE]
-====
-* Report, JSON, Terraform, runbook: who consumes each and what must each
-  guarantee?
-* How is the Terraform validated (patina in CI)?
-====
+. Usable capacity per sled. Threshold defaults to 0.75 (<<rfd70>>; the operator guide recommends a 15-30%
+buffer <<oxide-rm>>).
++
+----
+sled_vcpu = cores * threads_per_core * threshold
+sled_mem  = (dram_gib - reservation_gib) * reservoir_pct * threshold
+sled_disk = nvme_bays * bay_size_tib * threshold
+----
 
-== Alternatives considered
+. Pack compute. Sort instances by memory descending, then vCPU descending. First-fit: place each into
+the first sled with room on both axes, open a new sled if none. Memory sorts first because it fills
+the quickest.
++
+----
+compute_sleds = number of sleds opened
+----
 
-[NOTE]
-====
-* Overcommit ratio as a sizing input (and why it was rejected).
-* A web UI instead of a TUI.
-* Live AWS API access only, with no inventory file.
-* Hard-coded limits instead of versioned profiles.
-====
+. Storage. Usable storage per sled is 26.6 TiB <<oxide-rm>>.
++
+----
+storage_demand = total_disk * replication_factor
+storage_sleds  = ceil(storage_demand / sled_disk)
+----
+
+. Sleds. Record which of the two set the count.
++
+----
+sleds = max(compute_sleds, storage_sleds)
+----
+
+. Headroom, N+1 per rack by default.
++
+----
+sleds = sleds + headroom
+----
+
+. Racks. Spare slots are reported as room for N more instances of the median size <<rfd70>>.
++
+----
+racks = ceil(sleds / sleds_per_rack)
+spare = racks * sleds_per_rack - sleds
+----
 
 == Open questions
 
-[NOTE]
-====
-* Which limits are uncertain or release-dependent (vCPU cap, disks per
-  instance)?
-* What would you want to ask Oxide's SEs about how they size today?
-====
+* How do Oxide Solution Architects size workloads today?
+* Is it better to start with a small Oxide deployment and grow it, or should we plan for the future?
+* Are most Oxide deployments greenfield or brownfield?
+* How many vCPUs can be provisioned to guests per sled, and does the control plane reserve any?
+* How many copies of each disk does Crucible keep? The guide gives 26.6 TiB usable per sled, not the
+  factor behind it.
 
-== Security considerations
-
-[NOTE]
-====
-* Scope of the IAM policy; what the inventory file reveals about an estate.
-* Risk of generated firewall rules being more permissive than the source.
-====
-
+[bibliography]
 == External references
 
-[NOTE]
-====
-List the RFDs, docs and source files you relied on (see notes.adoc).
-====
+* [[[rfd21]]] Oxide Computer Co. https://rfd.shared.oxide.computer/rfd/0021[RFD 21: User Networking API]. 2022
+* [[[rfd70]]] Oxide Computer Co. https://rfd.shared.oxide.computer/rfd/0070[RFD 70: Capacity, Allocation, and Utilization]. 2021
+* [[[rfd203]]] Oxide Computer Co. https://rfd.shared.oxide.computer/rfd/0203[RFD 203: Standard units for counting bits]. 2021
+* [[[rfd297]]] Oxide Computer Co. https://rfd.shared.oxide.computer/rfd/0297[RFD 297: Silos and API Resources]. 2022
+* [[[rfd595]]] Oxide Computer Co. https://rfd.shared.oxide.computer/rfd/0595[RFD 595: Oxide CSI Plugin]. 2025
+* [[[oxide-rm]]] Oxide Computer Co. https://docs.oxide.computer/guides/operator/resource-management[Resource Management]. Operator guide, accessed 2026-10-13

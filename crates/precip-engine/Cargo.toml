@@ -1,0 +1,18 @@
+[package]
+name = "precip-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The pure engine: workload grouping, sled and rack sizing, and the migration schedule"
+
+[dependencies]
+jiff = { workspace = true, features = ["std", "serde"] }
+precip-types.workspace = true
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

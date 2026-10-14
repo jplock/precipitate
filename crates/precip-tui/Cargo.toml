@@ -1,0 +1,23 @@
+[package]
+name = "precip-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Terminal interface for precip"
+
+[dependencies]
+camino = { workspace = true }
+crossterm = { workspace = true, features = ["events", "windows"] }
+jiff = { workspace = true, features = ["std", "tz-system"] }
+precip-db.workspace = true
+precip-engine.workspace = true
+precip-types.workspace = true
+ratatui = { workspace = true, features = ["crossterm_0_29", "layout-cache"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[lints]
+workspace = true

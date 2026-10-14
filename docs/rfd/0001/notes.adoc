@@ -11,7 +11,12 @@ Verify anything marked (unverified) before relying on it.
 * Gen 2 sled: one AMD EPYC 9005 (up to 192 cores), 768 GiB, 1152 GiB or
   1.5 TiB DDR5, ten NVMe bays, 2 x 100 GbE.
 * Per rack, guest resources: up to 7,875 vCPU, 30.6 TiB memory, 1.7 PiB NVMe
-  block storage. Up to 91% of sled DRAM provisionable to guests.
+  block storage.
+* Guest memory reservoir: 91% of DRAM after subtracting page tables
+  (`physical / 4096 * 120` bytes) and a 44 GiB control plane earmark, since
+  release 21 (86.3% before). Works out to about 85% of physical DRAM.
+  Source: https://docs.oxide.computer/release-notes/system/21,
+  https://github.com/oxidecomputer/omicron/pull/10791
 * Per-instance vCPU cap: 64 in older release notes vs. 254 in the current
   console. Release-dependent.
   Source: https://docs.oxide.computer/release-notes/system
@@ -138,3 +143,21 @@ anything on encrypted EBS (common, often by default) cannot use VM export.
 Those need another path (rebuild from source images, or block-level copy
 from a snapshot into a raw image), and the report should flag them
 separately.
+
+== Operator guide: resource management
+
+Source: https://docs.oxide.computer/guides/operator/resource-management
+(and https://docs.latest.oxide.computer/guides/operator/resource-management),
+accessed 2026-10-13.
+
+* Maximum usable capacity per sled: 853 GiB memory (current docs) vs
+  809 GiB (latest docs); 27,298 GiB (26.6 TiB) storage in both.
+* Full rack (24 sleds): 26.6 TiB vs 25.2 TiB memory; 853.0 TiB storage.
+* Per instance: up to 254 vCPUs, up to 12 attached disks.
+* Guidance: keep the sum of silo quotas at or below usable rack capacity;
+  maintain a 15-30% buffer of compute for placement flexibility (random
+  sled selection), dynamic workloads, maintenance windows, and instance
+  migrations.
+* Utilization formulas per silo: provisioned ncpus / vcpu quota, provisioned
+  memory / memory quota, disks + snapshots size / storage quota.
+* "The maximum usable capacity may be adjusted in future versions."

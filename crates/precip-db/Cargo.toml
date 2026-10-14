@@ -1,0 +1,28 @@
+[package]
+name = "precip-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Append-only SQLite store for scans and plans"
+
+[dependencies]
+camino = { workspace = true }
+jiff = { workspace = true, features = ["std"] }
+precip-engine.workspace = true
+precip-types.workspace = true
+sea-query = { workspace = true, features = ["backend-sqlite", "derive"] }
+sea-query-sqlx = { workspace = true, features = ["sqlx", "sqlx-sqlite", "runtime-tokio"] }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+sha2 = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "sqlite-bundled", "migrate", "macros"] }
+thiserror = { workspace = true, features = ["std"] }
+tracing = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true
