@@ -297,7 +297,7 @@ mod tests {
     use super::*;
 
     fn gen2() -> Profile {
-        crate::sizing::profiles::builtin("gen2-1152")
+        crate::sizing::profiles::builtin("gen1-1024")
             .expect("listed")
             .expect("parses")
     }

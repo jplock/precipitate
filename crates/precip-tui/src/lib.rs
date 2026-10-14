@@ -30,6 +30,8 @@ pub enum TuiError {
     Io(#[from] std::io::Error),
     #[error("database")]
     Db(#[from] precip_db::DbError),
+    #[error("export")]
+    Export(#[from] serde_json::Error),
 }
 
 /// A running scan: its progress channel and the task that completes it.
@@ -213,6 +215,8 @@ pub struct ScheduleView {
     pub version: i64,
     pub selected: ratatui::widgets::TableState,
     pub today: jiff::civil::Date,
+    /// Show the Gantt chart instead of the table.
+    pub gantt: bool,
 }
 
 /// Picker for the global weekday rule: three presets, then each day of
@@ -600,10 +604,47 @@ pub struct HolidayPicker {
     pub state: ListState,
 }
 
+/// What a reason is being asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    Missed { workload: String, environment: String },
+    Reconfirm { workload: String, environment: String, date: jiff::civil::Date },
+}
+
+/// Why an agreed date moved: the usual reasons, or typed.
+pub struct ReasonPicker {
+    pub pending: Pending,
+    pub state: ListState,
+    /// Text being typed for the "other" row.
+    pub custom: Option<String>,
+}
+
+impl ReasonPicker {
+    pub fn rows() -> usize {
+        precip_db::RESCHEDULE_REASONS.len() + 1
+    }
+}
+
 /// Pick another pair for the open pair editor to depend on.
 pub struct DependsPicker {
     pub candidates: Vec<(String, String)>,
     pub state: ListState,
+}
+
+/// What an export writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    Workloads,
+    Sizing,
+    Schedule,
+}
+
+/// Typing the path an export goes to. The extension picks the format.
+pub struct ExportPrompt {
+    pub kind: ExportKind,
+    pub text: String,
+    /// The path exists; a second Enter overwrites it.
+    pub confirming_overwrite: bool,
 }
 
 /// Typing the workload a name folds into.
@@ -716,6 +757,8 @@ pub struct App {
     pub pair_editor: Option<PairEditor>,
     pub depends_picker: Option<DependsPicker>,
     pub holiday_picker: Option<HolidayPicker>,
+    pub reason_picker: Option<ReasonPicker>,
+    pub export_prompt: Option<ExportPrompt>,
     pub merge_prompt: Option<MergePrompt>,
     pub history: Option<HistoryView>,
     pub weekday_target: WeekdayTarget,
@@ -760,6 +803,8 @@ impl App {
             pair_editor: None,
             depends_picker: None,
             holiday_picker: None,
+            reason_picker: None,
+            export_prompt: None,
             merge_prompt: None,
             history: None,
             weekday_target: WeekdayTarget::Global,
@@ -852,6 +897,27 @@ impl App {
             selected,
             history,
         });
+        Ok(())
+    }
+
+    /// The next built-in profile, saved as the workspace's choice.
+    fn next_profile(&mut self) -> Result<(), TuiError> {
+        let Some(store) = &self.store else { return Ok(()) };
+        let Some(v) = &self.sizing else { return Ok(()) };
+        let names = precip_engine::sizing::profiles::NAMES;
+        let i = names.iter().position(|n| *n == v.profile.name).unwrap_or(0);
+        let next = names[(i + 1) % names.len()];
+        tokio::runtime::Handle::current()
+            .block_on(store.set_sizing_profile(next))?;
+        self.refresh()?;
+        if let Some(v) = &self.sizing {
+            self.note(format!(
+                "sizing with {}: {} GiB per sled, release {}",
+                v.profile.name,
+                v.profile.sled.dram_gib,
+                v.profile.oxide_release
+            ));
+        }
         Ok(())
     }
 
@@ -1013,10 +1079,17 @@ impl App {
         // Keep the assumptions the user has set across refreshes.
         let assumptions =
             self.sizing.as_ref().map(|v| v.assumptions).unwrap_or_default();
+        // The remembered profile, or the built-in when it is not one any
+        // more.
+        let names = precip_engine::sizing::profiles::NAMES;
+        let profile_name = rt
+            .block_on(store.sizing_profile())?
+            .filter(|n| names.contains(&n.as_str()))
+            .unwrap_or_else(|| names[0].to_string());
         self.sizing = match self.scans.first() {
             Some(s) => {
                 let profile =
-                    precip_engine::sizing::profiles::builtin("gen2-1152")
+                    precip_engine::sizing::profiles::builtin(&profile_name)
                         .and_then(Result::ok);
                 match profile {
                     Some(profile) => {
@@ -1054,6 +1127,17 @@ impl App {
         Ok(())
     }
 
+    /// A session left open past midnight computes the new day's
+    /// schedule, so expired confirmations and today's row stay right.
+    fn refresh_on_new_day(&mut self) -> Result<(), TuiError> {
+        let today = jiff::Zoned::now().date();
+        if self.schedule.as_ref().is_some_and(|v| v.today != today) {
+            self.note(format!("new day, {today}: schedule recomputed"));
+            self.recompute_schedule("open")?;
+        }
+        Ok(())
+    }
+
     /// Recompute the calendar from today and keep the selection.
     fn recompute_schedule(&mut self, trigger: &str) -> Result<(), TuiError> {
         let Some(store) = &self.store else { return Ok(()) };
@@ -1077,6 +1161,7 @@ impl App {
             Some(latest) => rt.block_on(store.verify_migrated(&latest.id))?,
             None => Vec::new(),
         };
+        let gantt = self.schedule.as_ref().is_some_and(|v| v.gantt);
         let mut selected =
             self.schedule.as_ref().map(|v| v.selected).unwrap_or_default();
         if selected.selected().is_none() && !schedule.slots.is_empty() {
@@ -1091,6 +1176,7 @@ impl App {
             version,
             selected,
             today,
+            gantt,
         });
         for (w, e) in expired {
             self.note(format!(
@@ -1116,6 +1202,7 @@ impl App {
         environment: &str,
         status: precip_engine::schedule::Status,
         date: Option<jiff::civil::Date>,
+        note: Option<&str>,
     ) -> Result<(), TuiError> {
         let Some(store) = &self.store else { return Ok(()) };
         let today = jiff::Zoned::now().date();
@@ -1126,7 +1213,7 @@ impl App {
                 status,
                 date,
                 today,
-                None,
+                note,
             ));
         match result {
             Ok(()) => {
@@ -1159,6 +1246,132 @@ impl App {
 
     /// Open the menu for the selected row: a slot, or a finding below
     /// the slots.
+    fn open_export(&mut self, kind: ExportKind) {
+        let (what, ext) = match kind {
+            ExportKind::Workloads => ("workloads", "csv"),
+            ExportKind::Sizing => ("sizing", "csv"),
+            ExportKind::Schedule => ("schedule", "ics"),
+        };
+        self.export_prompt = Some(ExportPrompt {
+            kind,
+            text: format!("precip-{}-{what}.{ext}", self.context.workspace),
+            confirming_overwrite: false,
+        });
+    }
+
+    /// Enter in the export prompt: write the file, after a second Enter
+    /// when it already exists.
+    fn apply_export(&mut self) -> Result<(), TuiError> {
+        let Some(p) = self.export_prompt.as_mut() else { return Ok(()) };
+        let path = camino::Utf8PathBuf::from(p.text.trim());
+        if path.as_str().is_empty() {
+            self.note("type a file name ending in .csv, .json or .ics");
+            return Ok(());
+        }
+        if path.exists() && !p.confirming_overwrite {
+            p.confirming_overwrite = true;
+            return Ok(());
+        }
+        let kind = p.kind;
+        self.export_prompt = None;
+        let ext = path.extension().unwrap_or_default().to_lowercase();
+        let text = match (kind, ext.as_str()) {
+            (ExportKind::Workloads, "csv") => {
+                precip_db::export::workloads_csv(&self.workloads)
+            }
+            (ExportKind::Workloads, "json") => {
+                precip_db::export::workloads_json(&self.workloads)?
+            }
+            (ExportKind::Sizing, "csv") => match &self.sizing {
+                Some(v) => precip_db::export::sizing_csv(&v.instances),
+                None => return Ok(()),
+            },
+            (ExportKind::Sizing, "json") => match &self.sizing {
+                Some(v) => precip_db::export::sizing_json(
+                    &v.profile,
+                    &v.assumptions,
+                    &v.result,
+                    &v.demand,
+                    &v.instances,
+                )?,
+                None => return Ok(()),
+            },
+            (ExportKind::Schedule, "csv") => match &self.schedule {
+                Some(v) => precip_db::export::schedule_csv(&v.schedule),
+                None => return Ok(()),
+            },
+            (ExportKind::Schedule, "json") => match &self.schedule {
+                Some(v) => precip_db::export::schedule_json(&v.schedule)?,
+                None => return Ok(()),
+            },
+            (ExportKind::Schedule, "ics") => match &self.schedule {
+                Some(v) => precip_db::export::schedule_ics(
+                    &v.schedule,
+                    &self.context.workspace,
+                    jiff::Timestamp::now(),
+                ),
+                None => return Ok(()),
+            },
+            (_, other) => {
+                self.note(format!(
+                    ".{other} is not a format this export knows; use .csv, .json or .ics"
+                ));
+                return Ok(());
+            }
+        };
+        match std::fs::write(&path, text) {
+            Ok(()) => self.note(format!("wrote {path}")),
+            Err(e) => self.note(format!("could not write {path}: {e}")),
+        }
+        Ok(())
+    }
+
+    fn ask_reason(&mut self, pending: Pending) {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        self.reason_picker =
+            Some(ReasonPicker { pending, state, custom: None });
+    }
+
+    /// Enter in the reason picker: a listed reason applies at once, the
+    /// last row opens a box to type one.
+    fn reason_enter(&mut self) -> Result<(), TuiError> {
+        let Some(p) = self.reason_picker.as_mut() else { return Ok(()) };
+        let i = p.state.selected().unwrap_or(0);
+        let reason = match p.custom.take() {
+            Some(text) => text.trim().to_string(),
+            None if i < precip_db::RESCHEDULE_REASONS.len() => {
+                precip_db::RESCHEDULE_REASONS[i].to_string()
+            }
+            None => {
+                p.custom = Some(String::new());
+                return Ok(());
+            }
+        };
+        if reason.is_empty() {
+            self.note("a reason is needed so the reschedule rate can say why");
+            return Ok(());
+        }
+        let Some(p) = self.reason_picker.take() else { return Ok(()) };
+        match p.pending {
+            Pending::Missed { workload, environment } => self.change_status(
+                &workload,
+                &environment,
+                precip_engine::schedule::Status::Missed,
+                None,
+                Some(&reason),
+            ),
+            Pending::Reconfirm { workload, environment, date } => self
+                .change_status(
+                    &workload,
+                    &environment,
+                    precip_engine::schedule::Status::Confirmed,
+                    Some(date),
+                    Some(&reason),
+                ),
+        }
+    }
+
     /// Open the menu for the selected schedule row: a slot, or a finding
     /// below the slots.
     fn open_action_menu(&mut self) {
@@ -1254,23 +1467,35 @@ impl App {
         let (w, e) = (m.workload.clone(), m.environment.clone());
         self.action_menu = None;
         match action {
-            Action::AgreeDate | Action::ChangeDate => self.open_date_picker(),
+            Action::AgreeDate | Action::ChangeDate => {
+                let waiting = match &self.store {
+                    Some(store) => tokio::runtime::Handle::current()
+                        .block_on(store.unfinished_dependencies(&w, &e))?,
+                    None => Vec::new(),
+                };
+                if let Some((dw, de)) = waiting.first() {
+                    self.note(format!(
+                        "{w} / {e} waits for {dw} / {de}, which has not migrated; agree that date first"
+                    ));
+                } else {
+                    self.open_date_picker();
+                }
+            }
             Action::Done => self.change_status(
                 &w,
                 &e,
                 precip_engine::schedule::Status::Migrated,
                 None,
-            )?,
-            Action::DidNotHappen => self.change_status(
-                &w,
-                &e,
-                precip_engine::schedule::Status::Missed,
                 None,
             )?,
+            Action::DidNotHappen => {
+                self.ask_reason(Pending::Missed { workload: w, environment: e })
+            }
             Action::RolledBack => self.change_status(
                 &w,
                 &e,
                 precip_engine::schedule::Status::RolledBack,
+                None,
                 None,
             )?,
             Action::ShowResources => {
@@ -2095,6 +2320,7 @@ impl App {
             self.poll()?;
             terminal.draw(|frame| ui::draw(self, frame))?;
             if !event::poll(Duration::from_millis(100))? {
+                self.refresh_on_new_day()?;
                 continue;
             }
             let key = match event::read()? {
@@ -2135,6 +2361,52 @@ impl App {
                         m.confirming = None;
                     }
                     KeyCode::Enter => self.action_menu_enter()?,
+                    _ => {}
+                }
+                continue;
+            }
+            if let Some(p) = self.reason_picker.as_mut() {
+                if let Some(text) = p.custom.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => p.custom = None,
+                        KeyCode::Backspace => {
+                            text.pop();
+                        }
+                        KeyCode::Char(c) => text.push(c),
+                        KeyCode::Enter => self.reason_enter()?,
+                        _ => {}
+                    }
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc => self.reason_picker = None,
+                    KeyCode::Down => {
+                        let i = p.state.selected().unwrap_or(0);
+                        p.state.select(Some(
+                            (i + 1).min(ReasonPicker::rows() - 1),
+                        ));
+                    }
+                    KeyCode::Up => {
+                        let i = p.state.selected().unwrap_or(0);
+                        p.state.select(Some(i.saturating_sub(1)));
+                    }
+                    KeyCode::Enter => self.reason_enter()?,
+                    _ => {}
+                }
+                continue;
+            }
+            if let Some(p) = self.export_prompt.as_mut() {
+                match key.code {
+                    KeyCode::Esc => self.export_prompt = None,
+                    KeyCode::Backspace => {
+                        p.text.pop();
+                        p.confirming_overwrite = false;
+                    }
+                    KeyCode::Char(c) => {
+                        p.text.push(c);
+                        p.confirming_overwrite = false;
+                    }
+                    KeyCode::Enter => self.apply_export()?,
                     _ => {}
                 }
                 continue;
@@ -2305,14 +2577,24 @@ impl App {
                             .and_then(|i| p.dates.get(i).copied());
                         let (w, e) =
                             (p.workload.clone(), p.environment.clone());
+                        let replacing = p.replacing;
                         self.date_picker = None;
                         if let Some(d) = chosen {
-                            self.change_status(
-                                &w,
-                                &e,
-                                precip_engine::schedule::Status::Confirmed,
-                                Some(d),
-                            )?;
+                            if replacing {
+                                self.ask_reason(Pending::Reconfirm {
+                                    workload: w,
+                                    environment: e,
+                                    date: d,
+                                });
+                            } else {
+                                self.change_status(
+                                    &w,
+                                    &e,
+                                    precip_engine::schedule::Status::Confirmed,
+                                    Some(d),
+                                    None,
+                                )?;
+                            }
                         }
                     }
                     _ => {}
@@ -2370,6 +2652,20 @@ impl App {
                 KeyCode::Char('h') if self.tab == Tab::Schedule => {
                     self.open_history()?;
                 }
+                KeyCode::Char('e') if self.tab == Tab::Schedule => {
+                    self.open_export(ExportKind::Schedule);
+                }
+                KeyCode::Char('g') if self.tab == Tab::Schedule => {
+                    if let Some(v) = self.schedule.as_mut() {
+                        v.gantt = !v.gantt;
+                    }
+                }
+                KeyCode::Char('e') if self.tab == Tab::Workloads => {
+                    self.open_export(ExportKind::Workloads);
+                }
+                KeyCode::Char('e') if self.tab == Tab::Sizing => {
+                    self.open_export(ExportKind::Sizing);
+                }
                 KeyCode::Char('g') if self.tab == Tab::Sizing => {
                     self.adjust_sizing(|a| {
                         a.growth_factor = (a.growth_factor + 0.1).min(5.0)
@@ -2392,6 +2688,9 @@ impl App {
                 }
                 KeyCode::Char('n') if self.tab == Tab::Sizing => {
                     self.adjust_sizing(|a| a.headroom = (a.headroom + 1) % 3);
+                }
+                KeyCode::Char('p') if self.tab == Tab::Sizing => {
+                    self.next_profile()?;
                 }
                 KeyCode::Tab | KeyCode::Right => {
                     self.tab = self.tab.next();
@@ -2505,7 +2804,7 @@ pub fn next_step(v: &ScheduleView) -> String {
     let m = &v.metrics;
     if !v.findings.is_empty() {
         return format!(
-            "{} pair(s) marked done still have servers in AWS. Select one below and press enter.",
+            "{} pair(s) marked done still have resources in AWS. Select one below and press enter.",
             v.findings.len()
         );
     }

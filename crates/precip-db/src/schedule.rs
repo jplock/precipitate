@@ -439,6 +439,25 @@ impl Store {
         Ok(())
     }
 
+    /// The scan selection last used, as JSON of the scanner's options,
+    /// so a headless rescan repeats what was chosen in the interface.
+    pub async fn saved_scan_options(&self) -> Result<Option<String>, DbError> {
+        self.setting("scan.options").await
+    }
+
+    pub async fn save_scan_options(&self, json: &str) -> Result<(), DbError> {
+        self.set_setting("scan.options", json).await
+    }
+
+    /// The sizing profile the workspace sizes with.
+    pub async fn sizing_profile(&self) -> Result<Option<String>, DbError> {
+        self.setting("sizing.profile").await
+    }
+
+    pub async fn set_sizing_profile(&self, name: &str) -> Result<(), DbError> {
+        self.set_setting("sizing.profile", name).await
+    }
+
     pub async fn global_rules(&self) -> Result<GlobalRules, DbError> {
         let d = GlobalRules::default();
         let num = |v: Option<String>, default: u32| {
@@ -914,6 +933,17 @@ impl Store {
         // Transitions that cannot mean anything are refused with a reason
         // the screen can show, so a slip of the hand changes nothing.
         let refuse = |why: &str| Err(DbError::Invalid(why.to_string()));
+        if validate && status == Status::Confirmed {
+            if let Some((w, e)) = self
+                .unfinished_dependencies(workload, environment)
+                .await?
+                .first()
+            {
+                return refuse(&format!(
+                    "it waits for {w} / {e}, which has not migrated; agree that date first"
+                ));
+            }
+        }
         if validate {
             match (current.status, status) {
                 (Status::Migrated, Status::Migrated) => {
@@ -1072,6 +1102,32 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// The pairs this one waits for that have not migrated yet.
+    pub async fn unfinished_dependencies(
+        &self,
+        workload: &str,
+        environment: &str,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        let pairs = self.schedule_inputs().await?;
+        let rules = self.global_rules().await?;
+        let Some(me) = pairs
+            .iter()
+            .find(|p| p.workload == workload && p.environment == environment)
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(precip_engine::schedule::dependencies_of(me, &pairs, &rules)
+            .into_iter()
+            .filter(|d| {
+                pairs.iter().any(|p| {
+                    (p.workload.as_str(), p.environment.as_str())
+                        == (d.0.as_str(), d.1.as_str())
+                        && p.status != Status::Migrated
+                })
+            })
+            .collect())
     }
 
     /// Every pair that migrates (any disposition but retire and retain),
@@ -1915,6 +1971,16 @@ impl Store {
     }
 }
 
+/// Why an agreed date moved. The same list in every view, so the
+/// reschedule rate can be split by cause.
+pub const RESCHEDULE_REASONS: [&str; 5] = [
+    "owners asked to move it",
+    "technical problem found",
+    "freeze or holiday added",
+    "waiting on another migration",
+    "not ready in time",
+];
+
 /// Headline numbers for the migration, derived from the versions, slots,
 /// events and status tables. Rates are in `0.0..=1.0`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1951,6 +2017,18 @@ pub struct Metrics {
     pub capacity_last_30_days: u32,
     pub target_end: Option<Date>,
     pub waves: Vec<WaveMetrics>,
+    /// Missed and re-agreed dates by reason, most common first. A move
+    /// recorded without a reason counts under "no reason given".
+    pub reschedule_reasons: Vec<(String, usize)>,
+    /// How the projected end moved: one point per day a schedule was
+    /// computed, the last version of that day.
+    pub end_history: Vec<(Date, Date)>,
+    /// Mean days between a migrated pair's first proposed date and the
+    /// day it migrated. Positive means the first plan was optimistic.
+    pub forecast_error_days: f64,
+    /// Migrated pairs the first plan placed within a week of the day
+    /// they migrated, over migrated pairs with a first plan.
+    pub forecast_within_week_rate: f64,
 }
 
 /// Progress of one wave.
@@ -1971,14 +2049,14 @@ pub struct WaveMetrics {
 pub struct Verification {
     pub workload: String,
     pub environment: String,
-    /// EC2 instances not terminated, plus auto scaling groups, still seen.
+    /// Resources still placed in the pair, except terminated instances.
     pub remaining: usize,
 }
 
 impl Store {
-    /// Migrated pairs that still have instances or auto scaling groups
-    /// in the given scan. A migration that left compute behind is either
-    /// incomplete or was never done.
+    /// Migrated pairs that still have resources in the given scan. A
+    /// migration that left things behind is either incomplete or was
+    /// never done.
     pub async fn verify_migrated(
         &self,
         scan_id: &str,
@@ -2048,18 +2126,15 @@ impl Store {
                     ))
                     .eq("migrated"),
                 )
+                // Every resource still placed in the pair counts, except
+                // an instance that has been terminated and only lingers.
                 .and_where(
                     Expr::col((
                         ResourceVersions::Table,
                         ResourceVersions::Kind
                     ))
-                    .eq("auto_scaling_group")
-                    .or(Expr::col((
-                        ResourceVersions::Table,
-                        ResourceVersions::Kind,
-                    ))
-                    .eq("ec2_instance")
-                    .and(state.if_null("").ne("terminated"))),
+                    .ne("ec2_instance")
+                    .or(state.if_null("").ne("terminated")),
                 )
                 .group_by_col((
                     WorkloadMembers::Table,
@@ -2124,6 +2199,7 @@ impl Store {
         let mut recent = 0usize;
         let mut ever_migrated = 0usize;
         let mut ever_rolled_back = 0usize;
+        let mut reasons: Vec<(String, usize)> = Vec::new();
         let window_start =
             today.checked_sub(jiff::Span::new().days(30)).unwrap_or(today);
         for p in &pairs {
@@ -2141,6 +2217,20 @@ impl Store {
                 .any(|e| e.event == "missed" || e.event == "reconfirmed");
             if moved {
                 m.rescheduled += 1;
+            }
+            for e in events
+                .iter()
+                .filter(|e| e.event == "missed" || e.event == "reconfirmed")
+            {
+                let why = e
+                    .note
+                    .clone()
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| "no reason given".into());
+                match reasons.iter_mut().find(|(r, _)| *r == why) {
+                    Some((_, n)) => *n += 1,
+                    None => reasons.push((why, 1)),
+                }
             }
             let rolled = events.iter().any(|e| e.event == "rolled_back");
             if events.iter().any(|e| e.event == "migrated") {
@@ -2169,6 +2259,8 @@ impl Store {
                 }
             }
         }
+        reasons.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        m.reschedule_reasons = reasons;
         m.reschedule_rate = if m.scheduled == 0 {
             0.0
         } else {
@@ -2195,6 +2287,52 @@ impl Store {
             rules.per_day * 30,
         );
 
+        for v in &versions {
+            if let Some(ends) = v.ends {
+                match m.end_history.last_mut() {
+                    Some((day, e)) if *day == v.as_of => *e = ends,
+                    _ => m.end_history.push((v.as_of, ends)),
+                }
+            }
+        }
+        // Forecast accuracy: the first date each migrated pair was ever
+        // given against the day it really moved.
+        let mut errors: Vec<i64> = Vec::new();
+        if let Some(first_version) = versions.first() {
+            let rows = bound!(
+                Query::select()
+                    .columns([
+                        ScheduleSlots::Workload,
+                        ScheduleSlots::Environment,
+                        ScheduleSlots::Date,
+                    ])
+                    .from(ScheduleSlots::Table)
+                    .and_where(
+                        Expr::col(ScheduleSlots::VersionId)
+                            .eq(first_version.id)
+                    )
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            for r in rows {
+                let (w, e): (String, String) =
+                    (r.get("workload"), r.get("environment"));
+                let planned = parse_date(&r.get::<String, _>("date"))?;
+                let done = self.pair_status(&w, &e).await?;
+                if let (Status::Migrated, Some(actual)) =
+                    (done.status, done.migrated_date)
+                {
+                    errors.push((actual - planned).get_days().into());
+                }
+            }
+        }
+        if !errors.is_empty() {
+            m.forecast_error_days =
+                errors.iter().sum::<i64>() as f64 / errors.len() as f64;
+            m.forecast_within_week_rate =
+                errors.iter().filter(|d| d.abs() <= 7).count() as f64
+                    / errors.len() as f64;
+        }
         m.projected_end = versions.last().and_then(|v| v.ends);
         m.first_projected_end = versions.first().and_then(|v| v.ends);
         m.end_drift_days = match (m.first_projected_end, m.projected_end) {

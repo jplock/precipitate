@@ -44,7 +44,7 @@ pub const DEFAULT_MEMBER_ROLES: &[&str] =
     &["OrganizationAccountAccessRole", "AWSControlTowerExecution"];
 
 /// Scan options from the command line.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Options {
     /// Roles to try in each member account, in order. The first one that
     /// can be assumed is used.

@@ -71,6 +71,14 @@ struct ScanArgs {
 }
 
 impl ScanArgs {
+    /// No selection flags given, only (perhaps) a credentials profile.
+    fn is_default(&self) -> bool {
+        self.member_roles.is_empty()
+            && self.accounts.is_empty()
+            && self.exclude_accounts.is_empty()
+            && !self.single_account
+    }
+
     fn options(&self) -> precip_aws::Options {
         let defaults = precip_aws::Options::default();
         precip_aws::Options {
@@ -138,8 +146,9 @@ enum Command {
     /// Size the rehost and relocate workloads of the latest scan.
     Size {
         /// Built-in profile name, or a path to a profile TOML file.
-        #[arg(long, default_value = "gen2-1152")]
-        profile: String,
+        /// Defaults to the workspace's choice, else the built-in.
+        #[arg(long)]
+        profile: Option<String>,
         /// Multiplier on demand.
         #[arg(long, default_value_t = 1.0)]
         growth: f64,
@@ -162,8 +171,40 @@ enum Command {
         #[command(subcommand)]
         command: ScheduleCommand,
     },
-    /// List built-in Oxide profiles.
-    Profiles,
+    /// List built-in Oxide profiles, or choose the one the workspace
+    /// sizes with.
+    Profiles {
+        /// Make this the workspace's profile.
+        #[arg(long)]
+        use_profile: Option<String>,
+    },
+    /// Write the workloads, the sizing or the schedule to a file, or to
+    /// standard output. The format follows the file's extension (.csv,
+    /// .json, .ics) or --format.
+    Export {
+        what: ExportWhat,
+        #[arg(long)]
+        out: Option<Utf8PathBuf>,
+        /// csv, json, or ics (schedule only); needed without --out.
+        #[arg(long)]
+        format: Option<String>,
+        /// Sizing profile, growth, threshold and headroom as for `size`.
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value_t = 1.0)]
+        growth: f64,
+        #[arg(long, default_value_t = 0.75)]
+        threshold: f64,
+        #[arg(long, default_value_t = 1)]
+        headroom: u32,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ExportWhat {
+    Workloads,
+    Sizing,
+    Schedule,
 }
 
 #[derive(Subcommand)]
@@ -265,8 +306,9 @@ enum ScheduleCommand {
         workload: String,
         environment: String,
         date: String,
+        /// Why, when this replaces an agreed date. See `schedule reasons`.
         #[arg(long)]
-        note: Option<String>,
+        reason: Option<String>,
     },
     /// Mark a pair migrated, today unless a date is given.
     Migrated {
@@ -279,9 +321,12 @@ enum ScheduleCommand {
     Missed {
         workload: String,
         environment: String,
+        /// Why. See `schedule reasons` for the usual ones.
         #[arg(long)]
-        note: Option<String>,
+        reason: Option<String>,
     },
+    /// The usual reasons an agreed date moves, for --reason.
+    Reasons,
     /// A migrated pair moved back to AWS; a new date is proposed.
     RolledBack {
         workload: String,
@@ -297,6 +342,12 @@ enum ScheduleCommand {
     /// Rebuild the rules, freezes, waves and statuses from the change log
     /// and compute the schedule once. Proves the log is the truth.
     Replay,
+    /// The schedule as a Gantt chart, one row per migration.
+    Gantt {
+        /// Characters available for the bars.
+        #[arg(long, default_value_t = 90)]
+        width: usize,
+    },
     /// Reschedule rate, projected end and drift, success and slip.
     Metrics,
 }
@@ -331,6 +382,10 @@ async fn scan_and_store(
     store: precip_db::Store,
     progress: Option<precip_aws::ProgressSender>,
 ) -> anyhow::Result<precip_db::ScanStats> {
+    store
+        .save_scan_options(&serde_json::to_string(&opts)?)
+        .await
+        .context("saving the scan selection")?;
     let scan = precip_aws::scan_estate(&config, &opts, progress)
         .await
         .context("scanning estate")?;
@@ -386,6 +441,31 @@ async fn scan_and_store(
 }
 
 /// A built-in profile by name, or a TOML file by path.
+/// The profile to size with: the flag, else the workspace's remembered
+/// choice, else the built-in. A remembered choice that no longer loads
+/// falls back to the built-in rather than stopping the command.
+async fn choose_profile(
+    store: &precip_db::Store,
+    flag: Option<String>,
+) -> anyhow::Result<precip_types::Profile> {
+    if let Some(name) = flag {
+        return load_profile(&name);
+    }
+    let default = precip_engine::sizing::profiles::NAMES[0];
+    match store.sizing_profile().await? {
+        Some(name) => match load_profile(&name) {
+            Ok(p) => Ok(p),
+            Err(e) => {
+                out!(
+                    "profile {name} cannot be loaded ({e:#}); sizing with {default}"
+                );
+                load_profile(default)
+            }
+        },
+        None => load_profile(default),
+    }
+}
+
 fn load_profile(name_or_path: &str) -> anyhow::Result<precip_types::Profile> {
     if let Some(built_in) =
         precip_engine::sizing::profiles::builtin(name_or_path)
@@ -699,7 +779,7 @@ async fn run_schedule(
                 .await?;
             print_schedule(store, None).await?;
         }
-        ScheduleCommand::Confirm { workload, environment, date, note } => {
+        ScheduleCommand::Confirm { workload, environment, date, reason } => {
             store
                 .set_pair_status(
                     &workload,
@@ -707,7 +787,7 @@ async fn run_schedule(
                     precip_engine::schedule::Status::Confirmed,
                     Some(parse_date(&date)?),
                     today(),
-                    note.as_deref(),
+                    reason.as_deref(),
                 )
                 .await?;
             print_schedule(store, None).await?;
@@ -726,7 +806,7 @@ async fn run_schedule(
                 .await?;
             print_schedule(store, None).await?;
         }
-        ScheduleCommand::Missed { workload, environment, note } => {
+        ScheduleCommand::Missed { workload, environment, reason } => {
             store
                 .set_pair_status(
                     &workload,
@@ -734,10 +814,15 @@ async fn run_schedule(
                     precip_engine::schedule::Status::Missed,
                     None,
                     today(),
-                    note.as_deref(),
+                    reason.as_deref(),
                 )
                 .await?;
             print_schedule(store, None).await?;
+        }
+        ScheduleCommand::Reasons => {
+            for r in precip_db::RESCHEDULE_REASONS {
+                out!("{r}");
+            }
         }
         ScheduleCommand::RolledBack { workload, environment, note } => {
             store
@@ -763,7 +848,7 @@ async fn run_schedule(
             }
             for f in findings {
                 out!(
-                    "{} / {}: marked migrated but {} instance(s) or groups still in scan #{}",
+                    "{} / {}: marked migrated but {} resource(s) still in scan #{}",
                     f.workload,
                     f.environment,
                     f.remaining,
@@ -785,6 +870,18 @@ async fn run_schedule(
                         .map(|d| format!("   -> ends {d}"))
                         .unwrap_or_default()
                 );
+            }
+        }
+        ScheduleCommand::Gantt { width } => {
+            let (_, schedule) =
+                store.compute_schedule(today(), "command").await?;
+            let gantt = precip_engine::schedule::gantt::build(
+                &schedule,
+                today(),
+                width,
+            );
+            for line in precip_engine::schedule::gantt::render(&gantt, 32) {
+                out!("{line}");
             }
         }
         ScheduleCommand::Replay => {
@@ -845,7 +942,22 @@ async fn main() -> anyhow::Result<()> {
             let store = precip_db::Store::open(&db)
                 .await
                 .with_context(|| format!("opening {db}"))?;
-            scan_and_store(config, args.options(), store, None).await?;
+            // With no selection on the command line, repeat the last one.
+            let opts = if args.is_default() {
+                match store.saved_scan_options().await? {
+                    Some(json) => {
+                        tracing::info!(
+                            "using the workspace's saved scan selection"
+                        );
+                        serde_json::from_str(&json)
+                            .context("reading the saved scan selection")?
+                    }
+                    None => args.options(),
+                }
+            } else {
+                args.options()
+            };
+            scan_and_store(config, opts, store, None).await?;
         }
         None => {
             // Logs would corrupt the terminal; the activity feed replaces
@@ -1111,7 +1223,7 @@ async fn main() -> anyhow::Result<()> {
                 .into_iter()
                 .next()
                 .context("no scans in this workspace")?;
-            let profile = load_profile(&profile)?;
+            let profile = choose_profile(&store, profile).await?;
             let assumptions = precip_engine::sizing::Assumptions {
                 growth_factor: growth,
                 threshold,
@@ -1246,9 +1358,103 @@ async fn main() -> anyhow::Result<()> {
                 .with_context(|| format!("opening {db}"))?;
             run_schedule(&store, command).await?;
         }
-        Some(Command::Profiles) => {
-            for name in precip_engine::sizing::profiles::NAMES {
-                out!("{name}");
+        Some(Command::Export {
+            what,
+            out,
+            format,
+            profile,
+            growth,
+            threshold,
+            headroom,
+        }) => {
+            let store = open_store(chosen_db, "export").await?;
+            let format = match (&format, &out) {
+                (Some(f), _) => f.to_lowercase(),
+                (None, Some(path)) => {
+                    path.extension().unwrap_or_default().to_lowercase()
+                }
+                (None, None) => anyhow::bail!("give --out <file> or --format"),
+            };
+            let latest = latest_scan(&store).await?;
+            let text = match (what, format.as_str()) {
+                (ExportWhat::Workloads, "csv") => {
+                    precip_db::export::workloads_csv(
+                        &store.workload_summary(&latest.id).await?,
+                    )
+                }
+                (ExportWhat::Workloads, "json") => {
+                    precip_db::export::workloads_json(
+                        &store.workload_summary(&latest.id).await?,
+                    )?
+                }
+                (ExportWhat::Sizing, "csv" | "json") => {
+                    let profile = choose_profile(&store, profile).await?;
+                    let assumptions = precip_engine::sizing::Assumptions {
+                        growth_factor: growth,
+                        threshold,
+                        headroom,
+                    };
+                    let instances =
+                        store.sized_instances(&latest.id, &profile).await?;
+                    if format == "csv" {
+                        precip_db::export::sizing_csv(&instances)
+                    } else {
+                        let inputs: Vec<precip_engine::sizing::Instance> =
+                            instances.iter().map(|i| i.to_instance()).collect();
+                        let result = precip_engine::sizing::size(
+                            &profile,
+                            &inputs,
+                            &assumptions,
+                        );
+                        let demand = precip_engine::sizing::demand_by_workload(
+                            &instances,
+                        );
+                        precip_db::export::sizing_json(
+                            &profile,
+                            &assumptions,
+                            &result,
+                            &demand,
+                            &instances,
+                        )?
+                    }
+                }
+                (ExportWhat::Schedule, "csv" | "json" | "ics") => {
+                    let (_, schedule) =
+                        store.compute_schedule(today(), "export").await?;
+                    match format.as_str() {
+                        "csv" => precip_db::export::schedule_csv(&schedule),
+                        "json" => precip_db::export::schedule_json(&schedule)?,
+                        _ => precip_db::export::schedule_ics(
+                            &schedule,
+                            cli.workspace.as_deref().unwrap_or("precip"),
+                            jiff::Timestamp::now(),
+                        ),
+                    }
+                }
+                (_, other) => {
+                    anyhow::bail!("{other} is not a format this export knows")
+                }
+            };
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, text)
+                        .with_context(|| format!("writing {path}"))?;
+                    out!("wrote {path}");
+                }
+                None => print_line(format_args!("{text}")),
+            }
+        }
+        Some(Command::Profiles { use_profile }) => {
+            if let Some(name) = use_profile {
+                load_profile(&name)?;
+                let store =
+                    open_store(chosen_db, "profiles --use-profile").await?;
+                store.set_sizing_profile(&name).await?;
+                out!("sizing with {name}");
+            } else {
+                for name in precip_engine::sizing::profiles::NAMES {
+                    out!("{name}");
+                }
             }
         }
     }
@@ -1304,6 +1510,29 @@ fn print_metrics(m: &precip_db::Metrics) {
         pct(m.rollback_rate),
         m.rolled_back
     );
+    if m.forecast_within_week_rate > 0.0 || m.forecast_error_days != 0.0 {
+        out!(
+            "forecast          first plan was off by {:+.1} days on average; {} of migrations landed within a week of it",
+            m.forecast_error_days,
+            pct(m.forecast_within_week_rate)
+        );
+    }
+    if m.end_history.len() > 1 {
+        let trail: Vec<String> = m
+            .end_history
+            .iter()
+            .map(|(day, ends)| format!("{day}: {ends}"))
+            .collect();
+        out!("end over time     {}", trail.join("  ->  "));
+    }
+    if !m.reschedule_reasons.is_empty() {
+        let list: Vec<String> = m
+            .reschedule_reasons
+            .iter()
+            .map(|(r, n)| format!("{r} {n}"))
+            .collect();
+        out!("why dates moved   {}", list.join(", "));
+    }
     for w in &m.waves {
         out!(
             "wave {:<3} {:<16} {}/{} migrated  ends {}{}",

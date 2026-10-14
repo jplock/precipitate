@@ -8,13 +8,14 @@
 //! row's `last_seen_seq` advances. Presence at scan `n` is
 //! `first_seen_seq <= n <= last_seen_seq`.
 
+pub mod export;
 mod schedule;
 mod schema;
 
 pub use schedule::{
     Metrics, MigrationEvent, PairStatus, PlanEvent, PlanEventRecord,
-    ScheduleVersion, Verification, WaveMetrics, weekday_name, weekday_preset,
-    weekdays_from_spec,
+    RESCHEDULE_REASONS, ScheduleVersion, Verification, WaveMetrics,
+    weekday_name, weekday_preset, weekdays_from_spec,
 };
 
 use camino::Utf8Path;
@@ -137,7 +138,7 @@ pub struct MemberDetail {
 }
 
 /// Resource count per workload and environment for one scan.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WorkloadSummary {
     pub workload: String,
     pub environment: String,
@@ -1971,84 +1972,39 @@ mod tests {
         use precip_engine::schedule::Status;
         let (store, _) = grouped(fixture(
             "s",
-            vec![inst("i-1", &[("app", "shop-prod")])],
+            vec![
+                inst("i-1", &[("app", "shop-prod")]),
+                inst("i-2", &[("app", "shop-dev")]),
+            ],
             vec![],
         ))
         .await;
         let today = date(2026, 10, 14);
+        let status = |s: Status, d: Option<jiff::civil::Date>| {
+            store.set_pair_status("shop", "prod", s, d, today, None)
+        };
         let refused =
             |r: Result<(), DbError>| matches!(r, Err(DbError::Invalid(_)));
+
         // Nothing agreed yet: there is no date to miss.
-        assert!(refused(
-            store
-                .set_pair_status(
-                    "shop",
-                    "prod",
-                    Status::Missed,
-                    None,
-                    today,
-                    None
-                )
-                .await
+        assert!(refused(status(Status::Missed, None).await));
+        // Production waits for its other environments by rule, so no
+        // agreed date for prod until dev has migrated.
+        assert!(matches!(
+            status(Status::Confirmed, Some(date(2026, 10, 20))).await,
+            Err(DbError::Invalid(msg)) if msg.contains("waits for shop / dev")
         ));
         store
-            .set_pair_status(
-                "shop",
-                "prod",
-                Status::Confirmed,
-                Some(date(2026, 10, 20)),
-                today,
-                None,
-            )
+            .set_pair_status("shop", "dev", Status::Migrated, None, today, None)
             .await
             .unwrap();
+        status(Status::Confirmed, Some(date(2026, 10, 20))).await.unwrap();
         // The agreed date is still ahead: it cannot have been missed.
+        assert!(refused(status(Status::Missed, None).await));
+        status(Status::Migrated, None).await.unwrap();
+        assert!(refused(status(Status::Migrated, None).await));
         assert!(refused(
-            store
-                .set_pair_status(
-                    "shop",
-                    "prod",
-                    Status::Missed,
-                    None,
-                    today,
-                    None
-                )
-                .await
-        ));
-        store
-            .set_pair_status(
-                "shop",
-                "prod",
-                Status::Migrated,
-                None,
-                today,
-                None,
-            )
-            .await
-            .unwrap();
-        assert!(refused(
-            store
-                .set_pair_status(
-                    "shop",
-                    "prod",
-                    Status::Migrated,
-                    None,
-                    today,
-                    None
-                )
-                .await
-        ));
-        assert!(refused(
-            store
-                .set_pair_status(
-                    "shop",
-                    "prod",
-                    Status::Confirmed,
-                    Some(date(2026, 11, 1)),
-                    today,
-                    None
-                )
-                .await
+            status(Status::Confirmed, Some(date(2026, 11, 1))).await
         ));
 
         let b = precip_engine::schedule::Blackout {
@@ -2250,6 +2206,8 @@ mod tests {
         let mut rules = store.global_rules().await.unwrap();
         rules.per_day = 1;
         rules.target_end = Some(date(2026, 10, 20));
+        // This test agrees prod's date while dev is still open.
+        rules.nonprod_before_prod = false;
         store.set_global_rules(&rules).await.unwrap();
         store
             .add_blackout(&Blackout {

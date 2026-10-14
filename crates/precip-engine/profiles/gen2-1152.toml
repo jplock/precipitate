@@ -1,6 +1,12 @@
-# Oxide Gen 2 sled, 1152 GiB DRAM. Values from the Oxide product
-# specifications page, the operator resource-management guide and Omicron
-# source as of 2026-10-13. See docs/rfd/0001/notes.adoc for sources.
+# Oxide Gen 2 ("Cosmo") sled, 1152 GiB DRAM, in a 24-sled rack. Sources
+# as of 2026-10-14; docs/rfd/0001/notes.adoc has the links.
+#   oxide.computer/product/specifications: sleds per rack, the 192-core
+#     AMD EPYC 9005, the 1152 GiB memory option, 10 NVMe bays.
+#   Omicron source on GitHub: reservation_gib, reservoir_pct (PR 10791),
+#     every [instance] limit.
+# The operator guide does not yet publish usable memory and storage for
+# this sled, so they are derived from DRAM, the reservation and the
+# reservoir, and from the bays and Crucible's three-way replication.
 name = "gen2-1152"
 oxide_release = "21"
 sleds_per_rack = 24
