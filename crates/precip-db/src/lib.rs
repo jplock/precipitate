@@ -21,7 +21,8 @@ pub use schedule::{
 use camino::Utf8Path;
 use precip_types::scan::{Relationship, Resource, TargetStatus};
 use precip_types::{
-    Disposition, GroupingConfig, Override, Scan, WorkloadMember,
+    AccountId, Arn, Disposition, GroupingConfig, PairKey, Region, Scan,
+    WorkloadMember, WorkloadName,
 };
 use sea_query::{
     Expr, ExprTrait, Func, IntoColumnRef, OnConflict, Order, Query,
@@ -67,6 +68,8 @@ pub enum DbError {
     Json(#[from] serde_json::Error),
     #[error("parsing stored timestamp")]
     Timestamp(#[from] jiff::Error),
+    #[error("reading a stored name")]
+    Name(#[from] precip_types::UnknownName),
     #[error("{0}")]
     Invalid(String),
 }
@@ -158,21 +161,10 @@ pub struct WorkloadSummary {
     pub regions: Vec<String>,
 }
 
-fn enum_name<T: serde::Serialize>(v: T) -> Result<String, DbError> {
-    Ok(serde_json::to_value(v)?
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_default())
-}
-
 /// Every value of a column in the group, comma separated. Duplicates
 /// are kept; callers that need distinct values remove them.
 fn group_concat(col: impl IntoColumnRef) -> Expr {
     Func::cust(sea_query::Alias::new("GROUP_CONCAT")).arg(Expr::col(col)).into()
-}
-
-fn disposition_from_name(s: &str) -> Result<Disposition, DbError> {
-    Ok(serde_json::from_value(serde_json::Value::String(s.to_string()))?)
 }
 
 /// SHA-256 over the canonical JSON of tags and body. `serde_json::Value`
@@ -234,7 +226,7 @@ impl Store {
                 ),
                 scan.started.to_string().into(),
                 scan.finished.map(|t| t.to_string()).into(),
-                scan.caller_arn.clone().into(),
+                scan.caller_arn.as_str().into(),
             ])
             .build_sqlx(SqliteQueryBuilder);
         sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
@@ -269,8 +261,8 @@ impl Store {
                 ])
                 .values_panic([
                     scan.id.clone().into(),
-                    t.account_id.clone().into(),
-                    t.region.clone().into(),
+                    t.account_id.as_str().into(),
+                    t.region.as_str().into(),
                     status.into(),
                     error.into(),
                 ])
@@ -332,7 +324,7 @@ impl Store {
         let mut stats = ScanStats { seq, ..Default::default() };
         for r in resources {
             let hash = content_hash(r)?;
-            let next_version = match current.get(&r.arn) {
+            let next_version = match current.get(r.arn.as_str()) {
                 Some(c)
                     if c.content_hash == hash && c.last_seen_seq == seq - 1 =>
                 {
@@ -380,11 +372,11 @@ impl Store {
                     ResourceVersions::LastSeenSeq,
                 ])
                 .values_panic([
-                    r.arn.clone().into(),
+                    r.arn.as_str().into(),
                     next_version.into(),
-                    enum_name(r.kind)?.into(),
-                    r.account_id.clone().into(),
-                    r.region.clone().into(),
+                    r.kind.as_str().into(),
+                    r.account_id.as_str().into(),
+                    r.region.as_str().into(),
                     serde_json::to_string(&r.tags)?.into(),
                     serde_json::to_string(&r.body)?.into(),
                     hash.into(),
@@ -426,9 +418,9 @@ impl Store {
         }
         for rel in &scan.relationships {
             let key = (
-                rel.from_arn.clone(),
-                enum_name(rel.edge)?,
-                rel.to_arn.clone(),
+                rel.from_arn.to_string(),
+                rel.edge.as_str().to_string(),
+                rel.to_arn.to_string(),
             );
             let (sql, values) = match open.get(&key) {
                 Some(first) => Query::update()
@@ -696,7 +688,7 @@ impl Store {
             .fetch_one(&self.pool)
             .await?;
         let v: String = row.try_get("value")?;
-        disposition_from_name(&v)
+        Ok(v.parse()?)
     }
 
     pub(crate) async fn project_default_disposition(
@@ -705,7 +697,7 @@ impl Store {
         apply_to_existing: bool,
         at: jiff::Timestamp,
     ) -> Result<(), DbError> {
-        let name = enum_name(disposition)?;
+        let name = disposition.as_str();
         let (sql, values) = Query::update()
             .table(Settings::Table)
             .value(Settings::Value, name)
@@ -766,7 +758,7 @@ impl Store {
             cfg,
         );
 
-        let default = enum_name(self.default_disposition().await?)?;
+        let default = self.default_disposition().await?.as_str();
         let mut tx = self.pool.begin().await?;
         let (sql, values) = Query::delete()
             .from_table(WorkloadMembers::Table)
@@ -778,7 +770,7 @@ impl Store {
 
         let mut pairs = std::collections::BTreeSet::new();
         for m in &members {
-            pairs.insert((m.workload.clone(), m.environment.clone()));
+            pairs.insert(m.pair.clone());
             let (sql, values) = Query::insert()
                 .into_table(WorkloadMembers::Table)
                 .columns([
@@ -790,21 +782,21 @@ impl Store {
                 ])
                 .values_panic([
                     scan_id.into(),
-                    m.arn.clone().into(),
-                    m.workload.clone().into(),
-                    m.environment.clone().into(),
-                    enum_name(m.signal)?.into(),
+                    m.arn.as_str().into(),
+                    m.pair.workload.as_str().into(),
+                    m.pair.environment.as_str().into(),
+                    m.signal.as_str().into(),
                 ])
                 .build_sqlx(SqliteQueryBuilder);
             sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
                 .execute(&mut *tx)
                 .await?;
         }
-        for (workload, environment) in &pairs {
+        for PairKey { workload, environment } in &pairs {
             let (sql, values) = Query::insert()
                 .into_table(Workloads::Table)
                 .columns([Workloads::Name])
-                .values_panic([workload.clone().into()])
+                .values_panic([workload.as_str().into()])
                 .on_conflict(
                     OnConflict::column(Workloads::Name).do_nothing().to_owned(),
                 )
@@ -820,9 +812,9 @@ impl Store {
                     WorkloadEnvironments::Disposition,
                 ])
                 .values_panic([
-                    workload.clone().into(),
-                    environment.clone().into(),
-                    default.clone().into(),
+                    workload.as_str().into(),
+                    environment.as_str().into(),
+                    default.into(),
                 ])
                 .on_conflict(
                     OnConflict::columns([
@@ -848,9 +840,9 @@ impl Store {
                         DispositionHistory::Source,
                     ])
                     .values_panic([
-                        workload.clone().into(),
-                        environment.clone().into(),
-                        default.clone().into(),
+                        workload.as_str().into(),
+                        environment.as_str().into(),
+                        default.into(),
                         jiff::Timestamp::now().to_string().into(),
                         SOURCE_DEFAULT.into(),
                     ])
@@ -868,7 +860,7 @@ impl Store {
             .count();
         let workloads = pairs
             .iter()
-            .map(|(w, _)| w)
+            .map(|p| &p.workload)
             .collect::<std::collections::BTreeSet<_>>()
             .len();
         Ok(GroupStats {
@@ -903,12 +895,12 @@ impl Store {
                 let tags: String = row.try_get("tags")?;
                 let body: String = row.try_get("body")?;
                 Ok(Resource {
-                    arn: row.try_get("arn")?,
-                    kind: serde_json::from_value(serde_json::Value::String(
-                        kind,
-                    ))?,
-                    account_id: row.try_get("account_id")?,
-                    region: row.try_get("region")?,
+                    arn: Arn::from(row.try_get::<String, _>("arn")?),
+                    kind: kind.parse()?,
+                    account_id: AccountId::from(
+                        row.try_get::<String, _>("account_id")?,
+                    ),
+                    region: Region::from(row.try_get::<String, _>("region")?),
                     tags: serde_json::from_str(&tags)?,
                     body: serde_json::from_str(&body)?,
                 })
@@ -938,18 +930,18 @@ impl Store {
             .map(|row| {
                 let edge: String = row.try_get("edge")?;
                 Ok(Relationship {
-                    from_arn: row.try_get("from_arn")?,
-                    edge: serde_json::from_value(serde_json::Value::String(
-                        edge,
-                    ))?,
-                    to_arn: row.try_get("to_arn")?,
+                    from_arn: Arn::from(row.try_get::<String, _>("from_arn")?),
+                    edge: edge.parse()?,
+                    to_arn: Arn::from(row.try_get::<String, _>("to_arn")?),
                 })
             })
             .collect()
     }
 
     /// Workload names that map onto another workload.
-    pub async fn aliases(&self) -> Result<BTreeMap<String, String>, DbError> {
+    pub async fn aliases(
+        &self,
+    ) -> Result<BTreeMap<WorkloadName, WorkloadName>, DbError> {
         let (sql, values) = Query::select()
             .columns([WorkloadAliases::Alias, WorkloadAliases::Workload])
             .from(WorkloadAliases::Table)
@@ -958,7 +950,12 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter()
-            .map(|row| Ok((row.try_get("alias")?, row.try_get("workload")?)))
+            .map(|row| {
+                Ok((
+                    WorkloadName::from(row.try_get::<String, _>("alias")?),
+                    WorkloadName::from(row.try_get::<String, _>("workload")?),
+                ))
+            })
             .collect()
     }
 
@@ -1022,12 +1019,12 @@ impl Store {
             .map(|row| {
                 let signal: String = row.try_get("signal")?;
                 Ok(WorkloadMember {
-                    arn: row.try_get("arn")?,
-                    workload: row.try_get("workload")?,
-                    environment: row.try_get("environment")?,
-                    signal: serde_json::from_value(serde_json::Value::String(
-                        signal,
-                    ))?,
+                    arn: Arn::from(row.try_get::<String, _>("arn")?),
+                    pair: PairKey::new(
+                        row.try_get::<String, _>("workload")?,
+                        row.try_get::<String, _>("environment")?,
+                    ),
+                    signal: signal.parse()?,
                 })
             })
             .collect()
@@ -1053,7 +1050,7 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         row.map(|r| {
-            disposition_from_name(&r.try_get::<String, _>("disposition")?)
+            Ok(r.try_get::<String, _>("disposition")?.parse::<Disposition>()?)
         })
         .transpose()
     }
@@ -1083,13 +1080,13 @@ impl Store {
                 .await?
                 .map(|row| row.try_get("disposition"))
                 .transpose()?;
-        let name = enum_name(disposition)?;
-        if previous.as_deref() == Some(name.as_str()) {
+        let name = disposition.as_str();
+        if previous.as_deref() == Some(name) {
             return Ok(());
         }
         let (sql, values) = Query::update()
             .table(WorkloadEnvironments::Table)
-            .value(WorkloadEnvironments::Disposition, name.clone())
+            .value(WorkloadEnvironments::Disposition, name)
             .and_where(Expr::col(WorkloadEnvironments::Workload).eq(workload))
             .and_where(
                 Expr::col(WorkloadEnvironments::Environment).eq(environment),
@@ -1154,10 +1151,10 @@ impl Store {
                 let d: String = row.try_get("disposition")?;
                 let prev: Option<String> = row.try_get("previous")?;
                 Ok(DispositionChange {
-                    disposition: disposition_from_name(&d)?,
+                    disposition: d.parse()?,
                     previous: prev
                         .as_deref()
-                        .map(disposition_from_name)
+                        .map(str::parse::<Disposition>)
                         .transpose()?,
                     changed_at: row
                         .try_get::<String, _>("changed_at")?
@@ -1278,7 +1275,7 @@ impl Store {
                 Ok(WorkloadSummary {
                     workload: row.try_get("workload")?,
                     environment: row.try_get("environment")?,
-                    disposition: disposition_from_name(&d)?,
+                    disposition: d.parse()?,
                     resources: row.try_get("resources")?,
                     accounts: split(row.try_get("accounts")?),
                     regions: split(row.try_get("regions")?),
@@ -1385,14 +1382,14 @@ impl Store {
     /// Disposition of every known pair.
     pub async fn pair_dispositions(
         &self,
-    ) -> Result<BTreeMap<(String, String), Disposition>, DbError> {
+    ) -> Result<BTreeMap<PairKey, Disposition>, DbError> {
         let mut conn = self.pool.acquire().await?;
         Self::pair_dispositions_in(&mut conn).await
     }
 
     pub(crate) async fn pair_dispositions_in(
         conn: &mut SqliteConnection,
-    ) -> Result<BTreeMap<(String, String), Disposition>, DbError> {
+    ) -> Result<BTreeMap<PairKey, Disposition>, DbError> {
         let (sql, values) = Query::select()
             .columns([
                 WorkloadEnvironments::Workload,
@@ -1408,8 +1405,11 @@ impl Store {
             .map(|row| {
                 let d: String = row.try_get("disposition")?;
                 Ok((
-                    (row.try_get("workload")?, row.try_get("environment")?),
-                    disposition_from_name(&d)?,
+                    PairKey::new(
+                        row.try_get::<String, _>("workload")?,
+                        row.try_get::<String, _>("environment")?,
+                    ),
+                    d.parse()?,
                 ))
             })
             .collect()
@@ -1447,15 +1447,11 @@ impl Store {
         scan_id: &str,
         keep_user_changed: bool,
     ) -> Result<usize, DbError> {
-        let live: std::collections::HashSet<(String, String)> = self
-            .members(scan_id)
-            .await?
-            .into_iter()
-            .map(|m| (m.workload, m.environment))
-            .collect();
+        let live: std::collections::HashSet<PairKey> =
+            self.members(scan_id).await?.into_iter().map(|m| m.pair).collect();
         let pairs = self.pair_dispositions().await?;
 
-        let mut user_changed: std::collections::HashSet<(String, String)> =
+        let mut user_changed: std::collections::HashSet<PairKey> =
             std::collections::HashSet::new();
         if keep_user_changed {
             let (sql, values) = Query::select()
@@ -1472,9 +1468,9 @@ impl Store {
                 .fetch_all(&self.pool)
                 .await?
             {
-                user_changed.insert((
-                    row.try_get("workload")?,
-                    row.try_get("environment")?,
+                user_changed.insert(PairKey::new(
+                    row.try_get::<String, _>("workload")?,
+                    row.try_get::<String, _>("environment")?,
                 ));
             }
         }
@@ -1489,11 +1485,11 @@ impl Store {
                 .from_table(WorkloadEnvironments::Table)
                 .and_where(
                     Expr::col(WorkloadEnvironments::Workload)
-                        .eq(pair.0.as_str()),
+                        .eq(pair.workload.as_str()),
                 )
                 .and_where(
                     Expr::col(WorkloadEnvironments::Environment)
-                        .eq(pair.1.as_str()),
+                        .eq(pair.environment.as_str()),
                 )
                 .build_sqlx(SqliteQueryBuilder);
             sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
@@ -1521,9 +1517,7 @@ impl Store {
     }
 
     /// Manual placements by ARN.
-    pub async fn overrides(
-        &self,
-    ) -> Result<BTreeMap<String, Override>, DbError> {
+    pub async fn overrides(&self) -> Result<BTreeMap<Arn, PairKey>, DbError> {
         let (sql, values) = Query::select()
             .columns([
                 WorkloadOverrides::Arn,
@@ -1538,11 +1532,11 @@ impl Store {
         rows.into_iter()
             .map(|row| {
                 Ok((
-                    row.try_get("arn")?,
-                    Override {
-                        workload: row.try_get("workload")?,
-                        environment: row.try_get("environment")?,
-                    },
+                    Arn::from(row.try_get::<String, _>("arn")?),
+                    PairKey::new(
+                        row.try_get::<String, _>("workload")?,
+                        row.try_get::<String, _>("environment")?,
+                    ),
                 ))
             })
             .collect()
@@ -1756,7 +1750,8 @@ mod tests {
     async fn summaries_count_each_account_and_region_once() {
         let mut west = inst("i-3", &[("app", "shop-prod")]);
         west.region = "us-west-2".into();
-        west.arn = format!("arn:aws:ec2:us-west-2:{ACCT}:instance/i-3");
+        west.arn =
+            Arn::from(format!("arn:aws:ec2:us-west-2:{ACCT}:instance/i-3"));
         let (store, _) = grouped(fixture(
             "s",
             vec![
@@ -1890,7 +1885,7 @@ mod tests {
             .await
             .unwrap()
             .into_keys()
-            .map(|(w, _)| w)
+            .map(|p| p.workload.into_string())
             .collect();
         assert_eq!(names, vec!["kept".to_string(), "new".to_string()]);
         assert!(
@@ -2590,11 +2585,11 @@ mod tests {
             vec![rel(I1, Edge::MemberOfAsg, asg)],
         ))
         .await;
-        assert_eq!(find(&m, I1).workload, "vouch-us");
+        assert_eq!(find(&m, I1).pair.workload, "vouch-us");
         store.merge_workload("vouch-us", "vouch").await.unwrap();
         store.group_scan("s", &GroupingConfig::default()).await.unwrap();
         let m = store.members("s").await.unwrap();
-        assert!(m.iter().all(|x| x.workload == "vouch"), "{m:?}");
+        assert!(m.iter().all(|x| x.pair.workload == "vouch"), "{m:?}");
         assert_eq!(store.workload_summary("s").await.unwrap().len(), 1);
     }
 
@@ -2606,7 +2601,7 @@ mod tests {
             vec![],
         ))
         .await;
-        assert_eq!(find(&m, I1).workload, "x");
+        assert_eq!(find(&m, I1).pair.workload, "x");
         let (sql, values) = Query::insert()
             .into_table(WorkloadOverrides::Table)
             .columns([
@@ -2624,7 +2619,7 @@ mod tests {
         let m = store.members("s").await.unwrap();
         assert_eq!(m.len(), 1, "regrouping replaces, never duplicates");
         assert_eq!(
-            (find(&m, I1).workload.as_str(), find(&m, I1).signal),
+            (find(&m, I1).pair.workload.as_str(), find(&m, I1).signal),
             ("legacy", precip_types::GroupingSignal::Override)
         );
     }

@@ -60,18 +60,18 @@ pub struct Blackout {
     pub pair: Option<(String, String)>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Status {
-    /// Proposed by the scheduler; moves when the schedule is recomputed.
-    Proposed,
-    /// Date confirmed with the owners; the scheduler never moves it.
-    Confirmed,
-    /// Did not happen on its date; a new date is proposed.
-    Missed,
-    Migrated,
-    /// Migrated and then moved back; a new date is proposed.
-    RolledBack,
+precip_types::named_enum! {
+    pub enum Status {
+        /// Proposed by the scheduler; moves when the schedule is recomputed.
+        Proposed = "proposed",
+        /// Date confirmed with the owners; the scheduler never moves it.
+        Confirmed = "confirmed",
+        /// Did not happen on its date; a new date is proposed.
+        Missed = "missed",
+        Migrated = "migrated",
+        /// Migrated and then moved back; a new date is proposed.
+        RolledBack = "rolled_back",
+    }
 }
 
 impl Status {

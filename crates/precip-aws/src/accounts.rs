@@ -4,13 +4,14 @@ use aws_config::SdkConfig;
 use aws_config::sts::AssumeRoleProvider;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use precip_types::scan::{Resource, ResourceKind};
+use precip_types::{AccountId, Arn, Region};
 
 use crate::ScanError;
 
 #[derive(Debug, Clone)]
 pub struct CallerIdentity {
-    pub account_id: String,
-    pub arn: String,
+    pub account_id: AccountId,
+    pub arn: Arn,
     /// The ARN partition the credentials belong to: `aws`, `aws-us-gov`,
     /// `aws-cn`, or one of the isolated partitions. Every ARN the scanner
     /// builds uses this, never a literal `aws`.
@@ -24,8 +25,10 @@ pub fn resource_arn(
     region: &str,
     account_id: &str,
     resource: &str,
-) -> String {
-    format!("arn:{partition}:{service}:{region}:{account_id}:{resource}")
+) -> Arn {
+    Arn::from(format!(
+        "arn:{partition}:{service}:{region}:{account_id}:{resource}"
+    ))
 }
 
 /// The partition segment of an ARN (`arn:<partition>:...`).
@@ -46,11 +49,12 @@ pub async fn caller_identity(
         .send()
         .await
         .map_err(|e| ScanError::CallerIdentity(Box::new(e)))?;
-    let arn = out.arn().ok_or(ScanError::IdentityField("Arn"))?.to_string();
-    let account_id =
-        out.account().ok_or(ScanError::IdentityField("Account"))?.to_string();
-    let partition = partition_of(&arn)
-        .ok_or_else(|| ScanError::Partition(arn.clone()))?
+    let arn = Arn::from(out.arn().ok_or(ScanError::IdentityField("Arn"))?);
+    let account_id = AccountId::from(
+        out.account().ok_or(ScanError::IdentityField("Account"))?,
+    );
+    let partition = partition_of(arn.as_str())
+        .ok_or_else(|| ScanError::Partition(arn.to_string()))?
         .to_string();
     Ok(CallerIdentity { account_id, arn, partition })
 }
@@ -60,14 +64,14 @@ pub async fn caller_identity(
 /// single-account mode, so any error is treated as "no".
 pub async fn is_management_account(
     config: &SdkConfig,
-    account_id: &str,
+    account_id: &AccountId,
 ) -> bool {
     let orgs = aws_sdk_organizations::Client::new(config);
     match orgs.describe_organization().send().await {
         Ok(out) => out
             .organization()
             .and_then(|o| o.master_account_id())
-            .is_some_and(|id| id == account_id),
+            .is_some_and(|id| account_id == id),
         Err(e) => {
             tracing::debug!(
                 error = %crate::error_chain(&e),
@@ -81,8 +85,8 @@ pub async fn is_management_account(
 /// One member of the Organization.
 #[derive(Debug, Clone)]
 pub struct MemberAccount {
-    pub id: String,
-    pub arn: String,
+    pub id: AccountId,
+    pub arn: Arn,
     pub name: String,
     pub status: String,
     /// Immediate parent: an OU id or the root id.
@@ -96,7 +100,7 @@ impl MemberAccount {
             arn: self.arn.clone(),
             kind: ResourceKind::Account,
             account_id: self.id.clone(),
-            region: "global".to_string(),
+            region: Region::global(),
             tags: Default::default(),
             body: serde_json::json!({
                 "name": self.name,
@@ -123,8 +127,8 @@ pub async fn list_accounts(
         for a in page.accounts() {
             let (Some(id), Some(arn)) = (a.id(), a.arn()) else { continue };
             accounts.push(MemberAccount {
-                id: id.to_string(),
-                arn: arn.to_string(),
+                id: AccountId::from(id),
+                arn: Arn::from(arn),
                 name: a.name().unwrap_or_default().to_string(),
                 status: a
                     .status()
@@ -147,7 +151,11 @@ pub async fn list_accounts(
         let limit = limit.clone();
         tasks.spawn(async move {
             let _permit = limit.acquire_owned().await;
-            let parent = match orgs.list_parents().child_id(&id).send().await
+            let parent = match orgs
+                .list_parents()
+                .child_id(id.as_str())
+                .send()
+                .await
             {
                 Ok(p) => p
                     .parents()
@@ -209,7 +217,7 @@ pub async fn list_accounts(
 pub async fn assume_member_role(
     base: &SdkConfig,
     partition: &str,
-    account_id: &str,
+    account_id: &AccountId,
     role_name: &str,
 ) -> SdkConfig {
     let role_arn =

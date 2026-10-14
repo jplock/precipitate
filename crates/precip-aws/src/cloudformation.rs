@@ -2,6 +2,7 @@
 //! resource in a stack comes from the `aws:cloudformation:stack-id` tag
 //! CloudFormation puts on everything it creates.
 
+use precip_types::Arn;
 use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
 
 use crate::collect::{
@@ -30,7 +31,7 @@ impl Collector for Stacks {
                 for stack in page.stacks() {
                     let Some(id) = stack.stack_id() else { continue };
                     out.resources.push(Resource {
-                        arn: id.to_string(),
+                        arn: Arn::from(id),
                         kind: ResourceKind::CloudFormationStack,
                         account_id: ctx.identity.account_id.clone(),
                         region: ctx.region.clone(),
@@ -103,7 +104,7 @@ impl Collector for StackResources {
                             out.relationships.push(Relationship {
                                 from_arn: arn,
                                 edge: Edge::InStack,
-                                to_arn: stack.to_string(),
+                                to_arn: Arn::from(stack),
                             });
                         }
                     }
@@ -152,7 +153,7 @@ fn member_arn(
     resource_type: &str,
     physical_id: &str,
     by_name: &ByName<'_>,
-) -> Option<String> {
+) -> Option<Arn> {
     let ec2 = |resource: String| Some(ctx.arn("ec2", &resource));
     match resource_type {
         "AWS::EC2::Instance" => ec2(format!("instance/{physical_id}")),
@@ -166,7 +167,7 @@ fn member_arn(
         // keyed on public_ip.
         "AWS::EC2::EIP" => by_name
             .get(&(ResourceKind::ElasticIp, None, physical_id))
-            .map(|a| a.to_string()),
+            .map(|a| Arn::from(*a)),
         "AWS::Lambda::Function" => {
             Some(ctx.arn("lambda", &format!("function:{physical_id}")))
         }
@@ -188,19 +189,19 @@ fn member_arn(
         | "AWS::ElasticLoadBalancingV2::TargetGroup"
             if physical_id.starts_with("arn:") =>
         {
-            Some(physical_id.to_string())
+            Some(Arn::from(physical_id))
         }
         // Physical id is a name; the ARN carries an opaque id.
         "AWS::AutoScaling::AutoScalingGroup" => by_name
             .get(&(ResourceKind::AutoScalingGroup, None, physical_id))
-            .map(|a| a.to_string()),
+            .map(|a| Arn::from(*a)),
         "AWS::ElastiCache::CacheCluster" => by_name
             .get(&(
                 ResourceKind::ManagedService,
                 Some("elasticache"),
                 physical_id,
             ))
-            .map(|a| a.to_string()),
+            .map(|a| Arn::from(*a)),
         _ => None,
     }
 }
@@ -245,7 +246,7 @@ mod tests {
                 "shared",
                 &by_name
             ),
-            Some(cache.to_string())
+            Some(Arn::from(cache))
         );
         let only_rds = vec![managed("rds", "shared", rds)];
         let by_name = arns_by_name(&only_rds);

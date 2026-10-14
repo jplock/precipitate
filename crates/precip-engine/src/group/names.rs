@@ -1,5 +1,6 @@
 //! Name handling: slugs, environment tokens, prefixes, layers.
 
+use precip_types::EnvName;
 use std::collections::BTreeMap;
 
 /// Lowercase, non-alphanumerics collapsed to single hyphens.
@@ -26,8 +27,8 @@ pub fn slug(s: &str) -> String {
 /// start, then any middle segment, so `app-dev-api` is `app-api` in `dev`.
 pub fn split_environment(
     slug: &str,
-    tokens: &BTreeMap<String, String>,
-) -> Option<(String, String)> {
+    tokens: &BTreeMap<String, EnvName>,
+) -> Option<(String, EnvName)> {
     let parts: Vec<&str> = slug.split('-').collect();
     if parts.len() < 2 {
         return None;
@@ -65,11 +66,11 @@ pub fn strip_generated_suffix(slug: &str) -> &str {
 pub fn environment_in_account(
     account_name: Option<&str>,
     ou_name: Option<&str>,
-    tokens: &BTreeMap<String, String>,
-) -> Option<String> {
+    tokens: &BTreeMap<String, EnvName>,
+) -> Option<EnvName> {
     let account = account_name.map(slug);
     let ou = ou_name.map(slug);
-    let mut best: Option<(&str, &str)> = None;
+    let mut best: Option<(&str, &EnvName)> = None;
     for (token, env) in tokens {
         let hit = ou.as_deref().is_some_and(|o| o.contains(token.as_str()))
             || account.as_deref().is_some_and(|a| {
@@ -80,7 +81,7 @@ pub fn environment_in_account(
             best = Some((token, env));
         }
     }
-    best.map(|(_, env)| env.to_string())
+    best.map(|(_, env)| env.clone())
 }
 
 /// The longest known name that `slug` equals or starts with (followed by
@@ -132,7 +133,7 @@ pub fn contains_segment<'a>(
 pub fn shared_root(
     slug: &str,
     siblings: &[String],
-    tokens: &BTreeMap<String, String>,
+    tokens: &BTreeMap<String, EnvName>,
 ) -> Option<String> {
     let segments: Vec<&str> = slug.split('-').collect();
     let mut best: Option<(usize, usize, String)> = None; // (count, len, root)
@@ -178,7 +179,7 @@ pub fn strip_layer(slug: &str, layers: &[String]) -> String {
 mod tests {
     use super::*;
 
-    fn tokens() -> BTreeMap<String, String> {
+    fn tokens() -> BTreeMap<String, EnvName> {
         precip_types::GroupingConfig::default().environment_tokens
     }
 

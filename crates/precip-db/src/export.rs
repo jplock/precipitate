@@ -31,13 +31,6 @@ fn csv(header: &[&str], rows: Vec<Vec<String>>) -> String {
     out
 }
 
-fn name<T: serde::Serialize>(v: T) -> String {
-    serde_json::to_value(v)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
-}
-
 pub fn workloads_csv(rows: &[WorkloadSummary]) -> String {
     csv(
         &[
@@ -53,7 +46,7 @@ pub fn workloads_csv(rows: &[WorkloadSummary]) -> String {
                 vec![
                     w.workload.clone(),
                     w.environment.clone(),
-                    name(w.disposition),
+                    w.disposition.to_string(),
                     w.resources.to_string(),
                     w.accounts.join(" "),
                     w.regions.join(" "),
@@ -92,9 +85,9 @@ pub fn sizing_csv(instances: &[SizedInstance]) -> String {
             .iter()
             .map(|i| {
                 vec![
-                    i.workload.clone(),
-                    i.environment.clone(),
-                    name(i.disposition),
+                    i.pair.workload.to_string(),
+                    i.pair.environment.to_string(),
+                    i.disposition.to_string(),
                     i.name.clone(),
                     i.instance_type.clone(),
                     i.architecture.clone(),
@@ -102,10 +95,10 @@ pub fn sizing_csv(instances: &[SizedInstance]) -> String {
                     i.memory_gib.to_string(),
                     i.disk_gib.to_string(),
                     i.volumes.to_string(),
-                    name(i.fit),
-                    i.account_id.clone(),
-                    i.region.clone(),
-                    i.arn.clone(),
+                    i.fit.to_string(),
+                    i.account_id.to_string(),
+                    i.region.to_string(),
+                    i.arn.to_string(),
                 ]
             })
             .collect(),

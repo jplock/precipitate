@@ -49,7 +49,7 @@ impl Collector for Tags {
                     let t =
                         tags(m.tags(), |t| Some(t.key()), |t| Some(t.value()));
                     if !t.is_empty() {
-                        out.tag_updates.push((arn.to_string(), t));
+                        out.tag_updates.push((precip_types::Arn::from(arn), t));
                     }
                 }
             }

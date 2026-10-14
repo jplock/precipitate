@@ -61,10 +61,10 @@ struct ScanArgs {
     member_roles: Vec<String>,
     /// Scan only these member account ids (repeatable).
     #[arg(long = "account", global = true)]
-    accounts: Vec<String>,
+    accounts: Vec<precip_types::AccountId>,
     /// Skip these member account ids (repeatable).
     #[arg(long = "exclude-account", global = true)]
-    exclude_accounts: Vec<String>,
+    exclude_accounts: Vec<precip_types::AccountId>,
     /// Scan only the caller's account, even in a management account.
     #[arg(long, global = true)]
     single_account: bool,
@@ -116,7 +116,7 @@ enum Command {
         workload: String,
         environment: String,
         /// retire, retain, rehost, relocate, repurchase, replatform, refactor
-        disposition: String,
+        disposition: precip_types::Disposition,
         /// Why, kept with the change.
         #[arg(long)]
         note: Option<String>,
@@ -124,7 +124,7 @@ enum Command {
     /// Set the disposition new pairs start with; --apply also changes
     /// every pair nobody has set by hand.
     DefaultDisposition {
-        disposition: String,
+        disposition: precip_types::Disposition,
         #[arg(long)]
         apply: bool,
     },
@@ -900,13 +900,10 @@ async fn run_schedule(
     Ok(())
 }
 
-fn print_change(c: &precip_db::DispositionChange) -> anyhow::Result<()> {
-    let name = |d: precip_types::Disposition| -> anyhow::Result<String> {
-        Ok(serde_json::to_value(d)?.as_str().unwrap_or_default().to_string())
-    };
+fn print_change(c: &precip_db::DispositionChange) {
     let change = match c.previous {
-        Some(p) => format!("{} -> {}", name(p)?, name(c.disposition)?),
-        None => name(c.disposition)?,
+        Some(p) => format!("{p} -> {}", c.disposition),
+        None => c.disposition.to_string(),
     };
     out!(
         "{}  {:<24} {:<8} {}",
@@ -915,7 +912,6 @@ fn print_change(c: &precip_db::DispositionChange) -> anyhow::Result<()> {
         c.source,
         c.note.as_deref().unwrap_or("")
     );
-    Ok(())
 }
 
 #[tokio::main]
@@ -1033,9 +1029,7 @@ async fn main() -> anyhow::Result<()> {
                     "{:<32} {:<10} {:<11} {:>5}  {}  {}",
                     row.workload,
                     row.environment,
-                    serde_json::to_value(row.disposition)?
-                        .as_str()
-                        .unwrap_or_default(),
+                    row.disposition,
                     row.resources,
                     accounts.join(","),
                     row.regions.join(",")
@@ -1078,31 +1072,23 @@ async fn main() -> anyhow::Result<()> {
             let store = precip_db::Store::open(&db)
                 .await
                 .with_context(|| format!("opening {db}"))?;
-            let d: precip_types::Disposition = serde_json::from_value(
-                serde_json::Value::String(disposition.clone()),
-            )
-            .with_context(|| format!("unknown disposition {disposition}"))?;
             store
                 .set_disposition_with(
                     &workload,
                     &environment,
-                    d,
+                    disposition,
                     "user",
                     note.as_deref(),
                 )
                 .await
                 .context("setting disposition")?;
             for c in store.disposition_history(&workload, &environment).await? {
-                print_change(&c)?;
+                print_change(&c);
             }
         }
         Some(Command::DefaultDisposition { disposition, apply }) => {
             let store = open_store(chosen_db, "default-disposition").await?;
-            let d: precip_types::Disposition = serde_json::from_value(
-                serde_json::Value::String(disposition.clone()),
-            )
-            .with_context(|| format!("unknown disposition {disposition}"))?;
-            store.set_default_disposition(d, apply).await?;
+            store.set_default_disposition(disposition, apply).await?;
             out!(
                 "new pairs start as {disposition}{}",
                 if apply {
@@ -1176,9 +1162,7 @@ async fn main() -> anyhow::Result<()> {
                     "{:<28} {:<10} {:<11} {:>9}  {:<30} {}",
                     w.workload,
                     w.environment,
-                    serde_json::to_value(w.disposition)?
-                        .as_str()
-                        .unwrap_or_default(),
+                    w.disposition,
                     w.resources,
                     w.accounts.join(","),
                     w.regions.join(",")
@@ -1209,7 +1193,7 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .with_context(|| format!("opening {db}"))?;
             for c in store.disposition_history(&workload, &environment).await? {
-                print_change(&c)?;
+                print_change(&c);
             }
         }
         Some(Command::Size { profile, growth, threshold, headroom }) => {
@@ -1269,8 +1253,8 @@ async fn main() -> anyhow::Result<()> {
             for d in precip_engine::sizing::demand_by_workload(&instances) {
                 out!(
                     "{:<28} {:<8} {:>5} {:>7} {:>9} {:>9}  {} fit as-is, {} need changes, {} cannot move",
-                    d.workload,
-                    d.environment,
+                    d.pair.workload,
+                    d.pair.environment,
                     d.instances,
                     d.vcpus,
                     d.memory_gib,

@@ -4,6 +4,7 @@
 
 use aws_config::SdkConfig;
 use precip_types::scan::{Relationship, Resource};
+use precip_types::{Arn, Region};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -16,17 +17,17 @@ pub struct RegionContext {
     /// SDK config already pinned to `region`.
     pub config: SdkConfig,
     pub identity: CallerIdentity,
-    pub region: String,
+    pub region: Region,
 }
 
 impl RegionContext {
     /// ARN for a resource of `service` in this region and account.
-    pub fn arn(&self, service: &str, resource: &str) -> String {
+    pub fn arn(&self, service: &str, resource: &str) -> Arn {
         crate::accounts::resource_arn(
             &self.identity.partition,
             service,
-            &self.region,
-            &self.identity.account_id,
+            self.region.as_str(),
+            self.identity.account_id.as_str(),
             resource,
         )
     }
@@ -38,14 +39,14 @@ pub struct Collected {
     pub relationships: Vec<Relationship>,
     /// Tags to merge into resources collected earlier, by ARN. Existing
     /// keys are kept; missing ones are added.
-    pub tag_updates: Vec<(String, std::collections::BTreeMap<String, String>)>,
+    pub tag_updates: Vec<(Arn, std::collections::BTreeMap<String, String>)>,
 }
 
 impl Collected {
     /// Fold another collector's output into this one.
     pub fn absorb(&mut self, other: Collected) {
         if !other.tag_updates.is_empty() {
-            let by_arn: std::collections::HashMap<String, usize> = self
+            let by_arn: std::collections::HashMap<Arn, usize> = self
                 .resources
                 .iter()
                 .enumerate()
@@ -187,7 +188,7 @@ pub fn all() -> Vec<std::sync::Arc<dyn Collector>> {
 impl RegionContext {
     pub fn resource(
         &self,
-        arn: String,
+        arn: Arn,
         kind: precip_types::ResourceKind,
         tags: std::collections::BTreeMap<String, String>,
         body: serde_json::Value,

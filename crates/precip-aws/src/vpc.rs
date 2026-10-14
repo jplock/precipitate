@@ -487,10 +487,12 @@ impl Collector for PrefixLists {
                             .filter_map(|e| e.cidr().map(str::to_string)),
                     );
                 }
-                let arn =
-                    pl.prefix_list_arn().map(str::to_string).unwrap_or_else(
-                        || ctx.arn("ec2", &format!("prefix-list/{id}")),
-                    );
+                let arn = pl
+                    .prefix_list_arn()
+                    .map(precip_types::Arn::from)
+                    .unwrap_or_else(|| {
+                        ctx.arn("ec2", &format!("prefix-list/{id}"))
+                    });
                 out.resources.push(ctx.resource(
                     arn,
                     ResourceKind::PrefixList,

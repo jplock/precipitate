@@ -9,6 +9,7 @@
 //! is asked about itself through its own aggregator.
 
 use aws_config::SdkConfig;
+use precip_types::{AccountId, Region};
 
 /// Resource types whose presence means a region has something worth
 /// collecting. Every region also holds AWS-created defaults (a default
@@ -98,7 +99,7 @@ impl Explorer {
     /// True only with organization-wide multi-account search enabled; a
     /// single-account aggregator returns zero here and must not be used to
     /// prune other accounts' regions.
-    pub async fn sees_other_accounts(&self, own_account: &str) -> bool {
+    pub async fn sees_other_accounts(&self, own_account: &AccountId) -> bool {
         let out = self
             .client
             .search()
@@ -129,16 +130,19 @@ impl Explorer {
     /// fails. A region is pruned only on a definite zero count.
     pub async fn regions_with_resources(
         &self,
-        account_id: Option<&str>,
-        regions: &[String],
-    ) -> Option<Vec<String>> {
+        account_id: Option<&AccountId>,
+        regions: &[Region],
+    ) -> Option<Vec<Region>> {
         let mut active = Vec::new();
         for region in regions {
             let out = self
                 .client
                 .search()
                 .view_arn(&self.view)
-                .query_string(region_query(region, account_id))
+                .query_string(region_query(
+                    region.as_str(),
+                    account_id.map(AccountId::as_str),
+                ))
                 .max_results(1)
                 .send()
                 .await;
@@ -146,8 +150,8 @@ impl Explorer {
                 Ok(out) => {
                     let total = out.count().and_then(|c| c.total_resources());
                     tracing::debug!(
-                        region,
-                        account = account_id,
+                        %region,
+                        account = account_id.map(AccountId::as_str),
                         total,
                         "resource explorer count"
                     );
@@ -156,14 +160,14 @@ impl Explorer {
                     }
                 }
                 Err(e) => {
-                    tracing::debug!(region, error = %e, "resource explorer search failed");
+                    tracing::debug!(%region, error = %e, "resource explorer search failed");
                     return None;
                 }
             }
         }
         tracing::info!(
             aggregator = %self.aggregator_region,
-            account = account_id,
+            account = account_id.map(AccountId::as_str),
             enabled = regions.len(),
             with_resources = active.len(),
             "resource explorer pruned regions"

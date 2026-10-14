@@ -4,22 +4,23 @@
 pub mod inputs;
 pub mod profiles;
 
+use precip_types::{Arn, PairKey};
 use precip_types::{Disposition, Profile};
 use serde::{Deserialize, Serialize};
 
-/// Whether an instance can run on Oxide as-is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Fit {
-    CleanFit,
-    NeedsRemediation,
-    CannotMove,
+precip_types::named_enum! {
+    /// Whether an instance can run on Oxide as-is.
+    pub enum Fit {
+        CleanFit = "clean_fit",
+        NeedsRemediation = "needs_remediation",
+        CannotMove = "cannot_move",
+    }
 }
 
 /// Demand for one instance, already multiplied out for ASG capacity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instance {
-    pub id: String,
+    pub arn: Arn,
     pub disposition: Disposition,
     pub vcpus: u32,
     pub memory_gib: u64,
@@ -43,12 +44,12 @@ impl Default for Assumptions {
     }
 }
 
-/// Which resource set the sled count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Bound {
-    Compute,
-    Storage,
+precip_types::named_enum! {
+    /// Which resource set the sled count.
+    pub enum Bound {
+        Compute = "compute",
+        Storage = "storage",
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,10 +60,10 @@ pub struct Sizing {
     pub sleds: u32,
     pub racks: u32,
     pub spare_sleds: u32,
-    /// Instances whose workload disposition is not rehost or relocate.
-    pub not_sized: Vec<String>,
+    /// Instances whose workload disposition is not sized.
+    pub not_sized: Vec<Arn>,
     /// Instances in scope whose fit is "cannot move".
-    pub excluded: Vec<String>,
+    pub excluded: Vec<Arn>,
     pub sled_capacity: SledCapacity,
 }
 
@@ -136,7 +137,7 @@ pub fn size(
     let mut total_disk_gib = 0.0;
     for i in instances {
         if !i.disposition.is_sized() {
-            not_sized.push(i.id.clone());
+            not_sized.push(i.arn.clone());
             continue;
         }
         let vcpus = f64::from(i.vcpus) * a.growth_factor;
@@ -146,7 +147,7 @@ pub fn size(
         // than opening a sled it would overflow.
         let oversized = vcpus > cap.vcpus || memory_gib > cap.memory_gib;
         if i.fit == Fit::CannotMove || oversized {
-            excluded.push(i.id.clone());
+            excluded.push(i.arn.clone());
             continue;
         }
         demands.push((vcpus, memory_gib));
@@ -189,10 +190,10 @@ pub fn size(
 }
 
 /// Demand per workload and environment, for the sizing table.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkloadDemand {
-    pub workload: String,
-    pub environment: String,
+    #[serde(flatten)]
+    pub pair: PairKey,
     pub instances: usize,
     pub vcpus: u64,
     pub memory_gib: u64,
@@ -202,19 +203,31 @@ pub struct WorkloadDemand {
     pub blocked: usize,
 }
 
+impl WorkloadDemand {
+    /// A pair with nothing counted yet.
+    pub fn new(pair: PairKey) -> Self {
+        Self {
+            pair,
+            instances: 0,
+            vcpus: 0,
+            memory_gib: 0,
+            disk_gib: 0,
+            clean: 0,
+            remediate: 0,
+            blocked: 0,
+        }
+    }
+}
+
 pub fn demand_by_workload(
     instances: &[inputs::SizedInstance],
 ) -> Vec<WorkloadDemand> {
-    let mut map: std::collections::BTreeMap<(String, String), WorkloadDemand> =
+    let mut map: std::collections::BTreeMap<PairKey, WorkloadDemand> =
         std::collections::BTreeMap::new();
     for i in instances {
         let d = map
-            .entry((i.workload.clone(), i.environment.clone()))
-            .or_insert_with(|| WorkloadDemand {
-                workload: i.workload.clone(),
-                environment: i.environment.clone(),
-                ..Default::default()
-            });
+            .entry(i.pair.clone())
+            .or_insert_with(|| WorkloadDemand::new(i.pair.clone()));
         d.instances += 1;
         d.vcpus += u64::from(i.vcpus);
         d.memory_gib += i.memory_gib;
@@ -238,7 +251,7 @@ mod tests {
 
     fn inst(id: &str, vcpus: u32, mem: u64, disk: u64) -> Instance {
         Instance {
-            id: id.to_string(),
+            arn: Arn::from(id),
             disposition: Disposition::Rehost,
             vcpus,
             memory_gib: mem,
@@ -280,7 +293,7 @@ mod tests {
         let mut blocked = inst("arm", 4, 16, 100);
         blocked.fit = Fit::CannotMove;
         let s = size(&gen1(), &[blocked], &Assumptions::default());
-        assert_eq!(s.excluded, vec!["arm".to_string()]);
+        assert_eq!(s.excluded, vec![Arn::from("arm")]);
         assert_eq!(s.compute_sleds, 0);
     }
 
@@ -289,7 +302,7 @@ mod tests {
         let mut retired = inst("old", 64, 512, 1000);
         retired.disposition = Disposition::Retire;
         let s = size(&gen1(), &[retired], &Assumptions::default());
-        assert_eq!(s.not_sized, vec!["old".to_string()]);
+        assert_eq!(s.not_sized, vec![Arn::from("old")]);
         assert_eq!(s.compute_sleds, 0);
     }
 
@@ -343,7 +356,7 @@ mod tests {
     fn instance_larger_than_a_sled_is_excluded_not_packed() {
         let fleet = vec![inst("huge", 8, 1000, 0)];
         let s = size(&gen1(), &fleet, &Assumptions::default());
-        assert_eq!(s.excluded, vec!["huge".to_string()]);
+        assert_eq!(s.excluded, vec![Arn::from("huge")]);
         assert_eq!(s.compute_sleds, 0);
     }
 }

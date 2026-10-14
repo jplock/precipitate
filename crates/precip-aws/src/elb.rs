@@ -1,6 +1,7 @@
 //! Load balancers and target groups (ELBv2). Instances behind one load
 //! balancer are one workload.
 
+use precip_types::Arn;
 use precip_types::scan::{Edge, Relationship, ResourceKind};
 
 use crate::collect::{
@@ -30,7 +31,7 @@ impl Collector for LoadBalancers {
                 for lb in page.load_balancers() {
                     let Some(arn) = lb.load_balancer_arn() else { continue };
                     out.resources.push(ctx.resource(
-                        arn.to_string(),
+                        Arn::from(arn),
                         ResourceKind::LoadBalancer,
                         Default::default(),
                         serde_json::json!({
@@ -101,19 +102,19 @@ impl Collector for TargetGroups {
                                 from_arn: ctx
                                     .arn("ec2", &format!("instance/{id}")),
                                 edge: Edge::TargetOf,
-                                to_arn: arn.to_string(),
+                                to_arn: Arn::from(arn),
                             });
                         }
                     }
                     for lb in tg.load_balancer_arns() {
                         out.relationships.push(Relationship {
-                            from_arn: arn.to_string(),
+                            from_arn: Arn::from(arn),
                             edge: Edge::AttachedTo,
-                            to_arn: lb.clone(),
+                            to_arn: Arn::from(lb.as_str()),
                         });
                     }
                     out.resources.push(ctx.resource(
-                        arn.to_string(),
+                        Arn::from(arn),
                         ResourceKind::TargetGroup,
                         Default::default(),
                         serde_json::json!({

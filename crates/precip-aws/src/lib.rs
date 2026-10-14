@@ -14,6 +14,7 @@ pub mod vpc;
 
 use aws_config::{BehaviorVersion, SdkConfig};
 use precip_types::scan::{Relationship, Resource, ScanTarget, TargetStatus};
+use precip_types::{AccountId, Region};
 use precip_types::{Scan, ScanEvent};
 use tracing::Instrument;
 
@@ -52,9 +53,9 @@ pub struct Options {
     /// can be assumed is used.
     pub member_roles: Vec<String>,
     /// Scan only these account ids. Empty means every active account.
-    pub accounts: Vec<String>,
+    pub accounts: Vec<AccountId>,
     /// Never scan these account ids.
-    pub exclude_accounts: Vec<String>,
+    pub exclude_accounts: Vec<AccountId>,
     /// Treat the caller's account as a lone account even if it is an
     /// Organization management account.
     pub single_account: bool,
@@ -271,7 +272,7 @@ pub async fn scan_estate(
 }
 
 struct AccountOutcome {
-    account_id: String,
+    account_id: AccountId,
     targets: Vec<ScanTarget>,
     resources: Vec<Resource>,
     relationships: Vec<Relationship>,
@@ -280,12 +281,12 @@ struct AccountOutcome {
 impl AccountOutcome {
     /// An account that could not be scanned at all. Recorded as one failed
     /// target with region `*` so the report counts it.
-    fn skipped(account_id: &str, reason: String) -> Self {
+    fn skipped(account_id: &AccountId, reason: String) -> Self {
         Self {
-            account_id: account_id.to_string(),
+            account_id: account_id.clone(),
             targets: vec![ScanTarget {
-                account_id: account_id.to_string(),
-                region: "*".to_string(),
+                account_id: account_id.clone(),
+                region: Region::every(),
                 status: TargetStatus::Failed(reason),
             }],
             resources: Vec::new(),
@@ -338,7 +339,7 @@ async fn scan_account(
             None => None,
         },
     };
-    let mut skipped: Vec<String> = Vec::new();
+    let mut skipped: Vec<Region> = Vec::new();
     let regions = match pruned {
         Some(active) => {
             skipped = regions
@@ -451,7 +452,7 @@ async fn scan_account(
 }
 
 struct RegionOutcome {
-    region: String,
+    region: Region,
     status: TargetStatus,
     resources: Vec<Resource>,
     relationships: Vec<Relationship>,
@@ -465,12 +466,12 @@ struct RegionOutcome {
 async fn scan_region(
     config: &SdkConfig,
     identity: accounts::CallerIdentity,
-    region: String,
+    region: Region,
 ) -> RegionOutcome {
     let ctx = std::sync::Arc::new(collect::RegionContext {
         config: config
             .to_builder()
-            .region(aws_config::Region::new(region.clone()))
+            .region(aws_config::Region::new(region.to_string()))
             .build(),
         identity,
         region: region.clone(),
