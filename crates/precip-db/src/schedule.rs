@@ -943,6 +943,21 @@ impl Store {
                     "it waits for {w} / {e}, which has not migrated; agree that date first"
                 ));
             }
+            let pairs = self.schedule_inputs().await?;
+            let rules = self.global_rules().await?;
+            let blackouts = self.blackouts().await?;
+            if let (Some(me), Some(start)) = (
+                pairs.iter().find(|p| {
+                    p.workload == workload && p.environment == environment
+                }),
+                date,
+            ) {
+                if let Err(why) = precip_engine::schedule::check_agreed_date(
+                    me, start, &pairs, &rules, &blackouts,
+                ) {
+                    return refuse(&why);
+                }
+            }
         }
         if validate {
             match (current.status, status) {
