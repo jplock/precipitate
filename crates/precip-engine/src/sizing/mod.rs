@@ -77,9 +77,23 @@ pub struct SledCapacity {
 pub fn sled_capacity(profile: &Profile, a: &Assumptions) -> SledCapacity {
     let s = &profile.sled;
     let vcpus = f64::from(s.cores * s.threads_per_core) * a.threshold;
-    let usable_dram = s.dram_gib.saturating_sub(s.reservation_gib) as f64;
-    let memory_gib = usable_dram * s.reservoir_pct * a.threshold;
-    let disk_tib = f64::from(s.nvme_bays) * s.bay_size_tib * a.threshold;
+    // Published usable figures win over the derivation.
+    let usable_memory = match s.usable_memory_gib {
+        Some(gib) => gib as f64,
+        None => {
+            s.dram_gib.saturating_sub(s.reservation_gib) as f64
+                * s.reservoir_pct
+        }
+    };
+    let memory_gib = usable_memory * a.threshold;
+    let usable_disk = match s.usable_storage_tib {
+        Some(tib) => tib,
+        None => {
+            f64::from(s.nvme_bays) * s.bay_size_tib
+                / f64::from(profile.storage.replication_factor)
+        }
+    };
+    let disk_tib = usable_disk * a.threshold;
     SledCapacity { vcpus, memory_gib, disk_tib }
 }
 
@@ -141,8 +155,9 @@ pub fn size(
 
     let compute_sleds = pack_compute(&demands, &cap);
 
-    let storage_demand_tib =
-        total_disk_gib / 1024.0 * f64::from(profile.storage.replication_factor);
+    // Sled disk capacity is already net of replication, so demand is the
+    // disks as sized.
+    let storage_demand_tib = total_disk_gib / 1024.0;
     let storage_sleds = if storage_demand_tib == 0.0 {
         0
     } else {
@@ -217,8 +232,8 @@ pub fn demand_by_workload(
 mod tests {
     use super::*;
 
-    fn gen2() -> Profile {
-        profiles::builtin("gen2-1152").expect("listed").expect("parses")
+    fn gen1() -> Profile {
+        profiles::builtin("gen1-1024").expect("listed").expect("parses")
     }
 
     fn inst(id: &str, vcpus: u32, mem: u64, disk: u64) -> Instance {
@@ -233,16 +248,28 @@ mod tests {
     }
 
     #[test]
-    fn sled_capacity_applies_reservation_reservoir_and_threshold() {
-        let cap = sled_capacity(&gen2(), &Assumptions::default());
-        assert_eq!(cap.vcpus, 288.0);
-        let expected_mem = (1152.0 - 44.0) * 0.91 * 0.75;
+    fn sled_capacity_uses_published_figures_then_the_threshold() {
+        let cap = sled_capacity(&gen1(), &Assumptions::default());
+        assert_eq!(cap.vcpus, 96.0, "64 cores, 2 threads, 75%");
+        assert!((cap.memory_gib - 853.0 * 0.75).abs() < 1e-9);
+        assert!((cap.disk_tib - 26.6 * 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sled_capacity_is_derived_when_nothing_is_published() {
+        let mut p = gen1();
+        p.sled.usable_memory_gib = None;
+        p.sled.usable_storage_tib = None;
+        let cap = sled_capacity(&p, &Assumptions::default());
+        let expected_mem = (1024.0 - 44.0) * 0.91 * 0.75;
         assert!((cap.memory_gib - expected_mem).abs() < 1e-9);
+        let expected_disk = 10.0 * 3.2 / 3.0 * 0.75;
+        assert!((cap.disk_tib - expected_disk).abs() < 1e-9);
     }
 
     #[test]
     fn empty_inventory_is_one_headroom_sled_in_one_rack() {
-        let s = size(&gen2(), &[], &Assumptions::default());
+        let s = size(&gen1(), &[], &Assumptions::default());
         assert_eq!(s.compute_sleds, 0);
         assert_eq!(s.sleds, 1);
         assert_eq!(s.racks, 1);
@@ -252,7 +279,7 @@ mod tests {
     fn cannot_move_instances_are_excluded_and_listed() {
         let mut blocked = inst("arm", 4, 16, 100);
         blocked.fit = Fit::CannotMove;
-        let s = size(&gen2(), &[blocked], &Assumptions::default());
+        let s = size(&gen1(), &[blocked], &Assumptions::default());
         assert_eq!(s.excluded, vec!["arm".to_string()]);
         assert_eq!(s.compute_sleds, 0);
     }
@@ -261,7 +288,7 @@ mod tests {
     fn retired_workloads_are_not_sized() {
         let mut retired = inst("old", 64, 512, 1000);
         retired.disposition = Disposition::Retire;
-        let s = size(&gen2(), &[retired], &Assumptions::default());
+        let s = size(&gen1(), &[retired], &Assumptions::default());
         assert_eq!(s.not_sized, vec!["old".to_string()]);
         assert_eq!(s.compute_sleds, 0);
     }
@@ -270,7 +297,7 @@ mod tests {
     fn replatform_workloads_are_sized() {
         let mut re = inst("re", 4, 16, 100);
         re.disposition = Disposition::Replatform;
-        let s = size(&gen2(), &[re], &Assumptions::default());
+        let s = size(&gen1(), &[re], &Assumptions::default());
         assert!(s.not_sized.is_empty());
         assert_eq!(s.compute_sleds, 1);
     }
@@ -278,13 +305,13 @@ mod tests {
     #[test]
     fn memory_heavy_fleet_is_compute_bound_by_memory() {
         // 20 r-class style instances: 16 vCPU, 128 GiB each. One sled holds
-        // ~756 GiB after threshold, so 5 per sled, 4 sleds.
+        // ~640 GiB after threshold, so 4 per sled, 5 sleds.
         let fleet: Vec<Instance> =
             (0..20).map(|i| inst(&format!("r{i}"), 16, 128, 100)).collect();
-        let s = size(&gen2(), &fleet, &Assumptions::default());
-        assert_eq!(s.compute_sleds, 4);
+        let s = size(&gen1(), &fleet, &Assumptions::default());
+        assert_eq!(s.compute_sleds, 5);
         assert_eq!(s.bound, Bound::Compute);
-        assert_eq!(s.sleds, 5);
+        assert_eq!(s.sleds, 6);
         assert_eq!(s.racks, 1);
     }
 
@@ -292,19 +319,19 @@ mod tests {
     fn large_disks_make_storage_bind() {
         let fleet: Vec<Instance> =
             (0..40).map(|i| inst(&format!("d{i}"), 2, 8, 10_000)).collect();
-        let s = size(&gen2(), &fleet, &Assumptions::default());
+        let s = size(&gen1(), &fleet, &Assumptions::default());
         assert_eq!(s.bound, Bound::Storage);
         assert!(s.storage_sleds > s.compute_sleds);
     }
 
     #[test]
     fn growth_factor_scales_demand() {
-        // Two 300 GiB instances share one sled (~756 GiB usable); doubled,
+        // Two 300 GiB instances share one sled (~640 GiB usable); doubled,
         // each needs its own.
-        let fleet = vec![inst("a", 50, 300, 0), inst("b", 50, 300, 0)];
-        let base = size(&gen2(), &fleet, &Assumptions::default());
+        let fleet = vec![inst("a", 40, 300, 0), inst("b", 40, 300, 0)];
+        let base = size(&gen1(), &fleet, &Assumptions::default());
         let grown = size(
-            &gen2(),
+            &gen1(),
             &fleet,
             &Assumptions { growth_factor: 2.0, ..Assumptions::default() },
         );
@@ -315,7 +342,7 @@ mod tests {
     #[test]
     fn instance_larger_than_a_sled_is_excluded_not_packed() {
         let fleet = vec![inst("huge", 8, 1000, 0)];
-        let s = size(&gen2(), &fleet, &Assumptions::default());
+        let s = size(&gen1(), &fleet, &Assumptions::default());
         assert_eq!(s.excluded, vec!["huge".to_string()]);
         assert_eq!(s.compute_sleds, 0);
     }

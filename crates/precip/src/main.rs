@@ -146,7 +146,7 @@ enum Command {
     /// Size the rehost and relocate workloads of the latest scan.
     Size {
         /// Built-in profile name, or a path to a profile TOML file.
-        /// Defaults to the workspace's choice, else gen2-1152.
+        /// Defaults to the workspace's choice, else gen1-1024.
         #[arg(long)]
         profile: Option<String>,
         /// Multiplier on demand.
@@ -1203,7 +1203,7 @@ async fn main() -> anyhow::Result<()> {
                 None => store
                     .sizing_profile()
                     .await?
-                    .unwrap_or_else(|| "gen2-1152".into()),
+                    .unwrap_or_else(|| "gen1-1024".into()),
             };
             let profile = load_profile(&name)?;
             let assumptions = precip_engine::sizing::Assumptions {
@@ -1375,7 +1375,7 @@ async fn main() -> anyhow::Result<()> {
                         None => store
                             .sizing_profile()
                             .await?
-                            .unwrap_or_else(|| "gen2-1152".into()),
+                            .unwrap_or_else(|| "gen1-1024".into()),
                     };
                     let profile = load_profile(&name)?;
                     let assumptions = precip_engine::sizing::Assumptions {

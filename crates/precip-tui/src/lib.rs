@@ -1081,7 +1081,7 @@ impl App {
             self.sizing.as_ref().map(|v| v.assumptions).unwrap_or_default();
         let profile_name = rt
             .block_on(store.sizing_profile())?
-            .unwrap_or_else(|| "gen2-1152".into());
+            .unwrap_or_else(|| "gen1-1024".into());
         self.sizing = match self.scans.first() {
             Some(s) => {
                 let profile =

@@ -26,6 +26,16 @@ pub struct Sled {
     pub reservoir_pct: f64,
     pub nvme_bays: u32,
     pub bay_size_tib: f64,
+    /// Usable guest memory per sled as published by Oxide. When set it is
+    /// used as is, instead of being derived from DRAM, the reservation
+    /// and the reservoir.
+    #[serde(default)]
+    pub usable_memory_gib: Option<u64>,
+    /// Usable disk capacity per sled as published by Oxide, already net
+    /// of replication. When set it replaces bays, bay size and the
+    /// replication factor.
+    #[serde(default)]
+    pub usable_storage_tib: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

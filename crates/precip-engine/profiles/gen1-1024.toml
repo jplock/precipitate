@@ -1,0 +1,40 @@
+# Oxide Gen 1 ("Gimlet") sled with 1 TiB DRAM, in a 32-sled rack. Every
+# figure comes from docs.oxide.computer or Omicron source on GitHub, as
+# of 2026-10-14; docs/rfd/0001/notes.adoc has the links.
+#   docs.oxide.computer/guides/introduction: sleds per rack, the 64-core
+#     AMD Milan CPU, up to 1 TiB of DRAM, 10 U.2 bays.
+#   docs.oxide.computer/guides/operator/resource-management: the usable
+#     memory and storage per sled (853 GiB, 26.6 TiB), which already
+#     account for the control plane, the guest reservoir and Crucible's
+#     three-way replication; the 32-sled full-rack figures confirm which
+#     sled they describe. Also the 254 vCPU and 12 disk instance limits.
+#   Omicron source on GitHub: the other instance limits, and the
+#     reservation and reservoir the usable memory is derived from.
+name = "gen1-1024"
+oxide_release = "21"
+sleds_per_rack = 32
+
+[sled]
+cores = 64
+threads_per_core = 2
+dram_gib = 1024
+reservation_gib = 44
+reservoir_pct = 0.91
+nvme_bays = 10
+# Bay size is not published for Gen 1; the usable figure below is used
+# instead and this only matters when it is absent.
+bay_size_tib = 3.2
+# From the operator guide. When present these replace the derivation from
+# DRAM, reservation and reservoir, and from bays and replication.
+usable_memory_gib = 853
+usable_storage_tib = 26.6
+
+[instance]
+max_vcpu = 254
+max_memory_gib = 1536
+max_disks = 12
+max_disk_gib = 1023
+max_nics = 8
+
+[storage]
+replication_factor = 3
