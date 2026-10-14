@@ -215,6 +215,8 @@ pub struct ScheduleView {
     pub version: i64,
     pub selected: ratatui::widgets::TableState,
     pub today: jiff::civil::Date,
+    /// Show the Gantt chart instead of the table.
+    pub gantt: bool,
 }
 
 /// Picker for the global weekday rule: three presets, then each day of
@@ -1155,6 +1157,7 @@ impl App {
             Some(latest) => rt.block_on(store.verify_migrated(&latest.id))?,
             None => Vec::new(),
         };
+        let gantt = self.schedule.as_ref().is_some_and(|v| v.gantt);
         let mut selected =
             self.schedule.as_ref().map(|v| v.selected).unwrap_or_default();
         if selected.selected().is_none() && !schedule.slots.is_empty() {
@@ -1169,6 +1172,7 @@ impl App {
             version,
             selected,
             today,
+            gantt,
         });
         for (w, e) in expired {
             self.note(format!(
@@ -2646,6 +2650,11 @@ impl App {
                 }
                 KeyCode::Char('e') if self.tab == Tab::Schedule => {
                     self.open_export(ExportKind::Schedule);
+                }
+                KeyCode::Char('g') if self.tab == Tab::Schedule => {
+                    if let Some(v) = self.schedule.as_mut() {
+                        v.gantt = !v.gantt;
+                    }
                 }
                 KeyCode::Char('e') if self.tab == Tab::Workloads => {
                     self.open_export(ExportKind::Workloads);

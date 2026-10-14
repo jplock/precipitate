@@ -342,6 +342,12 @@ enum ScheduleCommand {
     /// Rebuild the rules, freezes, waves and statuses from the change log
     /// and compute the schedule once. Proves the log is the truth.
     Replay,
+    /// The schedule as a Gantt chart, one row per migration.
+    Gantt {
+        /// Characters available for the bars.
+        #[arg(long, default_value_t = 90)]
+        width: usize,
+    },
     /// Reschedule rate, projected end and drift, success and slip.
     Metrics,
 }
@@ -839,6 +845,18 @@ async fn run_schedule(
                         .map(|d| format!("   -> ends {d}"))
                         .unwrap_or_default()
                 );
+            }
+        }
+        ScheduleCommand::Gantt { width } => {
+            let (_, schedule) =
+                store.compute_schedule(today(), "command").await?;
+            let gantt = precip_engine::schedule::gantt::build(
+                &schedule,
+                today(),
+                width,
+            );
+            for line in precip_engine::schedule::gantt::render(&gantt, 32) {
+                out!("{line}");
             }
         }
         ScheduleCommand::Replay => {
@@ -1481,6 +1499,21 @@ fn print_metrics(m: &precip_db::Metrics) {
         pct(m.rollback_rate),
         m.rolled_back
     );
+    if m.forecast_within_week_rate > 0.0 || m.forecast_error_days != 0.0 {
+        out!(
+            "forecast          first plan was off by {:+.1} days on average; {} of migrations landed within a week of it",
+            m.forecast_error_days,
+            pct(m.forecast_within_week_rate)
+        );
+    }
+    if m.end_history.len() > 1 {
+        let trail: Vec<String> = m
+            .end_history
+            .iter()
+            .map(|(day, ends)| format!("{day}: {ends}"))
+            .collect();
+        out!("end over time     {}", trail.join("  ->  "));
+    }
     if !m.reschedule_reasons.is_empty() {
         let list: Vec<String> = m
             .reschedule_reasons

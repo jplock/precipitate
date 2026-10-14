@@ -2020,6 +2020,15 @@ pub struct Metrics {
     /// Missed and re-agreed dates by reason, most common first. A move
     /// recorded without a reason counts under "no reason given".
     pub reschedule_reasons: Vec<(String, usize)>,
+    /// How the projected end moved: one point per day a schedule was
+    /// computed, the last version of that day.
+    pub end_history: Vec<(Date, Date)>,
+    /// Mean days between a migrated pair's first proposed date and the
+    /// day it migrated. Positive means the first plan was optimistic.
+    pub forecast_error_days: f64,
+    /// Migrated pairs the first plan placed within a week of the day
+    /// they migrated, over migrated pairs with a first plan.
+    pub forecast_within_week_rate: f64,
 }
 
 /// Progress of one wave.
@@ -2278,6 +2287,52 @@ impl Store {
             rules.per_day * 30,
         );
 
+        for v in &versions {
+            if let Some(ends) = v.ends {
+                match m.end_history.last_mut() {
+                    Some((day, e)) if *day == v.as_of => *e = ends,
+                    _ => m.end_history.push((v.as_of, ends)),
+                }
+            }
+        }
+        // Forecast accuracy: the first date each migrated pair was ever
+        // given against the day it really moved.
+        let mut errors: Vec<i64> = Vec::new();
+        if let Some(first_version) = versions.first() {
+            let rows = bound!(
+                Query::select()
+                    .columns([
+                        ScheduleSlots::Workload,
+                        ScheduleSlots::Environment,
+                        ScheduleSlots::Date,
+                    ])
+                    .from(ScheduleSlots::Table)
+                    .and_where(
+                        Expr::col(ScheduleSlots::VersionId)
+                            .eq(first_version.id)
+                    )
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            for r in rows {
+                let (w, e): (String, String) =
+                    (r.get("workload"), r.get("environment"));
+                let planned = parse_date(&r.get::<String, _>("date"))?;
+                let done = self.pair_status(&w, &e).await?;
+                if let (Status::Migrated, Some(actual)) =
+                    (done.status, done.migrated_date)
+                {
+                    errors.push((actual - planned).get_days().into());
+                }
+            }
+        }
+        if !errors.is_empty() {
+            m.forecast_error_days =
+                errors.iter().sum::<i64>() as f64 / errors.len() as f64;
+            m.forecast_within_week_rate =
+                errors.iter().filter(|d| d.abs() <= 7).count() as f64
+                    / errors.len() as f64;
+        }
         m.projected_end = versions.last().and_then(|v| v.ends);
         m.first_projected_end = versions.first().and_then(|v| v.ends);
         m.end_drift_days = match (m.first_projected_end, m.projected_end) {

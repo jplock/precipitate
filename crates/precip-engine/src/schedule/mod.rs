@@ -13,6 +13,7 @@
 //! Waves are strict: nothing in wave 2 starts before the last day of
 //! wave 1.
 
+pub mod gantt;
 pub mod holidays;
 
 use jiff::civil::{Date, Weekday};

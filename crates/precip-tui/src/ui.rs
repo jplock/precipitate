@@ -2,9 +2,9 @@
 //! feed, key hints.
 
 use crate::{
-    ALL_WEEKDAYS, App, DISPOSITIONS, Fields, PairRow, RuleRow, Screen, Tab,
-    WEEKDAY_ROWS, disposition_help, disposition_name, logo, next_step,
-    weekday_rule_label,
+    ALL_WEEKDAYS, App, DISPOSITIONS, Fields, PairRow, RuleRow, ScheduleView,
+    Screen, Tab, WEEKDAY_ROWS, disposition_help, disposition_name, logo,
+    next_step, weekday_rule_label,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -692,6 +692,109 @@ fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
     );
 }
 
+/// The schedule as bars: agreed in green, proposed dimmed, today marked,
+/// months along the top, and how the projected end has moved below.
+fn draw_gantt(v: &ScheduleView, frame: &mut Frame, area: Rect) {
+    use precip_engine::schedule::gantt::{self, Cell};
+    let label_width: u16 = 30;
+    let inner = area.width.saturating_sub(label_width + 4);
+    let g = gantt::build(&v.schedule, v.today, usize::from(inner.max(1)));
+    let mut months = vec![' '; g.columns];
+    for (col, label) in &g.months {
+        for (i, c) in label.chars().enumerate() {
+            if let Some(cell) = months.get_mut(col + i) {
+                *cell = c;
+            }
+        }
+    }
+    let mut today_row = vec![' '; g.columns];
+    if let Some(col) = g.today {
+        today_row[col] = '▼';
+    }
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "{:<label_width$}",
+                    format!("each cell is {}", gantt::unit(g.days_per_cell)),
+                    label_width = usize::from(label_width)
+                ),
+                dim(),
+            ),
+            Span::raw(" "),
+            Span::styled(months.into_iter().collect::<String>(), dim()),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "{:<label_width$}",
+                    "today",
+                    label_width = usize::from(label_width)
+                ),
+                dim(),
+            ),
+            Span::raw(" "),
+            Span::styled(today_row.into_iter().collect::<String>(), accent()),
+        ]),
+    ];
+    for r in &g.rows {
+        let label = format!("{} {} / {}", r.wave, r.workload, r.environment);
+        let label: String =
+            label.chars().take(usize::from(label_width)).collect();
+        let bar: String = r
+            .cells
+            .iter()
+            .map(|c| if *c == Cell::Span { '█' } else { ' ' })
+            .collect();
+        lines.push(Line::from(vec![
+            Span::raw(format!(
+                "{label:<label_width$}",
+                label_width = usize::from(label_width)
+            )),
+            Span::raw(" "),
+            Span::styled(bar, if r.locked { accent() } else { dim() }),
+        ]));
+    }
+    let m = &v.metrics;
+    if m.end_history.len() > 1 {
+        let trail: Vec<String> = m
+            .end_history
+            .iter()
+            .map(|(day, ends)| {
+                format!(
+                    "{}: {}",
+                    short_date(*day, v.today),
+                    short_date(*ends, v.today)
+                )
+            })
+            .collect();
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("projected end over time   ", dim()),
+            Span::raw(trail.join("  →  ")),
+        ]));
+    }
+    if m.forecast_within_week_rate > 0.0 || m.forecast_error_days != 0.0 {
+        lines.push(Line::from(vec![
+            Span::styled("forecast                  ", dim()),
+            Span::raw(format!(
+                "first plan off by {:+.1} days on average; {:.0}% landed within a week of it",
+                m.forecast_error_days,
+                m.forecast_within_week_rate * 100.0
+            )),
+        ]));
+    }
+    let title = format!(
+        "{} to migrate   green agreed, grey proposed",
+        v.schedule.slots.len()
+    );
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel(&title).padding(Padding::horizontal(1))),
+        area,
+    );
+}
+
 fn draw_export_prompt(app: &mut App, frame: &mut Frame) {
     let Some(p) = app.export_prompt.as_ref() else { return };
     let popup = popup_rect(frame, 76, 6);
@@ -1251,6 +1354,14 @@ fn draw_hints(app: &App, frame: &mut Frame, area: Rect) {
         spans.extend(key("enter", "what can I do with this row"));
         spans.extend(key("r", "rules"));
         spans.extend(key("h", "history"));
+        spans.extend(key(
+            "g",
+            if app.schedule.as_ref().is_some_and(|v| v.gantt) {
+                "table"
+            } else {
+                "gantt"
+            },
+        ));
         spans.extend(key("e", "export"));
     }
     if app.tab == Tab::Sizing {
@@ -1984,6 +2095,10 @@ fn draw_schedule(app: &mut App, frame: &mut Frame, area: Rect) {
         rules_area,
     );
 
+    if v.gantt {
+        draw_gantt(v, frame, table_area);
+        return;
+    }
     let confirmed = s.slots.iter().filter(|x| x.locked).count();
     let rows: Vec<Row> = s
         .slots
