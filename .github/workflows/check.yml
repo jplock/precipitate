@@ -9,6 +9,13 @@ on:
 
 permissions: {}
 
+# The AWS SDK crates are large; without debug info and incremental
+# artefacts, clippy and the tests fit on a hosted runner's disk.
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
