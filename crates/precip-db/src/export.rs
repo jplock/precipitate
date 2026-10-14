@@ -194,8 +194,8 @@ pub fn schedule_ics(
         out.push_str("BEGIN:VEVENT\r\n");
         out.push_str(&format!(
             "UID:{}-{}@precip\r\n",
-            slug(&s.workload),
-            slug(&s.environment)
+            uid_part(&s.workload),
+            uid_part(&s.environment)
         ));
         out.push_str(&format!("DTSTAMP:{stamp}\r\n"));
         out.push_str(&format!("DTSTART;VALUE=DATE:{}\r\n", day(s.date)));
@@ -229,12 +229,19 @@ fn ics_text(text: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn slug(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }
-        })
-        .collect()
+/// A name made safe for an iCalendar UID. Every byte other than an
+/// ASCII letter or digit is percent-encoded, so distinct names never
+/// collide and the `-` between the parts stays unambiguous.
+fn uid_part(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -242,6 +249,13 @@ mod tests {
     use super::*;
     use jiff::civil::date;
     use precip_engine::schedule::Slot;
+
+    #[test]
+    fn uids_differ_for_names_that_differ_only_in_punctuation() {
+        assert_eq!(uid_part("shop"), "shop");
+        assert_ne!(uid_part("a.b"), uid_part("a-b"));
+        assert_eq!(uid_part("a-b"), "a%2Db");
+    }
 
     #[test]
     fn csv_quotes_only_what_needs_it() {

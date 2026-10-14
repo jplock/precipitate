@@ -1374,10 +1374,10 @@ fn draw_hints(app: &App, frame: &mut Frame, area: Rect) {
     spans.extend(key("↑ ↓", "select"));
     if app.tab == Tab::Workloads {
         spans.extend(key("enter", "what can I do with this row"));
-        spans.extend(key(
-            "click",
-            if app.expanded.is_some() { "close" } else { "open" },
-        ));
+        spans.extend(key("click", "open a row"));
+        if app.expanded.is_some() {
+            spans.extend(key("esc", "close"));
+        }
         spans.extend(key("e", "export"));
     }
     spans.extend(key("q", "quit"));
@@ -1510,12 +1510,6 @@ fn draw_picker(app: &mut App, frame: &mut Frame) {
     spans.extend(key("enter", "open"));
     spans.extend(key("n", "new"));
     spans.extend(key("↑ ↓", "select"));
-    if app.tab == Tab::Workloads {
-        spans.extend(key(
-            "enter / click",
-            if app.expanded.is_some() { "close" } else { "open" },
-        ));
-    }
     spans.extend(key("q", "quit"));
     frame.render_widget(Paragraph::new(Line::from(spans)), hints);
 }
@@ -1574,7 +1568,7 @@ fn draw_expanded(app: &mut App, frame: &mut Frame, area: Rect) {
         .collect();
     frame.render_widget(
         Paragraph::new(lines).block(
-            panel("Disposition history   d to change")
+            panel("Disposition history   enter to change")
                 .padding(Padding::horizontal(1)),
         ),
         history_area,
@@ -1958,7 +1952,10 @@ fn draw_sizing(app: &App, frame: &mut Frame, area: Rect) {
                     "cannot move    ",
                     Style::default().fg(logo::OX_YELLOW),
                 ),
-                _ => Span::styled("needs changes  ", accent()),
+                precip_engine::sizing::Fit::NeedsRemediation
+                | precip_engine::sizing::Fit::CleanFit => {
+                    Span::styled("needs changes  ", accent())
+                }
             };
             Line::from(vec![
                 tag,

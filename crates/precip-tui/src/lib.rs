@@ -1129,6 +1129,28 @@ impl App {
 
     /// A session left open past midnight computes the new day's
     /// schedule, so expired confirmations and today's row stay right.
+    /// Up and down move the selection of the tab on screen. Tabs
+    /// without a list ignore them.
+    fn move_selection(&mut self, delta: i8) {
+        let down = delta > 0;
+        match self.tab {
+            Tab::Workloads if down => self.workload_selected.select_next(),
+            Tab::Workloads => self.workload_selected.select_previous(),
+            Tab::Scans if down => self.selected.select_next(),
+            Tab::Scans => self.selected.select_previous(),
+            Tab::Schedule => {
+                if let Some(v) = self.schedule.as_mut() {
+                    if down {
+                        v.selected.select_next();
+                    } else {
+                        v.selected.select_previous();
+                    }
+                }
+            }
+            Tab::Overview | Tab::Sizing | Tab::Accounts => {}
+        }
+    }
+
     fn refresh_on_new_day(&mut self) -> Result<(), TuiError> {
         let today = jiff::Zoned::now().date();
         if self.schedule.as_ref().is_some_and(|v| v.today != today) {
@@ -1244,8 +1266,8 @@ impl App {
         Ok(())
     }
 
-    /// Open the menu for the selected row: a slot, or a finding below
-    /// the slots.
+    /// Ask where to write an export of `kind`, offering a file name in
+    /// its usual format.
     fn open_export(&mut self, kind: ExportKind) {
         let (what, ext) = match kind {
             ExportKind::Workloads => ("workloads", "csv"),
@@ -2155,8 +2177,6 @@ impl App {
         }
     }
 
-    /// Save the weekday picker's selection as the global rule and
-    /// recompute.
     /// Save the weekday picker's selection where it came from: the global
     /// rule, or the open pair's rule.
     fn close_weekday_picker(&mut self) -> Result<(), TuiError> {
@@ -2312,6 +2332,10 @@ impl App {
         Ok(())
     }
 
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "each prompt handles a few keys and ignores the rest of KeyCode"
+    )]
     fn event_loop(
         &mut self,
         terminal: &mut DefaultTerminal,
@@ -2331,7 +2355,10 @@ impl App {
                     }
                     continue;
                 }
-                _ => continue,
+                Event::FocusGained
+                | Event::FocusLost
+                | Event::Paste(_)
+                | Event::Resize(..) => continue,
             };
             if key.kind != KeyEventKind::Press {
                 continue;
@@ -2698,30 +2725,18 @@ impl App {
                 KeyCode::BackTab | KeyCode::Left => {
                     self.tab = self.tab.previous();
                 }
-                KeyCode::Down => match self.tab {
-                    Tab::Workloads => self.workload_selected.select_next(),
-                    Tab::Schedule => {
-                        if let Some(v) = self.schedule.as_mut() {
-                            v.selected.select_next();
-                        }
-                    }
-                    _ => self.selected.select_next(),
-                },
-                KeyCode::Up => match self.tab {
-                    Tab::Workloads => self.workload_selected.select_previous(),
-                    Tab::Schedule => {
-                        if let Some(v) = self.schedule.as_mut() {
-                            v.selected.select_previous();
-                        }
-                    }
-                    _ => self.selected.select_previous(),
-                },
+                KeyCode::Down => self.move_selection(1),
+                KeyCode::Up => self.move_selection(-1),
                 _ => {}
             }
         }
     }
 
     /// Handle a key on the picker. Returns true to quit.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "the picker handles a few keys and ignores the rest of KeyCode"
+    )]
     fn picker_key(&mut self, code: KeyCode) -> Result<bool, TuiError> {
         let Screen::Picker(p) = &mut self.screen else { return Ok(false) };
         if let Some(name) = p.new_name.as_mut() {
