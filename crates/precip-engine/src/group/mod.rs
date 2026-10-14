@@ -320,7 +320,16 @@ fn place_managed(
                 (envs.len() == 1).then(|| envs.iter().next().cloned()).flatten()
             })
         }
-        _ => None,
+        GroupingSignal::Override
+        | GroupingSignal::OverrideTag
+        | GroupingSignal::CloudFormationStack
+        | GroupingSignal::AutoScalingGroup
+        | GroupingSignal::LoadBalancer
+        | GroupingSignal::Tag
+        | GroupingSignal::AccountOnly
+        | GroupingSignal::Vpc
+        | GroupingSignal::Unassigned
+        | GroupingSignal::Attached => None,
     };
     Placed {
         arn: r.arn.clone(),
@@ -528,7 +537,24 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
                     .collect();
                 inherit(&r.arn, owners);
             }
-            _ => {}
+            // Placed by their own signals, or never placed by inheritance.
+            ResourceKind::Account
+            | ResourceKind::Ec2Instance
+            | ResourceKind::InstanceType
+            | ResourceKind::Ami
+            | ResourceKind::Vpc
+            | ResourceKind::Subnet
+            | ResourceKind::SecurityGroupRule
+            | ResourceKind::RouteTable
+            | ResourceKind::InternetGateway
+            | ResourceKind::NatGateway
+            | ResourceKind::VpcPeeringConnection
+            | ResourceKind::PrefixList
+            | ResourceKind::LaunchTemplate
+            | ResourceKind::LaunchConfiguration
+            | ResourceKind::LoadBalancer
+            | ResourceKind::CloudFormationStack
+            | ResourceKind::ManagedService => {}
         }
     }
     members.extend(inherited);
