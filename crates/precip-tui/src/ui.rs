@@ -69,6 +69,7 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     draw_holiday_picker(app, frame);
     draw_merge_prompt(app, frame);
     draw_reason_picker(app, frame);
+    draw_export_prompt(app, frame);
     draw_action_menu(app, frame);
 }
 
@@ -691,6 +692,41 @@ fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
     );
 }
 
+fn draw_export_prompt(app: &mut App, frame: &mut Frame) {
+    let Some(p) = app.export_prompt.as_ref() else { return };
+    let popup = popup_rect(frame, 76, 6);
+    frame.render_widget(Clear, popup);
+    let (what, formats) = match p.kind {
+        crate::ExportKind::Workloads => ("workloads", ".csv or .json"),
+        crate::ExportKind::Sizing => ("sizing", ".csv or .json"),
+        crate::ExportKind::Schedule => ("schedule", ".ics, .csv or .json"),
+    };
+    let lines = vec![
+        Line::from(vec![Span::raw("file: "), value(format!("{}_", p.text))]),
+        Line::from(Span::styled(
+            format!("The extension picks the format: {formats}."),
+            dim(),
+        )),
+    ];
+    let (hint, style) = if p.confirming_overwrite {
+        (
+            "that file exists; enter again to overwrite it, esc to keep it"
+                .to_string(),
+            warn(),
+        )
+    } else {
+        ("type a path, enter to write   esc to cancel".to_string(), dim())
+    };
+    frame.render_widget(
+        Paragraph::new(lines).block(popup_block(
+            format!("Export the {what}"),
+            hint,
+            style,
+        )),
+        popup,
+    );
+}
+
 fn draw_history(app: &mut App, frame: &mut Frame) {
     let Some(h) = app.history.as_mut() else { return };
     let popup = popup_rect(
@@ -1215,11 +1251,13 @@ fn draw_hints(app: &App, frame: &mut Frame, area: Rect) {
         spans.extend(key("enter", "what can I do with this row"));
         spans.extend(key("r", "rules"));
         spans.extend(key("h", "history"));
+        spans.extend(key("e", "export"));
     }
     if app.tab == Tab::Sizing {
         spans.extend(key("g/G", "growth"));
         spans.extend(key("t", "threshold"));
         spans.extend(key("n", "N+"));
+        spans.extend(key("e", "export"));
     }
     spans.extend(key("↑ ↓", "select"));
     if app.tab == Tab::Workloads {
@@ -1228,6 +1266,7 @@ fn draw_hints(app: &App, frame: &mut Frame, area: Rect) {
             "click",
             if app.expanded.is_some() { "close" } else { "open" },
         ));
+        spans.extend(key("e", "export"));
     }
     spans.extend(key("q", "quit"));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

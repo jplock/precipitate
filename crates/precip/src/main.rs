@@ -164,6 +164,33 @@ enum Command {
     },
     /// List built-in Oxide profiles.
     Profiles,
+    /// Write the workloads, the sizing or the schedule to a file, or to
+    /// standard output. The format follows the file's extension (.csv,
+    /// .json, .ics) or --format.
+    Export {
+        what: ExportWhat,
+        #[arg(long)]
+        out: Option<Utf8PathBuf>,
+        /// csv, json, or ics (schedule only); needed without --out.
+        #[arg(long)]
+        format: Option<String>,
+        /// Sizing profile, growth, threshold and headroom as for `size`.
+        #[arg(long, default_value = "gen2-1152")]
+        profile: String,
+        #[arg(long, default_value_t = 1.0)]
+        growth: f64,
+        #[arg(long, default_value_t = 0.75)]
+        threshold: f64,
+        #[arg(long, default_value_t = 1)]
+        headroom: u32,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ExportWhat {
+    Workloads,
+    Sizing,
+    Schedule,
 }
 
 #[derive(Subcommand)]
@@ -1254,6 +1281,92 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .with_context(|| format!("opening {db}"))?;
             run_schedule(&store, command).await?;
+        }
+        Some(Command::Export {
+            what,
+            out,
+            format,
+            profile,
+            growth,
+            threshold,
+            headroom,
+        }) => {
+            let store = open_store(chosen_db, "export").await?;
+            let format = match (&format, &out) {
+                (Some(f), _) => f.to_lowercase(),
+                (None, Some(path)) => {
+                    path.extension().unwrap_or_default().to_lowercase()
+                }
+                (None, None) => anyhow::bail!("give --out <file> or --format"),
+            };
+            let latest = latest_scan(&store).await?;
+            let text = match (what, format.as_str()) {
+                (ExportWhat::Workloads, "csv") => {
+                    precip_db::export::workloads_csv(
+                        &store.workload_summary(&latest.id).await?,
+                    )
+                }
+                (ExportWhat::Workloads, "json") => {
+                    precip_db::export::workloads_json(
+                        &store.workload_summary(&latest.id).await?,
+                    )?
+                }
+                (ExportWhat::Sizing, "csv" | "json") => {
+                    let profile = load_profile(&profile)?;
+                    let assumptions = precip_engine::sizing::Assumptions {
+                        growth_factor: growth,
+                        threshold,
+                        headroom,
+                    };
+                    let instances =
+                        store.sized_instances(&latest.id, &profile).await?;
+                    if format == "csv" {
+                        precip_db::export::sizing_csv(&instances)
+                    } else {
+                        let inputs: Vec<precip_engine::sizing::Instance> =
+                            instances.iter().map(|i| i.to_instance()).collect();
+                        let result = precip_engine::sizing::size(
+                            &profile,
+                            &inputs,
+                            &assumptions,
+                        );
+                        let demand = precip_engine::sizing::demand_by_workload(
+                            &instances,
+                        );
+                        precip_db::export::sizing_json(
+                            &profile,
+                            &assumptions,
+                            &result,
+                            &demand,
+                            &instances,
+                        )?
+                    }
+                }
+                (ExportWhat::Schedule, "csv" | "json" | "ics") => {
+                    let (_, schedule) =
+                        store.compute_schedule(today(), "export").await?;
+                    match format.as_str() {
+                        "csv" => precip_db::export::schedule_csv(&schedule),
+                        "json" => precip_db::export::schedule_json(&schedule)?,
+                        _ => precip_db::export::schedule_ics(
+                            &schedule,
+                            cli.workspace.as_deref().unwrap_or("precip"),
+                            jiff::Timestamp::now(),
+                        ),
+                    }
+                }
+                (_, other) => {
+                    anyhow::bail!("{other} is not a format this export knows")
+                }
+            };
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, text)
+                        .with_context(|| format!("writing {path}"))?;
+                    out!("wrote {path}");
+                }
+                None => print_line(format_args!("{text}")),
+            }
         }
         Some(Command::Profiles) => {
             for name in precip_engine::sizing::profiles::NAMES {

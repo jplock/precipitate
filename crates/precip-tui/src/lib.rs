@@ -30,6 +30,8 @@ pub enum TuiError {
     Io(#[from] std::io::Error),
     #[error("database")]
     Db(#[from] precip_db::DbError),
+    #[error("export")]
+    Export(#[from] serde_json::Error),
 }
 
 /// A running scan: its progress channel and the task that completes it.
@@ -627,6 +629,22 @@ pub struct DependsPicker {
     pub state: ListState,
 }
 
+/// What an export writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    Workloads,
+    Sizing,
+    Schedule,
+}
+
+/// Typing the path an export goes to. The extension picks the format.
+pub struct ExportPrompt {
+    pub kind: ExportKind,
+    pub text: String,
+    /// The path exists; a second Enter overwrites it.
+    pub confirming_overwrite: bool,
+}
+
 /// Typing the workload a name folds into.
 pub struct MergePrompt {
     pub alias: String,
@@ -738,6 +756,7 @@ pub struct App {
     pub depends_picker: Option<DependsPicker>,
     pub holiday_picker: Option<HolidayPicker>,
     pub reason_picker: Option<ReasonPicker>,
+    pub export_prompt: Option<ExportPrompt>,
     pub merge_prompt: Option<MergePrompt>,
     pub history: Option<HistoryView>,
     pub weekday_target: WeekdayTarget,
@@ -783,6 +802,7 @@ impl App {
             depends_picker: None,
             holiday_picker: None,
             reason_picker: None,
+            export_prompt: None,
             merge_prompt: None,
             history: None,
             weekday_target: WeekdayTarget::Global,
@@ -1194,6 +1214,86 @@ impl App {
 
     /// Open the menu for the selected row: a slot, or a finding below
     /// the slots.
+    fn open_export(&mut self, kind: ExportKind) {
+        let (what, ext) = match kind {
+            ExportKind::Workloads => ("workloads", "csv"),
+            ExportKind::Sizing => ("sizing", "csv"),
+            ExportKind::Schedule => ("schedule", "ics"),
+        };
+        self.export_prompt = Some(ExportPrompt {
+            kind,
+            text: format!("precip-{}-{what}.{ext}", self.context.workspace),
+            confirming_overwrite: false,
+        });
+    }
+
+    /// Enter in the export prompt: write the file, after a second Enter
+    /// when it already exists.
+    fn apply_export(&mut self) -> Result<(), TuiError> {
+        let Some(p) = self.export_prompt.as_mut() else { return Ok(()) };
+        let path = camino::Utf8PathBuf::from(p.text.trim());
+        if path.as_str().is_empty() {
+            self.note("type a file name ending in .csv, .json or .ics");
+            return Ok(());
+        }
+        if path.exists() && !p.confirming_overwrite {
+            p.confirming_overwrite = true;
+            return Ok(());
+        }
+        let kind = p.kind;
+        self.export_prompt = None;
+        let ext = path.extension().unwrap_or_default().to_lowercase();
+        let text = match (kind, ext.as_str()) {
+            (ExportKind::Workloads, "csv") => {
+                precip_db::export::workloads_csv(&self.workloads)
+            }
+            (ExportKind::Workloads, "json") => {
+                precip_db::export::workloads_json(&self.workloads)?
+            }
+            (ExportKind::Sizing, "csv") => match &self.sizing {
+                Some(v) => precip_db::export::sizing_csv(&v.instances),
+                None => return Ok(()),
+            },
+            (ExportKind::Sizing, "json") => match &self.sizing {
+                Some(v) => precip_db::export::sizing_json(
+                    &v.profile,
+                    &v.assumptions,
+                    &v.result,
+                    &v.demand,
+                    &v.instances,
+                )?,
+                None => return Ok(()),
+            },
+            (ExportKind::Schedule, "csv") => match &self.schedule {
+                Some(v) => precip_db::export::schedule_csv(&v.schedule),
+                None => return Ok(()),
+            },
+            (ExportKind::Schedule, "json") => match &self.schedule {
+                Some(v) => precip_db::export::schedule_json(&v.schedule)?,
+                None => return Ok(()),
+            },
+            (ExportKind::Schedule, "ics") => match &self.schedule {
+                Some(v) => precip_db::export::schedule_ics(
+                    &v.schedule,
+                    &self.context.workspace,
+                    jiff::Timestamp::now(),
+                ),
+                None => return Ok(()),
+            },
+            (_, other) => {
+                self.note(format!(
+                    ".{other} is not a format this export knows; use .csv, .json or .ics"
+                ));
+                return Ok(());
+            }
+        };
+        match std::fs::write(&path, text) {
+            Ok(()) => self.note(format!("wrote {path}")),
+            Err(e) => self.note(format!("could not write {path}: {e}")),
+        }
+        Ok(())
+    }
+
     fn ask_reason(&mut self, pending: Pending) {
         let mut state = ListState::default();
         state.select(Some(0));
@@ -2263,6 +2363,22 @@ impl App {
                 }
                 continue;
             }
+            if let Some(p) = self.export_prompt.as_mut() {
+                match key.code {
+                    KeyCode::Esc => self.export_prompt = None,
+                    KeyCode::Backspace => {
+                        p.text.pop();
+                        p.confirming_overwrite = false;
+                    }
+                    KeyCode::Char(c) => {
+                        p.text.push(c);
+                        p.confirming_overwrite = false;
+                    }
+                    KeyCode::Enter => self.apply_export()?,
+                    _ => {}
+                }
+                continue;
+            }
             if let Some(p) = self.merge_prompt.as_mut() {
                 match key.code {
                     KeyCode::Esc => self.merge_prompt = None,
@@ -2503,6 +2619,15 @@ impl App {
                 }
                 KeyCode::Char('h') if self.tab == Tab::Schedule => {
                     self.open_history()?;
+                }
+                KeyCode::Char('e') if self.tab == Tab::Schedule => {
+                    self.open_export(ExportKind::Schedule);
+                }
+                KeyCode::Char('e') if self.tab == Tab::Workloads => {
+                    self.open_export(ExportKind::Workloads);
+                }
+                KeyCode::Char('e') if self.tab == Tab::Sizing => {
+                    self.open_export(ExportKind::Sizing);
                 }
                 KeyCode::Char('g') if self.tab == Tab::Sizing => {
                     self.adjust_sizing(|a| {

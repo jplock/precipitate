@@ -8,6 +8,7 @@
 //! row's `last_seen_seq` advances. Presence at scan `n` is
 //! `first_seen_seq <= n <= last_seen_seq`.
 
+pub mod export;
 mod schedule;
 mod schema;
 
@@ -137,7 +138,7 @@ pub struct MemberDetail {
 }
 
 /// Resource count per workload and environment for one scan.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WorkloadSummary {
     pub workload: String,
     pub environment: String,
