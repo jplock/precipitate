@@ -8,14 +8,16 @@
 
 mod names;
 
-use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
+use precip_types::scan::{
+    Direction, Edge, Relationship, Resource, ResourceKind,
+};
 use precip_types::{
     AccountId, Arn, EnvName, GroupingConfig, GroupingSignal, PairKey,
     WorkloadMember, WorkloadName,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-pub use names::slug;
+use names::{AccountNames, Slug};
 
 pub const OVERRIDE_TAG: &str = "precip:workload";
 const STACK_ID_TAG: &str = "aws:cloudformation:stack-id";
@@ -30,20 +32,35 @@ pub struct Input<'a> {
     pub aliases: &'a BTreeMap<WorkloadName, WorkloadName>,
 }
 
+/// Assign every groupable resource to a workload and environment.
+pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
+    Grouper::new(input, cfg).run()
+}
+
+/// The one value every item agrees on; `None` when there are no items or
+/// they disagree.
+fn unanimous<T: PartialEq>(items: impl IntoIterator<Item = T>) -> Option<T> {
+    let mut items = items.into_iter();
+    let first = items.next()?;
+    items.all(|x| x == first).then_some(first)
+}
+
+/// Lookups over one scan's resources and relationships.
 struct Index<'a> {
     by_arn: HashMap<&'a str, &'a Resource>,
-    platform_workload: WorkloadName,
     /// Stack id to the root stack's name.
     stack_root_name: HashMap<&'a str, String>,
     /// From ARN to (edge, to ARN).
     out: HashMap<&'a str, Vec<(Edge, &'a str)>>,
     /// To ARN to (edge, from ARN).
     inbound: HashMap<&'a str, Vec<(Edge, &'a str)>>,
-    account: HashMap<&'a str, (Option<String>, Option<String>)>,
+    accounts: HashMap<&'a str, AccountNames<'a>>,
+    /// (account, region, VPC id) to the VPC's Name tag.
+    vpc_names: HashMap<(&'a str, &'a str, &'a str), &'a str>,
 }
 
 impl<'a> Index<'a> {
-    fn build(input: &Input<'a>, cfg: &GroupingConfig) -> Self {
+    fn new(input: &Input<'a>, cfg: &GroupingConfig) -> Self {
         let by_arn: HashMap<&str, &Resource> =
             input.resources.iter().map(|r| (r.arn.as_str(), r)).collect();
 
@@ -54,24 +71,63 @@ impl<'a> Index<'a> {
                 .any(|p| name.to_lowercase().starts_with(&p.to_lowercase()))
         };
         let mut stack_root_name = HashMap::new();
-        for r in input
-            .resources
-            .iter()
-            .filter(|r| r.kind == ResourceKind::CloudFormationStack)
-        {
-            let root = r
-                .body
-                .get("root_id")
-                .and_then(|v| v.as_str())
-                .and_then(|id| by_arn.get(id))
-                .unwrap_or(&r);
-            if let Some(name) = root.body.get("name").and_then(|v| v.as_str()) {
-                let name = if is_platform(name) {
-                    cfg.platform_workload.to_string()
-                } else {
-                    name.to_string()
-                };
-                stack_root_name.insert(r.arn.as_str(), name);
+        let mut accounts = HashMap::new();
+        let mut vpc_names = HashMap::new();
+        for r in input.resources {
+            match r.kind {
+                ResourceKind::CloudFormationStack => {
+                    let root = r
+                        .body_str("root_id")
+                        .and_then(|id| by_arn.get(id))
+                        .copied()
+                        .unwrap_or(r);
+                    if let Some(name) = root.name() {
+                        let name = if is_platform(name) {
+                            cfg.platform_workload.to_string()
+                        } else {
+                            name.to_string()
+                        };
+                        stack_root_name.insert(r.arn.as_str(), name);
+                    }
+                }
+                ResourceKind::Account => {
+                    accounts.insert(
+                        r.account_id.as_str(),
+                        AccountNames {
+                            name: r.name(),
+                            ou: r.body_str("parent_name"),
+                        },
+                    );
+                }
+                ResourceKind::Vpc => {
+                    if let (Some(id), Some(name)) =
+                        (r.body_str("vpc_id"), r.tags.get("Name"))
+                    {
+                        vpc_names.insert(
+                            (r.account_id.as_str(), r.region.as_str(), id),
+                            name.as_str(),
+                        );
+                    }
+                }
+                ResourceKind::Ec2Instance
+                | ResourceKind::InstanceType
+                | ResourceKind::EbsVolume
+                | ResourceKind::Ami
+                | ResourceKind::Subnet
+                | ResourceKind::SecurityGroup
+                | ResourceKind::SecurityGroupRule
+                | ResourceKind::RouteTable
+                | ResourceKind::InternetGateway
+                | ResourceKind::NatGateway
+                | ResourceKind::VpcPeeringConnection
+                | ResourceKind::PrefixList
+                | ResourceKind::AutoScalingGroup
+                | ResourceKind::LaunchTemplate
+                | ResourceKind::LaunchConfiguration
+                | ResourceKind::ElasticIp
+                | ResourceKind::LoadBalancer
+                | ResourceKind::TargetGroup
+                | ResourceKind::ManagedService => {}
             }
         }
 
@@ -87,92 +143,61 @@ impl<'a> Index<'a> {
                 .push((rel.edge, rel.from_arn.as_str()));
         }
 
-        let account = input
-            .resources
-            .iter()
-            .filter(|r| r.kind == ResourceKind::Account)
-            .map(|r| {
-                let name = r
-                    .body
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let ou = r
-                    .body
-                    .get("parent_name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                (r.account_id.as_str(), (name, ou))
-            })
-            .collect();
-
-        Self {
-            by_arn,
-            platform_workload: cfg.platform_workload.clone(),
-            stack_root_name,
-            out,
-            inbound,
-            account,
-        }
+        Self { by_arn, stack_root_name, out, inbound, accounts, vpc_names }
     }
 
-    fn edges_from(
+    fn get(&self, arn: &str) -> Option<&'a Resource> {
+        self.by_arn.get(arn).copied()
+    }
+
+    /// The ARNs related to `arn` by `edge`, followed in `direction`.
+    fn related(
         &self,
         arn: &str,
         edge: Edge,
+        direction: Direction,
     ) -> impl Iterator<Item = &'a str> + '_ {
-        self.out
-            .get(arn)
+        let map = match direction {
+            Direction::Out => &self.out,
+            Direction::In => &self.inbound,
+        };
+        map.get(arn)
             .into_iter()
             .flatten()
             .filter(move |(e, _)| *e == edge)
-            .map(|(_, to)| *to)
-    }
-
-    fn edges_to(
-        &self,
-        arn: &str,
-        edge: Edge,
-    ) -> impl Iterator<Item = &'a str> + '_ {
-        self.inbound
-            .get(arn)
-            .into_iter()
-            .flatten()
-            .filter(move |(e, _)| *e == edge)
-            .map(|(_, from)| *from)
-    }
-
-    fn root_stack_name(&self, stack_id: &str) -> Option<String> {
-        self.stack_root_name.get(stack_id).cloned()
+            .map(|(_, other)| *other)
     }
 
     /// The root stack a resource belongs to: by an `in_stack` edge from
     /// `ListStackResources`, else by the stack-id tag CloudFormation sets.
-    fn stack_of(&self, r: &Resource) -> Option<String> {
-        self.edges_from(r.arn.as_str(), Edge::InStack)
-            .find_map(|stack| self.root_stack_name(stack))
+    fn stack_of(&self, r: &Resource) -> Option<&str> {
+        self.related(r.arn.as_str(), Edge::InStack, Direction::Out)
+            .find_map(|stack| self.stack_root_name.get(stack))
             .or_else(|| {
-                r.tags.get(STACK_ID_TAG).and_then(|id| self.root_stack_name(id))
+                r.tags
+                    .get(STACK_ID_TAG)
+                    .and_then(|id| self.stack_root_name.get(id.as_str()))
             })
+            .map(String::as_str)
     }
-}
 
-fn tag<'a>(r: &'a Resource, keys: &[String]) -> Option<&'a str> {
-    keys.iter()
-        .find_map(|k| r.tags.get(k).map(String::as_str))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-}
-
-fn body_str<'a>(r: &'a Resource, key: &str) -> Option<&'a str> {
-    r.body.get(key).and_then(|v| v.as_str())
+    /// The Name tag of the VPC an instance is in, else the VPC id.
+    fn vpc_name(&self, r: &'a Resource) -> Option<&'a str> {
+        let id = r.body_str("vpc_id")?;
+        Some(
+            self.vpc_names
+                .get(&(r.account_id.as_str(), r.region.as_str(), id))
+                .copied()
+                .unwrap_or(id),
+        )
+    }
 }
 
 /// A raw placement before environment resolution.
 struct Placed {
     arn: Arn,
     signal: GroupingSignal,
-    slug: String,
+    slug: Slug,
     override_env: Option<EnvName>,
     env_tag: Option<String>,
     /// Environment token found in the resource's own name when the
@@ -184,501 +209,410 @@ struct Placed {
     account_id: AccountId,
 }
 
-fn place_instance(
-    r: &Resource,
-    index: &Index<'_>,
-    input: &Input<'_>,
-    cfg: &GroupingConfig,
-) -> Placed {
-    if let Some(o) = input.overrides.get(&r.arn) {
-        return Placed {
+impl Placed {
+    fn new(
+        r: &Resource,
+        signal: GroupingSignal,
+        slug: Slug,
+        cfg: &GroupingConfig,
+    ) -> Self {
+        Self {
             arn: r.arn.clone(),
-            signal: GroupingSignal::Override,
-            slug: slug(o.workload.as_str()),
-            override_env: Some(o.environment.clone()),
-            env_tag: None,
+            signal,
+            slug,
+            override_env: None,
+            env_tag: r.first_tag(&cfg.environment_tags).map(str::to_string),
             name_env: None,
             joined_env: None,
             account_id: r.account_id.clone(),
-        };
-    }
-
-    let asg = index
-        .edges_from(r.arn.as_str(), Edge::MemberOfAsg)
-        .find_map(|arn| index.by_arn.get(arn))
-        .map(|g| match index.stack_of(g) {
-            Some(root) => (root, GroupingSignal::CloudFormationStack),
-            None => (
-                body_str(g, "name").unwrap_or(g.arn.as_str()).to_string(),
-                GroupingSignal::AutoScalingGroup,
-            ),
-        });
-
-    let target_group = index
-        .edges_from(r.arn.as_str(), Edge::TargetOf)
-        .filter_map(|tg_arn| {
-            let tg = index.by_arn.get(tg_arn)?;
-            let lb_name = index
-                .edges_from(tg_arn, Edge::AttachedTo)
-                .filter_map(|lb| index.by_arn.get(lb))
-                .filter(|lb| lb.kind == ResourceKind::LoadBalancer)
-                .filter_map(|lb| body_str(lb, "name"))
-                .min();
-            lb_name.or_else(|| body_str(tg, "name")).map(str::to_string)
-        })
-        .min();
-
-    let vpc = body_str(r, "vpc_id").map(|vpc_id| {
-        input
-            .resources
-            .iter()
-            .find(|v| {
-                v.kind == ResourceKind::Vpc
-                    && v.account_id == r.account_id
-                    && v.region == r.region
-                    && body_str(v, "vpc_id") == Some(vpc_id)
-            })
-            .and_then(|v| v.tags.get("Name").map(String::as_str))
-            .unwrap_or(vpc_id)
-            .to_string()
-    });
-
-    let (raw, signal) = if let Some(name) =
-        r.tags.get(OVERRIDE_TAG).map(|s| s.trim()).filter(|s| !s.is_empty())
-    {
-        (name.to_string(), GroupingSignal::OverrideTag)
-    } else if let Some(root) = index.stack_of(r) {
-        (root, GroupingSignal::CloudFormationStack)
-    } else if let Some((name, signal)) = asg {
-        (name, signal)
-    } else if let Some(name) = target_group {
-        (name, GroupingSignal::LoadBalancer)
-    } else if let Some(name) = tag(r, &cfg.workload_tags) {
-        (name.to_string(), GroupingSignal::Tag)
-    } else if let Some(name) = vpc {
-        (name, GroupingSignal::Vpc)
-    } else {
-        ("unassigned".to_string(), GroupingSignal::Unassigned)
-    };
-
-    Placed {
-        arn: r.arn.clone(),
-        signal,
-        slug: slug(&raw),
-        override_env: None,
-        env_tag: tag(r, &cfg.environment_tags).map(str::to_string),
-        name_env: None,
-        joined_env: None,
-        account_id: r.account_id.clone(),
-    }
-}
-
-/// A managed service's own name, slugified with any generated suffix
-/// removed.
-fn managed_own_name(r: &Resource) -> String {
-    names::strip_generated_suffix(&slug(
-        body_str(r, "name").unwrap_or("unassigned"),
-    ))
-    .to_string()
-}
-
-/// Place a managed service: its stack, a workload tag, the longest strong
-/// name (a stack or an instance workload) its name starts with, the
-/// shortest root it shares with other managed resources, else itself.
-fn place_managed(
-    r: &Resource,
-    index: &Index<'_>,
-    cfg: &GroupingConfig,
-    strong_names: &[String],
-    sibling_roots: &[String],
-    workload_envs: &HashMap<String, std::collections::BTreeSet<EnvName>>,
-) -> Placed {
-    let own = managed_own_name(r);
-    let (own_root, name_env) =
-        match names::split_environment(&own, &cfg.environment_tokens) {
-            Some((root, env)) => (root, Some(env)),
-            None => (own.clone(), None),
-        };
-    let (slug, signal) = if let Some(root) = index.stack_of(r) {
-        (slug(&root), GroupingSignal::CloudFormationStack)
-    } else if let Some(name) = tag(r, &cfg.workload_tags) {
-        (slug(name), GroupingSignal::Tag)
-    } else if let Some(prefix) = names::longest_prefix(&own, strong_names) {
-        (prefix.to_string(), GroupingSignal::NamePrefix)
-    } else if let Some(root) = names::shortest_prefix(&own_root, sibling_roots)
-    {
-        (root.to_string(), GroupingSignal::NamePrefix)
-    } else if let Some(name) = names::contains_segment(&own, strong_names) {
-        (name.to_string(), GroupingSignal::NameContains)
-    } else if let Some(root) =
-        names::shared_root(&own_root, sibling_roots, &cfg.environment_tokens)
-    {
-        (root, GroupingSignal::NamePrefix)
-    } else {
-        (own, GroupingSignal::Unassigned)
-    };
-    let joined_env = match signal {
-        GroupingSignal::NamePrefix | GroupingSignal::NameContains => {
-            workload_envs.get(&slug).and_then(|envs| {
-                (envs.len() == 1).then(|| envs.iter().next().cloned()).flatten()
-            })
         }
-        GroupingSignal::Override
-        | GroupingSignal::OverrideTag
-        | GroupingSignal::CloudFormationStack
-        | GroupingSignal::AutoScalingGroup
-        | GroupingSignal::LoadBalancer
-        | GroupingSignal::Tag
-        | GroupingSignal::AccountOnly
-        | GroupingSignal::Vpc
-        | GroupingSignal::Unassigned
-        | GroupingSignal::Attached => None,
-    };
-    Placed {
-        arn: r.arn.clone(),
-        signal,
-        slug,
-        override_env: None,
-        env_tag: tag(r, &cfg.environment_tags).map(str::to_string),
-        name_env,
-        joined_env,
-        account_id: r.account_id.clone(),
     }
 }
 
-/// Resolve the environment and final workload name for a placement.
-/// Order: override, environment tag, a token in the workload name, a
-/// token in the resource's own name, the single environment of a workload
-/// joined by name, a token in the account or OU name, then the default. The name token is
-/// stripped only when it agrees with the environment chosen.
-fn resolve(
-    p: Placed,
-    index: &Index<'_>,
-    cfg: &GroupingConfig,
-    aliases: &BTreeMap<WorkloadName, WorkloadName>,
-) -> WorkloadMember {
-    let split = names::split_environment(&p.slug, &cfg.environment_tokens);
-    let from_tag = p.env_tag.as_deref().map(|t| {
-        let t = slug(t);
-        cfg.environment_tokens
-            .get(&t)
-            .cloned()
-            .unwrap_or_else(|| EnvName::from(t))
-    });
-    let from_account =
-        index.account.get(p.account_id.as_str()).and_then(|(name, ou)| {
-            names::environment_in_account(
-                name.as_deref(),
-                ou.as_deref(),
-                &cfg.environment_tokens,
-            )
-        });
-
-    let environment = p
-        .override_env
-        .clone()
-        .or(from_tag)
-        .or_else(|| split.as_ref().map(|(_, env)| env.clone()))
-        .or(p.name_env.clone())
-        .or(p.joined_env.clone())
-        .or(from_account)
-        .unwrap_or_else(|| cfg.default_environment.clone());
-
-    let workload = match split {
-        Some((stripped, env)) if env == environment => stripped,
-        _ => p.slug,
-    };
-    let workload =
-        WorkloadName::from(names::strip_layer(&workload, &cfg.layer_tokens));
-    let workload = aliases.get(&workload).cloned().unwrap_or(workload);
-
-    WorkloadMember {
-        arn: p.arn,
-        pair: PairKey { workload, environment },
-        signal: p.signal,
-    }
+/// What placing managed services needs from the instances placed before
+/// them.
+struct ManagedContext {
+    /// Names a managed service may be prefixed with: stack roots and
+    /// placed instance workloads.
+    strong_names: Vec<Slug>,
+    /// Each managed resource's own name without its environment token;
+    /// empty for resources a stack already accounts for.
+    own_roots: Vec<Slug>,
+    /// The environments each placed workload has.
+    workload_envs: HashMap<WorkloadName, BTreeSet<EnvName>>,
 }
 
-/// Assign every groupable resource to a workload and environment.
-pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
-    let index = Index::build(input, cfg);
-    let mut members: Vec<WorkloadMember> = Vec::new();
-    let mut placed: HashSet<Arn> = HashSet::new();
-
-    // Instances first.
-    for r in
-        input.resources.iter().filter(|r| r.kind == ResourceKind::Ec2Instance)
-    {
-        let m = resolve(
-            place_instance(r, &index, input, cfg),
-            &index,
-            cfg,
-            input.aliases,
-        );
-        placed.insert(m.arn.clone());
-        members.push(m);
-    }
-
-    // Strong names a managed service may be prefixed with: stack roots
-    // and placed instance workloads.
-    let mut strong_names: Vec<String> = index
-        .stack_root_name
-        .values()
-        .map(|n| slug(n))
-        .chain(
-            members
-                .iter()
-                .filter(|m| m.signal != GroupingSignal::Unassigned)
-                .map(|m| m.pair.workload.to_string()),
-        )
-        .collect();
-    strong_names.sort();
-    strong_names.dedup();
-    strong_names.retain(|n| index.platform_workload != n.as_str());
-
-    // Roots shared among managed services themselves: each resource's own
-    // name with its environment token removed. A name only counts as a
-    // root for resources other than the one it came from.
-    let managed: Vec<&Resource> = input
-        .resources
-        .iter()
-        .filter(|r| r.kind == ResourceKind::ManagedService)
-        .collect();
-    // Resources a stack already accounts for do not offer their names as
-    // roots for the rest.
-    let own_roots: Vec<String> = managed
-        .iter()
-        .map(|r| {
-            if index.stack_of(r).is_some() {
-                return String::new();
-            }
-            let own = managed_own_name(r);
-            names::split_environment(&own, &cfg.environment_tokens)
-                .map(|(stripped, _)| stripped)
-                .unwrap_or(own)
-        })
-        .collect();
-
-    let mut workload_envs: HashMap<
-        String,
-        std::collections::BTreeSet<EnvName>,
-    > = HashMap::new();
-    for m in &members {
-        workload_envs
-            .entry(m.pair.workload.to_string())
-            .or_default()
-            .insert(m.pair.environment.clone());
-    }
-
-    for (i, r) in managed.iter().enumerate() {
-        let siblings: Vec<String> = own_roots
+impl ManagedContext {
+    /// The roots of every managed resource other than the `i`th.
+    fn siblings(&self, i: usize) -> Vec<Slug> {
+        self.own_roots
             .iter()
             .enumerate()
             .filter(|(j, n)| *j != i && !n.is_empty())
             .map(|(_, n)| n.clone())
-            .collect();
-        let m = resolve(
-            place_managed(
-                r,
-                &index,
-                cfg,
-                &strong_names,
-                &siblings,
-                &workload_envs,
-            ),
-            &index,
-            cfg,
-            input.aliases,
-        );
-        placed.insert(m.arn.clone());
-        members.push(m);
+            .collect()
     }
 
-    // Inheritance. A resource follows its instances when they all agree.
-    let by_arn: HashMap<&str, &PairKey> =
-        members.iter().map(|m| (m.arn.as_str(), &m.pair)).collect();
-    let mut inherited: Vec<WorkloadMember> = Vec::new();
-    let mut inherit = |arn: &Arn, owners: Vec<&PairKey>| {
-        if placed.contains(arn) {
-            return;
+    /// The single environment of a workload joined by name.
+    fn only_env(&self, workload: &Slug) -> Option<EnvName> {
+        let envs =
+            self.workload_envs.get(&WorkloadName::from(workload.clone()))?;
+        match envs.len() {
+            1 => envs.first().cloned(),
+            _ => None,
         }
-        let Some(first) = owners.first().copied() else { return };
-        if owners.iter().all(|o| *o == first) {
-            placed.insert(arn.clone());
-            inherited.push(WorkloadMember {
-                arn: arn.clone(),
-                pair: first.clone(),
-                signal: GroupingSignal::Attached,
+    }
+}
+
+struct Grouper<'a> {
+    input: &'a Input<'a>,
+    cfg: &'a GroupingConfig,
+    index: Index<'a>,
+}
+
+impl<'a> Grouper<'a> {
+    fn new(input: &'a Input<'a>, cfg: &'a GroupingConfig) -> Self {
+        Self { input, cfg, index: Index::new(input, cfg) }
+    }
+
+    fn resources(
+        &self,
+        kind: ResourceKind,
+    ) -> impl Iterator<Item = &'a Resource> + '_ {
+        self.input.resources.iter().filter(move |r| r.kind == kind)
+    }
+
+    fn run(&self) -> Vec<WorkloadMember> {
+        let mut members: Vec<WorkloadMember> = self
+            .resources(ResourceKind::Ec2Instance)
+            .map(|r| self.resolve(self.place_instance(r)))
+            .collect();
+        let managed = self.place_managed_services(&members);
+        members.extend(managed);
+
+        let mut placed: HashSet<Arn> =
+            members.iter().map(|m| m.arn.clone()).collect();
+        // Load balancers follow target groups, so they inherit after them.
+        for stage in [false, true] {
+            let inherited = self.inherit(&members, &placed, |kind| {
+                (kind == ResourceKind::LoadBalancer) == stage
             });
+            placed.extend(inherited.iter().map(|m| m.arn.clone()));
+            members.extend(inherited);
         }
-    };
+        let by_stack = self.place_by_stack(&placed);
+        members.extend(by_stack);
+        self.claim_for_single_workload_accounts(&mut members);
 
-    for r in input.resources {
-        match r.kind {
-            // Attached to an instance: volumes, Elastic IPs.
-            ResourceKind::EbsVolume | ResourceKind::ElasticIp => {
-                let owners: Vec<_> = index
-                    .edges_from(r.arn.as_str(), Edge::AttachedTo)
-                    .filter_map(|to| by_arn.get(to).copied())
-                    .collect();
-                inherit(&r.arn, owners);
-            }
-            // Instances point at these.
-            ResourceKind::AutoScalingGroup => {
-                let owners: Vec<_> = index
-                    .edges_to(r.arn.as_str(), Edge::MemberOfAsg)
-                    .filter_map(|from| by_arn.get(from).copied())
-                    .collect();
-                inherit(&r.arn, owners);
-            }
-            ResourceKind::TargetGroup => {
-                let owners: Vec<_> = index
-                    .edges_to(r.arn.as_str(), Edge::TargetOf)
-                    .filter_map(|from| by_arn.get(from).copied())
-                    .collect();
-                inherit(&r.arn, owners);
-            }
-            ResourceKind::SecurityGroup => {
-                let owners: Vec<_> = index
-                    .edges_to(r.arn.as_str(), Edge::HasSecurityGroup)
-                    .filter_map(|from| by_arn.get(from).copied())
-                    .collect();
-                inherit(&r.arn, owners);
-            }
-            // Placed by their own signals, or never placed by inheritance.
-            ResourceKind::Account
-            | ResourceKind::Ec2Instance
-            | ResourceKind::InstanceType
-            | ResourceKind::Ami
-            | ResourceKind::Vpc
-            | ResourceKind::Subnet
-            | ResourceKind::SecurityGroupRule
-            | ResourceKind::RouteTable
-            | ResourceKind::InternetGateway
-            | ResourceKind::NatGateway
-            | ResourceKind::VpcPeeringConnection
-            | ResourceKind::PrefixList
-            | ResourceKind::LaunchTemplate
-            | ResourceKind::LaunchConfiguration
-            | ResourceKind::LoadBalancer
-            | ResourceKind::CloudFormationStack
-            | ResourceKind::ManagedService => {}
+        members.sort_by(|a, b| (&a.pair, &a.arn).cmp(&(&b.pair, &b.arn)));
+        members
+    }
+
+    fn place_instance(&self, r: &Resource) -> Placed {
+        if let Some(o) = self.input.overrides.get(&r.arn) {
+            let mut p = Placed::new(
+                r,
+                GroupingSignal::Override,
+                Slug::new(o.workload.as_str()),
+                self.cfg,
+            );
+            p.override_env = Some(o.environment.clone());
+            return p;
+        }
+
+        let index = &self.index;
+        let asg = || {
+            index
+                .related(r.arn.as_str(), Edge::MemberOfAsg, Direction::Out)
+                .find_map(|arn| index.get(arn))
+                .map(|g| match index.stack_of(g) {
+                    Some(root) => {
+                        (root.to_string(), GroupingSignal::CloudFormationStack)
+                    }
+                    None => (
+                        g.name().unwrap_or(g.arn.as_str()).to_string(),
+                        GroupingSignal::AutoScalingGroup,
+                    ),
+                })
+        };
+        // The load balancer in front of the instance's target group, else
+        // the target group itself.
+        let target_group = || {
+            index
+                .related(r.arn.as_str(), Edge::TargetOf, Direction::Out)
+                .filter_map(|tg_arn| {
+                    let tg = index.get(tg_arn)?;
+                    index
+                        .related(tg_arn, Edge::AttachedTo, Direction::Out)
+                        .filter_map(|lb| index.get(lb))
+                        .filter(|lb| lb.kind == ResourceKind::LoadBalancer)
+                        .filter_map(Resource::name)
+                        .min()
+                        .or_else(|| tg.name())
+                })
+                .min()
+        };
+
+        let (raw, signal) = if let Some(name) = r.first_tag(&[OVERRIDE_TAG]) {
+            (name.to_string(), GroupingSignal::OverrideTag)
+        } else if let Some(root) = index.stack_of(r) {
+            (root.to_string(), GroupingSignal::CloudFormationStack)
+        } else if let Some((name, signal)) = asg() {
+            (name, signal)
+        } else if let Some(name) = target_group() {
+            (name.to_string(), GroupingSignal::LoadBalancer)
+        } else if let Some(name) = r.first_tag(&self.cfg.workload_tags) {
+            (name.to_string(), GroupingSignal::Tag)
+        } else if let Some(name) = index.vpc_name(r) {
+            (name.to_string(), GroupingSignal::Vpc)
+        } else {
+            ("unassigned".to_string(), GroupingSignal::Unassigned)
+        };
+        Placed::new(r, signal, Slug::new(&raw), self.cfg)
+    }
+
+    /// A managed service's own name, with any generated suffix removed.
+    fn managed_own_name(r: &Resource) -> Slug {
+        Slug::new(r.name().unwrap_or("unassigned")).without_generated_suffix()
+    }
+
+    fn place_managed_services(
+        &self,
+        instances: &[WorkloadMember],
+    ) -> Vec<WorkloadMember> {
+        let tokens = &self.cfg.environment_tokens;
+        let mut strong_names: Vec<Slug> = self
+            .index
+            .stack_root_name
+            .values()
+            .map(|n| Slug::new(n))
+            .chain(
+                instances
+                    .iter()
+                    .filter(|m| m.signal != GroupingSignal::Unassigned)
+                    .map(|m| Slug::new(m.pair.workload.as_str())),
+            )
+            .filter(|n| *n != self.cfg.platform_workload)
+            .collect();
+        strong_names.sort();
+        strong_names.dedup();
+
+        let managed: Vec<&Resource> =
+            self.resources(ResourceKind::ManagedService).collect();
+        // Resources a stack already accounts for do not offer their names
+        // as roots for the rest.
+        let own_roots = managed
+            .iter()
+            .map(|r| {
+                if self.index.stack_of(r).is_some() {
+                    return Slug::default();
+                }
+                let own = Self::managed_own_name(r);
+                match own.split_environment(tokens) {
+                    Some((stripped, _)) => stripped,
+                    None => own,
+                }
+            })
+            .collect();
+
+        let mut workload_envs: HashMap<WorkloadName, BTreeSet<EnvName>> =
+            HashMap::new();
+        for m in instances {
+            workload_envs
+                .entry(m.pair.workload.clone())
+                .or_default()
+                .insert(m.pair.environment.clone());
+        }
+
+        let ctx = ManagedContext { strong_names, own_roots, workload_envs };
+        managed
+            .iter()
+            .enumerate()
+            .map(|(i, r)| self.resolve(self.place_managed(r, &ctx, i)))
+            .collect()
+    }
+
+    /// Place the `i`th managed service: its stack, a workload tag, the
+    /// longest strong name its name starts with, the shortest root it
+    /// shares with other managed resources, a strong name inside its name,
+    /// a root most siblings share, else itself.
+    fn place_managed(
+        &self,
+        r: &Resource,
+        ctx: &ManagedContext,
+        i: usize,
+    ) -> Placed {
+        let tokens = &self.cfg.environment_tokens;
+        let own = Self::managed_own_name(r);
+        let (own_root, name_env) = match own.split_environment(tokens) {
+            Some((root, env)) => (root, Some(env)),
+            None => (own.clone(), None),
+        };
+        let siblings = ctx.siblings(i);
+        let (slug, signal) = if let Some(root) = self.index.stack_of(r) {
+            (Slug::new(root), GroupingSignal::CloudFormationStack)
+        } else if let Some(name) = r.first_tag(&self.cfg.workload_tags) {
+            (Slug::new(name), GroupingSignal::Tag)
+        } else if let Some(prefix) = own.longest_prefix(&ctx.strong_names) {
+            (prefix.clone(), GroupingSignal::NamePrefix)
+        } else if let Some(root) = own_root.shortest_prefix(&siblings) {
+            (root.clone(), GroupingSignal::NamePrefix)
+        } else if let Some(name) = own.contains_segments(&ctx.strong_names) {
+            (name.clone(), GroupingSignal::NameContains)
+        } else if let Some(root) = own_root.shared_root(&siblings, tokens) {
+            (root, GroupingSignal::NamePrefix)
+        } else {
+            (own, GroupingSignal::Unassigned)
+        };
+        let joined_env =
+            if signal.is_name_match() { ctx.only_env(&slug) } else { None };
+        let mut p = Placed::new(r, signal, slug, self.cfg);
+        p.name_env = name_env;
+        p.joined_env = joined_env;
+        p
+    }
+
+    /// Resolve the environment and final workload name for a placement.
+    /// Order: override, environment tag, a token in the workload name, a
+    /// token in the resource's own name, the single environment of a
+    /// workload joined by name, a token in the account or OU name, then
+    /// the default. The name token is stripped only when it agrees with
+    /// the environment chosen.
+    fn resolve(&self, p: Placed) -> WorkloadMember {
+        let cfg = self.cfg;
+        let split = p.slug.split_environment(&cfg.environment_tokens);
+        let from_tag = p.env_tag.as_deref().map(|t| {
+            let t = Slug::new(t);
+            cfg.environment_tokens
+                .get(t.as_str())
+                .cloned()
+                .unwrap_or_else(|| EnvName::from(t))
+        });
+        let from_account = || {
+            self.index
+                .accounts
+                .get(p.account_id.as_str())
+                .and_then(|a| a.environment(&cfg.environment_tokens))
+        };
+
+        let environment = p
+            .override_env
+            .or(from_tag)
+            .or_else(|| split.as_ref().map(|(_, env)| env.clone()))
+            .or(p.name_env)
+            .or(p.joined_env)
+            .or_else(from_account)
+            .unwrap_or_else(|| cfg.default_environment.clone());
+
+        let workload = match split {
+            Some((stripped, env)) if env == environment => stripped,
+            Some(_) | None => p.slug,
+        };
+        let workload =
+            WorkloadName::from(workload.without_layer(&cfg.layer_tokens));
+        let workload =
+            self.input.aliases.get(&workload).cloned().unwrap_or(workload);
+
+        WorkloadMember {
+            arn: p.arn,
+            pair: PairKey { workload, environment },
+            signal: p.signal,
         }
     }
-    members.extend(inherited);
 
-    // Load balancers follow their target groups, which were just placed.
-    let by_arn: HashMap<&str, &PairKey> =
-        members.iter().map(|m| (m.arn.as_str(), &m.pair)).collect();
-    let mut lbs = Vec::new();
-    for r in
-        input.resources.iter().filter(|r| r.kind == ResourceKind::LoadBalancer)
-    {
-        if placed.contains(&r.arn) {
-            continue;
-        }
-        let owners: Vec<_> = index
-            .edges_to(r.arn.as_str(), Edge::AttachedTo)
-            .filter(|from| {
-                index
-                    .by_arn
-                    .get(from)
-                    .is_some_and(|tg| tg.kind == ResourceKind::TargetGroup)
-            })
-            .filter_map(|from| by_arn.get(from).copied())
-            .collect();
-        if let Some(first) = owners.first().copied() {
-            if owners.iter().all(|o| *o == first) {
-                lbs.push(WorkloadMember {
+    /// Resources of the kinds `stage` selects that join the workload of
+    /// the placed resources they are related to, when those all agree.
+    fn inherit(
+        &self,
+        members: &[WorkloadMember],
+        placed: &HashSet<Arn>,
+        stage: impl Fn(ResourceKind) -> bool,
+    ) -> Vec<WorkloadMember> {
+        let owner: HashMap<&str, &PairKey> =
+            members.iter().map(|m| (m.arn.as_str(), &m.pair)).collect();
+        let mut inherited = Vec::new();
+        for r in self.input.resources {
+            if !stage(r.kind) || placed.contains(&r.arn) {
+                continue;
+            }
+            let Some(via) = r.kind.inherits_via() else { continue };
+            let owners = self
+                .index
+                .related(r.arn.as_str(), via.edge, via.direction)
+                .filter_map(|other| owner.get(other).copied());
+            if let Some(pair) = unanimous(owners) {
+                inherited.push(WorkloadMember {
                     arn: r.arn.clone(),
-                    pair: first.clone(),
+                    pair: pair.clone(),
                     signal: GroupingSignal::Attached,
                 });
             }
         }
+        inherited
     }
-    members.extend(lbs);
 
-    // Anything groupable still unplaced that CloudFormation says belongs to
-    // a stack: security groups shared by nothing collected, volumes with no
-    // attachment, and the like.
-    let mut by_stack = Vec::new();
-    for r in input.resources {
-        let groupable = matches!(
-            r.kind,
-            ResourceKind::EbsVolume
-                | ResourceKind::ElasticIp
-                | ResourceKind::AutoScalingGroup
-                | ResourceKind::TargetGroup
-                | ResourceKind::LoadBalancer
-                | ResourceKind::SecurityGroup
-        );
-        if !groupable || placed.contains(&r.arn) {
-            continue;
+    /// Anything that would inherit but is still unplaced, and that
+    /// CloudFormation says belongs to a stack: security groups no collected
+    /// instance uses, volumes with no attachment, and the like.
+    fn place_by_stack(&self, placed: &HashSet<Arn>) -> Vec<WorkloadMember> {
+        let mut out = Vec::new();
+        for r in self.input.resources {
+            if r.kind.inherits_via().is_none() || placed.contains(&r.arn) {
+                continue;
+            }
+            if let Some(root) = self.index.stack_of(r) {
+                out.push(self.resolve(Placed::new(
+                    r,
+                    GroupingSignal::CloudFormationStack,
+                    Slug::new(root),
+                    self.cfg,
+                )));
+            }
         }
-        if let Some(root) = index.stack_of(r) {
-            placed.insert(r.arn.clone());
-            by_stack.push(resolve(
-                Placed {
-                    arn: r.arn.clone(),
-                    signal: GroupingSignal::CloudFormationStack,
-                    slug: slug(&root),
-                    override_env: None,
-                    env_tag: tag(r, &cfg.environment_tags).map(str::to_string),
-                    name_env: None,
-                    joined_env: None,
-                    account_id: r.account_id.clone(),
-                },
-                &index,
-                cfg,
-                input.aliases,
-            ));
-        }
+        out
     }
-    members.extend(by_stack);
 
-    // Last resort: an account that hosts exactly one workload claims the
-    // unassigned managed services in it. Platform resources never count
-    // as that workload.
-    let mut per_account: HashMap<&str, std::collections::BTreeSet<PairKey>> =
-        HashMap::new();
-    for m in &members {
-        if m.signal == GroupingSignal::Unassigned
-            || m.pair.workload == index.platform_workload
-        {
-            continue;
-        }
-        let Some(r) = index.by_arn.get(m.arn.as_str()) else { continue };
-        per_account
-            .entry(r.account_id.as_str())
-            .or_default()
-            .insert(m.pair.clone());
-    }
-    for m in members.iter_mut() {
-        if m.signal != GroupingSignal::Unassigned {
-            continue;
-        }
-        let Some(r) = index.by_arn.get(m.arn.as_str()) else { continue };
-        let Some(pairs) = per_account.get(r.account_id.as_str()) else {
-            continue;
+    /// Last resort: an account that hosts exactly one workload claims the
+    /// unassigned resources in it. Platform resources never count as that
+    /// workload.
+    fn claim_for_single_workload_accounts(
+        &self,
+        members: &mut [WorkloadMember],
+    ) {
+        let account_of = |m: &WorkloadMember| {
+            self.index.get(m.arn.as_str()).map(|r| r.account_id.as_str())
         };
-        let workloads: std::collections::BTreeSet<&WorkloadName> =
-            pairs.iter().map(|p| &p.workload).collect();
-        if workloads.len() != 1 {
-            continue;
+        let mut per_account: HashMap<&str, BTreeSet<PairKey>> = HashMap::new();
+        for m in members.iter() {
+            if m.signal == GroupingSignal::Unassigned
+                || m.pair.workload == self.cfg.platform_workload
+            {
+                continue;
+            }
+            let Some(account) = account_of(m) else { continue };
+            per_account.entry(account).or_default().insert(m.pair.clone());
         }
-        let Some(only) = pairs.first() else { continue };
-        m.pair.workload = only.workload.clone();
-        // Keep the resource's own environment when it had evidence for one;
-        // otherwise take the account's single pair.
-        if m.pair.environment == cfg.default_environment {
-            m.pair.environment = only.environment.clone();
+        for m in members.iter_mut() {
+            if m.signal != GroupingSignal::Unassigned {
+                continue;
+            }
+            let Some(pairs) = account_of(m).and_then(|a| per_account.get(a))
+            else {
+                continue;
+            };
+            if unanimous(pairs.iter().map(|p| &p.workload)).is_none() {
+                continue;
+            }
+            let Some(only) = pairs.first() else { continue };
+            m.pair.workload = only.workload.clone();
+            // Keep the resource's own environment when it had evidence for
+            // one; otherwise take the account's single pair.
+            if m.pair.environment == self.cfg.default_environment {
+                m.pair.environment = only.environment.clone();
+            }
+            m.signal = GroupingSignal::AccountOnly;
         }
-        m.signal = GroupingSignal::AccountOnly;
     }
-
-    members.sort_by(|a, b| (&a.pair, &a.arn).cmp(&(&b.pair, &b.arn)));
-    members
 }
 
 #[cfg(test)]

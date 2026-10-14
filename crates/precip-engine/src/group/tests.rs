@@ -693,3 +693,11 @@ fn an_account_with_two_workloads_leaves_orphans_alone() {
     );
     assert_eq!(wl(&m, func).2, GroupingSignal::Unassigned);
 }
+
+#[test]
+fn unanimous_needs_at_least_one_and_full_agreement() {
+    assert_eq!(unanimous(Vec::<u8>::new()), None);
+    assert_eq!(unanimous([3]), Some(3));
+    assert_eq!(unanimous([3, 3, 3]), Some(3));
+    assert_eq!(unanimous([3, 4, 3]), None);
+}

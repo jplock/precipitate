@@ -35,6 +35,26 @@ pub enum GroupingSignal {
 }
 }
 
+impl GroupingSignal {
+    /// Whether the resource joined its workload by matching names rather
+    /// than by a relationship or tag.
+    pub fn is_name_match(self) -> bool {
+        match self {
+            Self::NamePrefix | Self::NameContains => true,
+            Self::Override
+            | Self::OverrideTag
+            | Self::CloudFormationStack
+            | Self::AutoScalingGroup
+            | Self::LoadBalancer
+            | Self::Tag
+            | Self::AccountOnly
+            | Self::Vpc
+            | Self::Unassigned
+            | Self::Attached => false,
+        }
+    }
+}
+
 /// One resource placed in a workload and environment, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadMember {
