@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Scan an AWS estate and size it for Oxide racks"
+description = "Scan AWS, Azure and Google Cloud estates and size them for Oxide racks"
 
 [[bin]]
 name = "precip"
@@ -24,6 +24,7 @@ precip-collect.workspace = true
 precip-db.workspace = true
 precip-tui.workspace = true
 precip-engine.workspace = true
+precip-gcp.workspace = true
 precip-types.workspace = true
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

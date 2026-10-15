@@ -35,7 +35,7 @@ pub(crate) fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {
             tracing_subscriber::EnvFilter::new(
-                "info,aws=warn,hyper=warn,azure_core=warn,azure_identity=warn,typespec_client_core=warn",
+                "info,aws=warn,hyper=warn,azure_core=warn,azure_identity=warn,typespec_client_core=warn,google_cloud_auth=warn",
             )
         });
     tracing_subscriber::fmt()

@@ -14,6 +14,7 @@ fn scan_options(provider: Provider) -> Setting {
     match provider {
         Provider::Aws => Setting::AwsScanOptions,
         Provider::Azure => Setting::AzureScanOptions,
+        Provider::Gcp => Setting::GcpScanOptions,
     }
 }
 

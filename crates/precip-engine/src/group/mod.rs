@@ -55,8 +55,10 @@ struct Index<'a> {
     /// To ARN to (edge, from ARN).
     inbound: HashMap<&'a str, Vec<(Edge, &'a str)>>,
     accounts: HashMap<&'a str, AccountNames<'a>>,
-    /// (account, region, VPC id) to the VPC's Name tag.
-    vpc_names: HashMap<(&'a str, &'a str, &'a str), &'a str>,
+    /// Network id to the network's name. Ids alone are unique, and a
+    /// network can be in another account (a shared VPC) or region (a
+    /// global Google Cloud network) than its instances.
+    vpc_names: HashMap<&'a str, &'a str>,
 }
 
 impl<'a> Index<'a> {
@@ -103,14 +105,8 @@ impl<'a> Index<'a> {
                 Body::Network(vpc) => {
                     let name = r.tags.get("Name").or(vpc.name.as_ref());
                     if let Some(name) = name {
-                        vpc_names.insert(
-                            (
-                                r.account_id.as_str(),
-                                r.region.as_str(),
-                                vpc.network_id.as_str(),
-                            ),
-                            name.as_str(),
-                        );
+                        vpc_names
+                            .insert(vpc.network_id.as_str(), name.as_str());
                     }
                 }
                 Body::Instance(_)
@@ -190,12 +186,7 @@ impl<'a> Index<'a> {
     fn vpc_name(&self, r: &'a Resource) -> Option<&'a str> {
         let Body::Instance(instance) = &r.body else { return None };
         let id = instance.network_id.as_deref()?;
-        Some(
-            self.vpc_names
-                .get(&(r.account_id.as_str(), r.region.as_str(), id))
-                .copied()
-                .unwrap_or(id),
-        )
+        Some(self.vpc_names.get(id).copied().unwrap_or(id))
     }
 }
 

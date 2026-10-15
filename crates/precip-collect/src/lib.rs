@@ -1,6 +1,7 @@
 //! The shape every scanner's collectors share. A collector is one
-//! service's list calls for one scope: an AWS account and region, or a
-//! batch of Azure subscriptions. The runner runs each collector, records
+//! service's list calls for one scope: an AWS account and region, a
+//! batch of Azure subscriptions, or a Google Cloud project, folder or
+//! organization. The runner runs each collector, records
 //! failures by API name, logs what came back, and merges it.
 
 use precip_types::scan::{

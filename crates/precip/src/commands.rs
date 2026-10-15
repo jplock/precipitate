@@ -60,6 +60,7 @@ pub(crate) fn default_workspaces_dir() -> Utf8PathBuf {
 pub(crate) enum Estate {
     Aws { config: Box<aws_config::SdkConfig>, opts: precip_aws::Options },
     Azure { credential: precip_azure::Credential, opts: precip_azure::Options },
+    Gcp { credential: precip_gcp::Credential, opts: precip_gcp::Options },
 }
 
 impl Estate {
@@ -70,6 +71,7 @@ impl Estate {
         args: &ScanArgs,
         aws: precip_aws::Options,
         azure: precip_azure::Options,
+        gcp: precip_gcp::Options,
     ) -> anyhow::Result<Self> {
         Ok(match provider {
             Provider::Aws => Self::Aws {
@@ -86,6 +88,11 @@ impl Estate {
                 .context("loading Azure credentials")?,
                 opts: azure,
             },
+            Provider::Gcp => Self::Gcp {
+                credential: precip_gcp::load_credential()
+                    .context("loading Google Cloud credentials")?,
+                opts: gcp,
+            },
         })
     }
 
@@ -93,6 +100,7 @@ impl Estate {
         match self {
             Self::Aws { .. } => Provider::Aws,
             Self::Azure { .. } => Provider::Azure,
+            Self::Gcp { .. } => Provider::Gcp,
         }
     }
 
@@ -100,6 +108,7 @@ impl Estate {
         match self {
             Self::Aws { opts, .. } => serde_json::to_string(opts),
             Self::Azure { opts, .. } => serde_json::to_string(opts),
+            Self::Gcp { opts, .. } => serde_json::to_string(opts),
         }
     }
 
@@ -113,6 +122,9 @@ impl Estate {
             }
             Self::Azure { credential, opts } => {
                 precip_azure::scan_estate(credential, opts, progress).await?
+            }
+            Self::Gcp { credential, opts } => {
+                precip_gcp::scan_estate(credential, opts, progress).await?
             }
         })
     }
@@ -128,6 +140,13 @@ impl Estate {
                 Some(t) => format!("{} tenant {t}", opts.cloud.name()),
                 None => format!("{} sign-in", opts.cloud.name()),
             },
+            Self::Gcp { opts, .. } => {
+                match (&opts.folder, &opts.organization) {
+                    (Some(f), _) => format!("gcp folder {f}"),
+                    (None, Some(o)) => format!("gcp organization {o}"),
+                    (None, None) => "gcp projects".into(),
+                }
+            }
         }
     }
 }
@@ -295,7 +314,14 @@ pub(crate) async fn scan(env: &Env, args: &ScanArgs) -> anyhow::Result<()> {
                         .context("reading the saved AWS scan selection")?,
                     None => args.aws_options(),
                 };
-                Estate::load(provider, args, opts, args.azure_options()).await?
+                Estate::load(
+                    provider,
+                    args,
+                    opts,
+                    args.azure_options(),
+                    args.gcp_options(),
+                )
+                .await?
             }
             Provider::Azure => {
                 let opts = match &saved {
@@ -303,7 +329,30 @@ pub(crate) async fn scan(env: &Env, args: &ScanArgs) -> anyhow::Result<()> {
                         .context("reading the saved Azure scan selection")?,
                     None => args.azure_options(),
                 };
-                Estate::load(provider, args, args.aws_options(), opts).await?
+                Estate::load(
+                    provider,
+                    args,
+                    args.aws_options(),
+                    opts,
+                    args.gcp_options(),
+                )
+                .await?
+            }
+            Provider::Gcp => {
+                let opts = match &saved {
+                    Some(j) => serde_json::from_str(j).context(
+                        "reading the saved Google Cloud scan selection",
+                    )?,
+                    None => args.gcp_options(),
+                };
+                Estate::load(
+                    provider,
+                    args,
+                    args.aws_options(),
+                    args.azure_options(),
+                    opts,
+                )
+                .await?
             }
         };
         scan_and_store(estate, store.clone(), None).await?;
@@ -318,9 +367,14 @@ pub(crate) async fn tui(env: Env, args: &ScanArgs) -> anyhow::Result<()> {
         init_tracing();
     }
     let provider = args.provider()?.unwrap_or(Provider::Aws);
-    let estate =
-        Estate::load(provider, args, args.aws_options(), args.azure_options())
-            .await?;
+    let estate = Estate::load(
+        provider,
+        args,
+        args.aws_options(),
+        args.azure_options(),
+        args.gcp_options(),
+    )
+    .await?;
     let context = precip_tui::Context {
         target: estate.describe(args),
         workspace: String::new(),

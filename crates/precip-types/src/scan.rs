@@ -11,6 +11,7 @@ crate::named_enum! {
 pub enum Provider {
     Aws = "aws",
     Azure = "azure",
+    Gcp = "gcp",
 }
 }
 
@@ -22,8 +23,8 @@ pub struct Scan {
     pub provider: Provider,
     pub started: Timestamp,
     pub finished: Option<Timestamp>,
-    /// The identity the scan ran as: an AWS principal ARN, or an Azure
-    /// principal's object id.
+    /// The identity the scan ran as: an AWS principal ARN, an Azure
+    /// principal's sign-in name or id, or a Google account's email.
     pub caller: String,
     pub targets: Vec<ScanTarget>,
     pub resources: Vec<Resource>,
@@ -71,8 +72,8 @@ impl TargetStatus {
 
 crate::named_enum! {
 pub enum ResourceKind {
-    /// An AWS account or Azure subscription, with its OU or management
-    /// group. Region is `global`.
+    /// An AWS account, Azure subscription or Google Cloud project, with
+    /// its OU, management group or folder. Region is `global`.
     Account = "account",
     Instance = "instance",
     /// vCPU and memory for a machine size seen in the region, under a
