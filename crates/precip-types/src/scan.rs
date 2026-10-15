@@ -1,5 +1,6 @@
 //! A scan is one read-only pass over a set of AWS accounts and regions.
 
+use crate::body::Body;
 use crate::{AccountId, Arn, Region};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -144,37 +145,26 @@ impl ResourceKind {
     }
 }
 
-/// A resource as collected, keyed by ARN. The collected fields live in
-/// `body` so the schema can grow without a migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A resource as collected, keyed by ARN. Its kind is the kind of its
+/// body, so the two cannot disagree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Resource {
     pub arn: Arn,
-    pub kind: ResourceKind,
     pub account_id: AccountId,
     pub region: Region,
     pub tags: BTreeMap<String, String>,
-    pub body: serde_json::Value,
+    #[serde(flatten)]
+    pub body: Body,
 }
 
 impl Resource {
-    /// A string field of the body.
-    pub fn body_str(&self, key: &str) -> Option<&str> {
-        self.body.get(key).and_then(serde_json::Value::as_str)
-    }
-
-    /// An unsigned number field of the body.
-    pub fn body_u64(&self, key: &str) -> Option<u64> {
-        self.body.get(key).and_then(serde_json::Value::as_u64)
-    }
-
-    /// A boolean field of the body.
-    pub fn body_bool(&self, key: &str) -> Option<bool> {
-        self.body.get(key).and_then(serde_json::Value::as_bool)
+    pub fn kind(&self) -> ResourceKind {
+        self.body.kind()
     }
 
     /// The resource's own name, for kinds that have one.
     pub fn name(&self) -> Option<&str> {
-        self.body_str("name")
+        self.body.name()
     }
 
     /// The value of the first of `keys` tagged on the resource, trimmed.
@@ -210,12 +200,11 @@ pub struct Relationship {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body;
 
-    #[test]
-    fn body_and_tag_accessors() {
-        let r = Resource {
+    fn resource(body: Body) -> Resource {
+        Resource {
             arn: Arn::from("arn:x"),
-            kind: ResourceKind::Ec2Instance,
             account_id: AccountId::from("1"),
             region: Region::from("us-east-1"),
             tags: [
@@ -223,19 +212,152 @@ mod tests {
                 ("App".to_string(), " shop ".to_string()),
             ]
             .into(),
-            body: serde_json::json!({"name": "web", "size": 8, "on": true}),
-        };
-        assert_eq!(r.name(), Some("web"));
-        assert_eq!(r.body_u64("size"), Some(8));
-        assert_eq!(r.body_u64("name"), None, "wrong type is missing");
-        assert_eq!(r.body_bool("on"), Some(true));
-        assert_eq!(r.body_str("absent"), None);
+            body,
+        }
+    }
+
+    #[test]
+    fn tag_lookup_takes_the_first_present_key() {
+        let r = resource(Body::Vpc(body::Vpc::default()));
         assert_eq!(r.first_tag(&["Missing", "App"]), Some("shop"));
         assert_eq!(
             r.first_tag(&["Blank", "App"]),
             None,
             "the first present tag decides, and blank is missing"
         );
+    }
+
+    #[test]
+    fn kind_and_name_come_from_the_body() {
+        let r = resource(Body::AutoScalingGroup(body::AutoScalingGroup {
+            name: Some("web".into()),
+            ..Default::default()
+        }));
+        assert_eq!(r.kind(), ResourceKind::AutoScalingGroup);
+        assert_eq!(r.name(), Some("web"));
+        assert_eq!(resource(Body::Vpc(body::Vpc::default())).name(), None);
+    }
+
+    #[test]
+    fn resources_serialize_with_kind_and_body_side_by_side() {
+        let r = resource(Body::ManagedService(body::Managed {
+            name: Some("orders".into()),
+            service: body::Service::DynamoDb,
+        }));
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["kind"], "managed_service");
+        assert_eq!(
+            v["body"],
+            serde_json::json!({"name": "orders", "service": "dynamodb"})
+        );
+        let back: Resource = serde_json::from_value(v).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn stored_bodies_round_trip_and_tolerate_missing_fields() {
+        let stored =
+            serde_json::json!({"instance_id": "i-1", "state": "running"});
+        let b = Body::from_value(ResourceKind::Ec2Instance, stored).unwrap();
+        let Body::Ec2Instance(i) = &b else { panic!("wrong kind") };
+        assert_eq!(i.state.as_deref(), Some("running"));
+        assert_eq!(i.network_interface_count, 0, "missing fields default");
+        assert_eq!(b.to_value().unwrap()["instance_id"], "i-1");
+        assert!(
+            Body::from_value(
+                ResourceKind::ManagedService,
+                serde_json::json!({"name": "x"})
+            )
+            .is_err(),
+            "a managed service must name its service"
+        );
+    }
+
+    /// Stored bodies and content hashes were written from JSON literals
+    /// before bodies were typed; a typed body must store the same object
+    /// or every resource would get a new version on the next scan.
+    #[test]
+    fn typed_bodies_store_the_same_json_as_before() {
+        let instance = Body::Ec2Instance(body::Instance {
+            instance_id: "i-1".into(),
+            instance_type: Some("m5.large".into()),
+            vpc_id: Some("vpc-1".into()),
+            ebs_volume_count: 2,
+            ..Default::default()
+        });
+        assert_eq!(
+            instance.to_value().unwrap(),
+            serde_json::json!({
+                "instance_id": "i-1",
+                "instance_type": "m5.large",
+                "architecture": null,
+                "platform": null,
+                "state": null,
+                "image_id": null,
+                "subnet_id": null,
+                "vpc_id": "vpc-1",
+                "boot_mode": null,
+                "current_boot_mode": null,
+                "launch_time": null,
+                "ebs_volume_count": 2,
+                "instance_store_volume_count": 0,
+                "network_interface_count": 0,
+                "public_ip": null,
+            })
+        );
+        let lb = Body::LoadBalancer(body::LoadBalancer {
+            name: Some("web".into()),
+            lb_type: Some("application".into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            lb.to_value().unwrap(),
+            serde_json::json!({
+                "name": "web",
+                "type": "application",
+                "scheme": null,
+                "vpc_id": null,
+                "dns_name": null,
+                "security_groups": [],
+            })
+        );
+        let rds = Body::ManagedService(body::Managed {
+            name: Some("orders".into()),
+            service: body::Service::Rds {
+                engine: Some("postgres".into()),
+                engine_version: None,
+                instance_class: None,
+                allocated_storage_gib: Some(100),
+                multi_az: Some(false),
+                vpc_id: None,
+            },
+        });
+        assert_eq!(
+            rds.to_value().unwrap(),
+            serde_json::json!({
+                "service": "rds",
+                "name": "orders",
+                "engine": "postgres",
+                "engine_version": null,
+                "instance_class": null,
+                "allocated_storage_gib": 100,
+                "multi_az": false,
+                "vpc_id": null,
+            })
+        );
+    }
+
+    #[test]
+    fn every_kind_has_a_body_with_the_same_name() {
+        for kind in ResourceKind::ALL {
+            let value = if *kind == ResourceKind::ManagedService {
+                serde_json::json!({"service": "eks"})
+            } else {
+                serde_json::json!({})
+            };
+            let b = Body::from_value(*kind, value).unwrap();
+            assert_eq!(b.kind(), *kind);
+        }
     }
 
     #[test]

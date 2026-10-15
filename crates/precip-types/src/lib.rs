@@ -5,9 +5,11 @@ pub use names::{
     AccountId, Arn, EnvName, PairKey, Region, UnknownName, WorkloadName,
 };
 
+pub mod body;
 pub mod profile;
 pub mod scan;
 
+pub use body::Body;
 pub use profile::Profile;
 pub use scan::{Relationship, Resource, ResourceKind, Scan, ScanTarget};
 

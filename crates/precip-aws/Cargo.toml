@@ -27,6 +27,7 @@ aws-sdk-rds = { workspace = true, features = ["rt-tokio", "default-https-client"
 aws-sdk-resourceexplorer2 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-resourcegroupstagging = { workspace = true, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-sts = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-smithy-async = { workspace = true }
 jiff = { workspace = true, features = ["std"] }
 precip-types.workspace = true
 serde = { workspace = true, features = ["std", "derive"] }

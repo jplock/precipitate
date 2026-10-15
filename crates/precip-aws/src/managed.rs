@@ -2,299 +2,240 @@
 //! resource is stored by ARN with `service` in its body so dependencies
 //! can be counted per workload. Nothing here is sized.
 
-use precip_types::scan::ResourceKind;
+use precip_types::{Arn, Body, Resource, body};
+use std::collections::BTreeMap;
 
+use crate::arn::ArnType;
 use crate::collect::{
-    BoxFuture, CollectError, Collected, Collector, RegionContext, tags,
+    Collect, CollectError, Collected, RegionContext, next_page, own, tags,
 };
 
-fn managed(
-    ctx: &RegionContext,
-    service: &str,
-    arn: precip_types::Arn,
-    name: Option<&str>,
-    tags: std::collections::BTreeMap<String, String>,
-    extra: serde_json::Value,
-) -> precip_types::Resource {
-    let mut body = serde_json::json!({ "service": service, "name": name });
-    if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
-        b.extend(e.clone());
+impl RegionContext {
+    /// A managed-service resource.
+    fn managed(
+        &self,
+        arn: Arn,
+        name: Option<&str>,
+        tags: BTreeMap<String, String>,
+        service: body::Service,
+    ) -> Resource {
+        self.resource(
+            arn,
+            tags,
+            Body::ManagedService(body::Managed { name: own(name), service }),
+        )
     }
-    ctx.resource(arn, ResourceKind::ManagedService, tags, body)
-}
-
-macro_rules! log_count {
-    ($ctx:expr, $name:expr, $out:expr) => {
-        tracing::info!(api = $name, count = $out.resources.len(), "collected");
-    };
 }
 
 pub struct Rds;
 
-impl Collector for Rds {
-    fn name(&self) -> &'static str {
-        "rds:DescribeDBInstances"
-    }
+impl Collect for Rds {
+    const API: &'static str = "rds:DescribeDBInstances";
 
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        _prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(async move {
-            let client = aws_sdk_rds::Client::new(&ctx.config);
-            let mut out = Collected::default();
-            let mut pages =
-                client.describe_db_instances().into_paginator().send();
-            while let Some(page) = pages.next().await {
-                let page = page.map_err(CollectError::new(self.name()))?;
-                for db in page.db_instances() {
-                    let Some(arn) = db.db_instance_arn() else { continue };
-                    out.resources.push(managed(
-                        ctx,
-                        "rds",
-                        precip_types::Arn::from(arn),
-                        db.db_instance_identifier(),
-                        tags(db.tag_list(), |t| t.key(), |t| t.value()),
-                        serde_json::json!({
-                            "engine": db.engine(),
-                            "engine_version": db.engine_version(),
-                            "instance_class": db.db_instance_class(),
-                            "allocated_storage_gib": db.allocated_storage(),
-                            "multi_az": db.multi_az(),
-                            "vpc_id": db.db_subnet_group().and_then(|g| g.vpc_id()),
-                        }),
-                    ));
-                }
+    async fn collect(
+        &self,
+        ctx: &RegionContext,
+        _prior: &Collected,
+    ) -> Result<Collected, CollectError> {
+        let client = aws_sdk_rds::Client::new(&ctx.config);
+        let mut out = Collected::default();
+        let mut pages = client.describe_db_instances().into_paginator().send();
+        while let Some(page) = next_page(Self::API, &mut pages).await? {
+            for db in page.db_instances() {
+                let Some(arn) = db.db_instance_arn() else { continue };
+                out.resources.push(ctx.managed(
+                    Arn::from(arn),
+                    db.db_instance_identifier(),
+                    tags(db.tag_list()),
+                    body::Service::Rds {
+                        engine: own(db.engine()),
+                        engine_version: own(db.engine_version()),
+                        instance_class: own(db.db_instance_class()),
+                        allocated_storage_gib: db.allocated_storage(),
+                        multi_az: db.multi_az(),
+                        vpc_id: own(
+                            db.db_subnet_group().and_then(|g| g.vpc_id()),
+                        ),
+                    },
+                ));
             }
-            log_count!(ctx, self.name(), out);
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 }
 
 pub struct Eks;
 
-impl Collector for Eks {
-    fn name(&self) -> &'static str {
-        "eks:ListClusters"
-    }
+impl Collect for Eks {
+    const API: &'static str = "eks:ListClusters";
 
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        _prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(async move {
-            let client = aws_sdk_eks::Client::new(&ctx.config);
-            let mut out = Collected::default();
-            let mut pages = client.list_clusters().into_paginator().send();
-            while let Some(page) = pages.next().await {
-                let page = page.map_err(CollectError::new(self.name()))?;
-                for name in page.clusters() {
-                    out.resources.push(managed(
-                        ctx,
-                        "eks",
-                        ctx.arn("eks", &format!("cluster/{name}")),
-                        Some(name),
-                        Default::default(),
-                        serde_json::json!({}),
-                    ));
-                }
+    async fn collect(
+        &self,
+        ctx: &RegionContext,
+        _prior: &Collected,
+    ) -> Result<Collected, CollectError> {
+        let client = aws_sdk_eks::Client::new(&ctx.config);
+        let mut out = Collected::default();
+        let mut pages = client.list_clusters().into_paginator().send();
+        while let Some(page) = next_page(Self::API, &mut pages).await? {
+            for name in page.clusters() {
+                out.resources.push(ctx.managed(
+                    ctx.arn(ArnType::EksCluster, name),
+                    Some(name),
+                    BTreeMap::new(),
+                    body::Service::Eks,
+                ));
             }
-            log_count!(ctx, self.name(), out);
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 }
 
 pub struct Ecs;
 
-impl Collector for Ecs {
-    fn name(&self) -> &'static str {
-        "ecs:ListClusters"
-    }
+impl Collect for Ecs {
+    const API: &'static str = "ecs:ListClusters";
 
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        _prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(async move {
-            let client = aws_sdk_ecs::Client::new(&ctx.config);
-            let mut out = Collected::default();
-            let mut pages = client.list_clusters().into_paginator().send();
-            while let Some(page) = pages.next().await {
-                let page = page.map_err(CollectError::new(self.name()))?;
-                for arn in page.cluster_arns() {
-                    let name = arn.rsplit('/').next();
-                    out.resources.push(managed(
-                        ctx,
-                        "ecs",
-                        precip_types::Arn::from(arn.clone()),
-                        name,
-                        Default::default(),
-                        serde_json::json!({}),
-                    ));
-                }
+    async fn collect(
+        &self,
+        ctx: &RegionContext,
+        _prior: &Collected,
+    ) -> Result<Collected, CollectError> {
+        let client = aws_sdk_ecs::Client::new(&ctx.config);
+        let mut out = Collected::default();
+        let mut pages = client.list_clusters().into_paginator().send();
+        while let Some(page) = next_page(Self::API, &mut pages).await? {
+            for arn in page.cluster_arns() {
+                out.resources.push(ctx.managed(
+                    Arn::from(arn.as_str()),
+                    arn.rsplit('/').next(),
+                    BTreeMap::new(),
+                    body::Service::Ecs,
+                ));
             }
-            log_count!(ctx, self.name(), out);
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 }
 
 pub struct Lambda;
 
-impl Collector for Lambda {
-    fn name(&self) -> &'static str {
-        "lambda:ListFunctions"
-    }
+impl Collect for Lambda {
+    const API: &'static str = "lambda:ListFunctions";
 
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        _prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(async move {
-            let client = aws_sdk_lambda::Client::new(&ctx.config);
-            let mut out = Collected::default();
-            let mut pages = client.list_functions().into_paginator().send();
-            while let Some(page) = pages.next().await {
-                let page = page.map_err(CollectError::new(self.name()))?;
-                for f in page.functions() {
-                    let Some(arn) = f.function_arn() else { continue };
-                    out.resources.push(managed(
-                        ctx,
-                        "lambda",
-                        precip_types::Arn::from(arn),
-                        f.function_name(),
-                        Default::default(),
-                        serde_json::json!({
-                            "runtime": f.runtime().map(|r| r.as_str()),
-                            "memory_mib": f.memory_size(),
-                            "vpc_id": f.vpc_config().and_then(|v| v.vpc_id()),
-                        }),
-                    ));
-                }
+    async fn collect(
+        &self,
+        ctx: &RegionContext,
+        _prior: &Collected,
+    ) -> Result<Collected, CollectError> {
+        let client = aws_sdk_lambda::Client::new(&ctx.config);
+        let mut out = Collected::default();
+        let mut pages = client.list_functions().into_paginator().send();
+        while let Some(page) = next_page(Self::API, &mut pages).await? {
+            for f in page.functions() {
+                let Some(arn) = f.function_arn() else { continue };
+                out.resources.push(ctx.managed(
+                    Arn::from(arn),
+                    f.function_name(),
+                    BTreeMap::new(),
+                    body::Service::Lambda {
+                        runtime: own(f.runtime().map(|r| r.as_str())),
+                        memory_mib: f.memory_size(),
+                        vpc_id: own(f.vpc_config().and_then(|v| v.vpc_id())),
+                    },
+                ));
             }
-            log_count!(ctx, self.name(), out);
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 }
 
 pub struct ElastiCache;
 
-impl Collector for ElastiCache {
-    fn name(&self) -> &'static str {
-        "elasticache:DescribeCacheClusters"
-    }
+impl Collect for ElastiCache {
+    const API: &'static str = "elasticache:DescribeCacheClusters";
 
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        _prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(async move {
-            let client = aws_sdk_elasticache::Client::new(&ctx.config);
-            let mut out = Collected::default();
-            let mut pages =
-                client.describe_cache_clusters().into_paginator().send();
-            while let Some(page) = pages.next().await {
-                let page = page.map_err(CollectError::new(self.name()))?;
-                for c in page.cache_clusters() {
-                    let Some(arn) = c.arn() else { continue };
-                    out.resources.push(managed(
-                        ctx,
-                        "elasticache",
-                        precip_types::Arn::from(arn),
-                        c.cache_cluster_id(),
-                        Default::default(),
-                        serde_json::json!({
-                            "engine": c.engine(),
-                            "node_type": c.cache_node_type(),
-                            "nodes": c.num_cache_nodes(),
-                        }),
-                    ));
-                }
+    async fn collect(
+        &self,
+        ctx: &RegionContext,
+        _prior: &Collected,
+    ) -> Result<Collected, CollectError> {
+        let client = aws_sdk_elasticache::Client::new(&ctx.config);
+        let mut out = Collected::default();
+        let mut pages =
+            client.describe_cache_clusters().into_paginator().send();
+        while let Some(page) = next_page(Self::API, &mut pages).await? {
+            for c in page.cache_clusters() {
+                let Some(arn) = c.arn() else { continue };
+                out.resources.push(ctx.managed(
+                    Arn::from(arn),
+                    c.cache_cluster_id(),
+                    BTreeMap::new(),
+                    body::Service::ElastiCache {
+                        engine: own(c.engine()),
+                        node_type: own(c.cache_node_type()),
+                        nodes: c.num_cache_nodes(),
+                    },
+                ));
             }
-            log_count!(ctx, self.name(), out);
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 }
 
 pub struct DynamoDb;
 
-impl Collector for DynamoDb {
-    fn name(&self) -> &'static str {
-        "dynamodb:ListTables"
-    }
+impl Collect for DynamoDb {
+    const API: &'static str = "dynamodb:ListTables";
 
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        _prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(async move {
-            let client = aws_sdk_dynamodb::Client::new(&ctx.config);
-            let mut out = Collected::default();
-            let mut pages = client.list_tables().into_paginator().send();
-            while let Some(page) = pages.next().await {
-                let page = page.map_err(CollectError::new(self.name()))?;
-                for name in page.table_names() {
-                    out.resources.push(managed(
-                        ctx,
-                        "dynamodb",
-                        ctx.arn("dynamodb", &format!("table/{name}")),
-                        Some(name),
-                        Default::default(),
-                        serde_json::json!({}),
-                    ));
-                }
+    async fn collect(
+        &self,
+        ctx: &RegionContext,
+        _prior: &Collected,
+    ) -> Result<Collected, CollectError> {
+        let client = aws_sdk_dynamodb::Client::new(&ctx.config);
+        let mut out = Collected::default();
+        let mut pages = client.list_tables().into_paginator().send();
+        while let Some(page) = next_page(Self::API, &mut pages).await? {
+            for name in page.table_names() {
+                out.resources.push(ctx.managed(
+                    ctx.arn(ArnType::DynamoDbTable, name),
+                    Some(name),
+                    BTreeMap::new(),
+                    body::Service::DynamoDb,
+                ));
             }
-            log_count!(ctx, self.name(), out);
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 }
 
 pub struct Efs;
 
-impl Collector for Efs {
-    fn name(&self) -> &'static str {
-        "elasticfilesystem:DescribeFileSystems"
-    }
+impl Collect for Efs {
+    const API: &'static str = "elasticfilesystem:DescribeFileSystems";
 
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        _prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(async move {
-            let client = aws_sdk_efs::Client::new(&ctx.config);
-            let mut out = Collected::default();
-            let mut pages =
-                client.describe_file_systems().into_paginator().send();
-            while let Some(page) = pages.next().await {
-                let page = page.map_err(CollectError::new(self.name()))?;
-                for fs in page.file_systems() {
-                    let Some(arn) = fs.file_system_arn() else { continue };
-                    out.resources.push(managed(
-                        ctx,
-                        "efs",
-                        precip_types::Arn::from(arn),
-                        fs.name(),
-                        tags(fs.tags(), |t| Some(t.key()), |t| Some(t.value())),
-                        serde_json::json!({
-                            "size_bytes": fs.size_in_bytes().map(|s| s.value()),
-                        }),
-                    ));
-                }
+    async fn collect(
+        &self,
+        ctx: &RegionContext,
+        _prior: &Collected,
+    ) -> Result<Collected, CollectError> {
+        let client = aws_sdk_efs::Client::new(&ctx.config);
+        let mut out = Collected::default();
+        let mut pages = client.describe_file_systems().into_paginator().send();
+        while let Some(page) = next_page(Self::API, &mut pages).await? {
+            for fs in page.file_systems() {
+                let Some(arn) = fs.file_system_arn() else { continue };
+                out.resources.push(ctx.managed(
+                    Arn::from(arn),
+                    fs.name(),
+                    tags(fs.tags()),
+                    body::Service::Efs {
+                        size_bytes: fs.size_in_bytes().map(|s| s.value()),
+                    },
+                ));
             }
-            log_count!(ctx, self.name(), out);
-            Ok(out)
-        })
+        }
+        Ok(out)
     }
 }

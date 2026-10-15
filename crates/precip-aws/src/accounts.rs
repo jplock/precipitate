@@ -3,8 +3,7 @@
 use aws_config::SdkConfig;
 use aws_config::sts::AssumeRoleProvider;
 use aws_credential_types::provider::SharedCredentialsProvider;
-use precip_types::scan::{Resource, ResourceKind};
-use precip_types::{AccountId, Arn, Region};
+use precip_types::{AccountId, Arn, Body, Region, Resource, body};
 
 use crate::ScanError;
 
@@ -16,28 +15,6 @@ pub struct CallerIdentity {
     /// `aws-cn`, or one of the isolated partitions. Every ARN the scanner
     /// builds uses this, never a literal `aws`.
     pub partition: String,
-}
-
-/// Build an ARN for a regional resource.
-pub fn resource_arn(
-    partition: &str,
-    service: &str,
-    region: &str,
-    account_id: &str,
-    resource: &str,
-) -> Arn {
-    Arn::from(format!(
-        "arn:{partition}:{service}:{region}:{account_id}:{resource}"
-    ))
-}
-
-/// The partition segment of an ARN (`arn:<partition>:...`).
-fn partition_of(arn: &str) -> Option<&str> {
-    let mut parts = arn.splitn(3, ':');
-    match (parts.next(), parts.next()) {
-        (Some("arn"), Some(p)) if !p.is_empty() => Some(p),
-        _ => None,
-    }
 }
 
 pub async fn caller_identity(
@@ -53,7 +30,7 @@ pub async fn caller_identity(
     let account_id = AccountId::from(
         out.account().ok_or(ScanError::IdentityField("Account"))?,
     );
-    let partition = partition_of(arn.as_str())
+    let partition = crate::arn::partition_of(arn.as_str())
         .ok_or_else(|| ScanError::Partition(arn.to_string()))?
         .to_string();
     Ok(CallerIdentity { account_id, arn, partition })
@@ -98,16 +75,15 @@ impl MemberAccount {
     pub fn to_resource(&self, partition: &str) -> Resource {
         Resource {
             arn: self.arn.clone(),
-            kind: ResourceKind::Account,
             account_id: self.id.clone(),
             region: Region::global(),
             tags: Default::default(),
-            body: serde_json::json!({
-                "name": self.name,
-                "status": self.status,
-                "parent_id": self.parent_id,
-                "parent_name": self.parent_name,
-                "partition": partition,
+            body: Body::Account(body::Account {
+                name: self.name.clone(),
+                status: self.status.clone(),
+                parent_id: self.parent_id.clone(),
+                parent_name: self.parent_name.clone(),
+                partition: partition.to_string(),
             }),
         }
     }
@@ -230,31 +206,4 @@ pub async fn assume_member_role(
     base.to_builder()
         .credentials_provider(SharedCredentialsProvider::new(provider))
         .build()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn partition_is_parsed_from_caller_arn() {
-        assert_eq!(
-            partition_of("arn:aws:sts::123456789012:assumed-role/r/s"),
-            Some("aws")
-        );
-        assert_eq!(
-            partition_of("arn:aws-us-gov:iam::123456789012:user/x"),
-            Some("aws-us-gov")
-        );
-        assert_eq!(partition_of("not-an-arn"), None);
-        assert_eq!(partition_of("arn::x"), None);
-    }
-
-    #[test]
-    fn resource_arn_uses_the_given_partition() {
-        assert_eq!(
-            resource_arn("aws-cn", "ec2", "cn-north-1", "1", "instance/i-1"),
-            "arn:aws-cn:ec2:cn-north-1:1:instance/i-1"
-        );
-    }
 }
