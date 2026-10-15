@@ -1,7 +1,7 @@
 # precip
 
-precip scans Amazon Web Services (AWS) accounts and Microsoft Azure
-subscriptions, groups the resources it finds into workloads, sizes the Oxide sleds and racks those workloads need, and
+precip scans Amazon Web Services (AWS) accounts, Microsoft Azure
+subscriptions and Google Cloud projects, groups the resources it finds into workloads, sizes the Oxide sleds and racks those workloads need, and
 schedules each migration on a calendar. It ships as one static binary. The
 binary has a terminal user interface (TUI) and a command line. Both read
 and write the same SQLite file, so every action in one is available in the
@@ -29,8 +29,9 @@ make hooks          # install the prek git hooks
 The TUI opens with a workspace picker. A workspace holds one company's
 assessment in one SQLite file under `$XDG_DATA_HOME/precip/workspaces/`
 (`~/.local/share/precip/workspaces/` by default). One workspace can hold
-both an AWS and an Azure estate. `--cloud aws` or `--cloud azure` picks
-which one a scan reads; the AWS and Azure selection flags imply it.
+AWS, Azure and Google Cloud estates. `--cloud aws`, `--cloud azure` or
+`--cloud gcp` picks which one a scan reads; each cloud's selection flags
+imply it.
 
 ```
 precip --profile mgmt                         # open the TUI
@@ -42,6 +43,7 @@ precip --workspace acme export schedule --out plan.ics
 precip --help                                 # list every command
 precip --cloud azure --workspace acme scan    # scan Azure without the TUI
 precip --workspace acme scan --tenant <id> --management-group prod
+precip --workspace acme scan --organization <number>   # scan Google Cloud
 ```
 
 From an AWS Organizations management account, precip scans every active
@@ -64,6 +66,21 @@ custom role with only the actions precip uses is in
 `iam/azure-precip-reader.json`. `--azure-cloud AzureUSGovernment` scans
 Azure Government; with the Azure CLI, run
 `az cloud set --name AzureUSGovernment` first.
+
+In Google Cloud, precip scans every active project the sign-in can see,
+or those named with `--project` and `--exclude-project`. `--organization`
+or `--folder` (by number) limits the scan to projects under it and lists
+the whole organization or folder in one pass, which is faster than
+listing each project. precip signs in with Application Default
+Credentials: the key, workload identity federation or impersonation
+configuration in `GOOGLE_APPLICATION_CREDENTIALS`, else
+`gcloud auth application-default login`, else the metadata server when it
+runs on Google Cloud. Every call is billed to a quota project, which must
+have the Cloud Asset API enabled; set it with
+`gcloud auth application-default set-quota-project` or
+`GOOGLE_CLOUD_QUOTA_PROJECT`. The Cloud Asset Viewer, Browser and Compute
+Viewer roles are enough; a custom role with only the permissions precip
+uses is in `iam/gcp-precip-reader.yaml`.
 
 ## What precip does
 
@@ -95,6 +112,17 @@ PostgreSQL and MySQL flexible servers, AKS, Container Apps, Container
 Instances, App Service and Functions, Cache for Redis, Cosmos DB and
 NetApp Files.
 
+In Google Cloud, precip reads Cloud Asset Inventory, 4 projects at a time
+or one organization or folder at once, and reads machine type sizes from
+the Compute Engine API. It collects VM instances, persistent disks,
+images, managed instance groups and their templates, static external IP
+addresses, VPC networks, subnets, peerings, firewall rules, routes, Cloud
+NAT, backend services with their instance groups, target pools, GKE
+clusters with their node groups, and 9 managed services: Cloud SQL,
+AlloyDB, Spanner, GKE, Cloud Run, Cloud Functions, Memorystore for Redis,
+Bigtable and Filestore. Network firewall policies and the members of
+unmanaged instance groups are not read.
+
 precip keeps every scan and versions each resource by its content, so it
 can list what changed between two scans. A scan of one cloud leaves the
 other cloud's resources as they were. Each scan saves its selection, and a
@@ -105,8 +133,8 @@ cloud.
 such as `shop` and `prod`. It takes the first signal that matches:
 
 1. a manual override;
-2. the CloudFormation stack or Azure resource group;
-3. the auto scaling group or VM scale set;
+2. the CloudFormation stack, Azure resource group or GKE cluster;
+3. the auto scaling group, VM scale set or managed instance group;
 4. the load balancer;
 5. tags;
 6. the resource name;
@@ -186,11 +214,12 @@ crates/precip         the binary: command line and TUI entry point
 crates/precip-tui     the TUI (ratatui)
 crates/precip-aws     the AWS scanner
 crates/precip-azure   the Azure scanner
-crates/precip-collect the collector runner both scanners share
+crates/precip-gcp     the Google Cloud scanner
+crates/precip-collect the collector runner the scanners share
 crates/precip-db      the SQLite workspace: scans, plan events, projections, export
 crates/precip-engine  pure functions: grouping, sizing, scheduling, Gantt layout
 crates/precip-types   shared types
-iam/                  the AWS IAM policy and Azure role for scanning
+iam/                  the AWS IAM policy and Azure and Google Cloud roles for scanning
 docs/rfd/             the design document
 ```
 

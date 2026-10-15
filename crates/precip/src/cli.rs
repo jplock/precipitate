@@ -9,7 +9,7 @@ use precip_types::{AccountId, Provider};
 
 use crate::commands::default_workspaces_dir;
 
-/// Scan AWS and Azure estates and size them for Oxide racks. With no
+/// Scan AWS, Azure and Google Cloud estates and size them for Oxide racks. With no
 /// subcommand, opens the terminal interface.
 #[derive(Parser)]
 #[command(name = "precip", version)]
@@ -38,6 +38,7 @@ pub(crate) struct Cli {
 pub(crate) enum Cloud {
     Aws,
     Azure,
+    Gcp,
 }
 
 impl From<Cloud> for Provider {
@@ -45,6 +46,7 @@ impl From<Cloud> for Provider {
         match c {
             Cloud::Aws => Provider::Aws,
             Cloud::Azure => Provider::Azure,
+            Cloud::Gcp => Provider::Gcp,
         }
     }
 }
@@ -114,6 +116,24 @@ pub(crate) struct ScanArgs {
     /// Scan only subscriptions under this management group, at any depth.
     #[arg(long, global = true, help_heading = "Azure")]
     pub(crate) management_group: Option<String>,
+
+    /// Scan only projects under this organization number, listing the
+    /// whole organization in one pass.
+    #[arg(long, global = true, help_heading = "Google Cloud")]
+    pub(crate) organization: Option<String>,
+    /// Scan only projects under this folder number, at any depth.
+    #[arg(long, global = true, help_heading = "Google Cloud")]
+    pub(crate) folder: Option<String>,
+    /// Scan only these project ids or numbers (repeatable).
+    #[arg(long = "project", global = true, help_heading = "Google Cloud")]
+    pub(crate) projects: Vec<AccountId>,
+    /// Skip these project ids or numbers (repeatable).
+    #[arg(
+        long = "exclude-project",
+        global = true,
+        help_heading = "Google Cloud"
+    )]
+    pub(crate) exclude_projects: Vec<AccountId>,
 }
 
 impl ScanArgs {
@@ -132,27 +152,37 @@ impl ScanArgs {
             || self.management_group.is_some()
     }
 
+    fn gcp_selection(&self) -> bool {
+        self.organization.is_some()
+            || self.folder.is_some()
+            || !self.projects.is_empty()
+            || !self.exclude_projects.is_empty()
+    }
+
     /// The cloud the flags name: `--cloud`, else the one whose flags are
     /// given. `None` when nothing says.
     pub(crate) fn provider(&self) -> anyhow::Result<Option<Provider>> {
-        let aws = self.aws_selection() || self.profile.is_some();
-        let azure = self.azure_selection();
-        match (self.cloud.map(Provider::from), aws, azure) {
-            (Some(Provider::Aws), _, true) => {
-                anyhow::bail!("Azure flags given with --cloud aws")
+        let flagged: Vec<Provider> = [
+            (Provider::Aws, self.aws_selection() || self.profile.is_some()),
+            (Provider::Azure, self.azure_selection()),
+            (Provider::Gcp, self.gcp_selection()),
+        ]
+        .into_iter()
+        .filter_map(|(p, given)| given.then_some(p))
+        .collect();
+        let named = self.cloud.map(Provider::from);
+        if let Some(p) = named {
+            if let Some(other) = flagged.iter().find(|f| **f != p) {
+                anyhow::bail!("{other} flags given with --cloud {p}");
             }
-            (Some(Provider::Azure), true, _) => {
-                anyhow::bail!("AWS flags given with --cloud azure")
-            }
-            (None, true, true) => {
-                anyhow::bail!(
-                    "both AWS and Azure flags given; scan one cloud at a time"
-                )
-            }
-            (Some(p), _, _) => Ok(Some(p)),
-            (None, true, false) => Ok(Some(Provider::Aws)),
-            (None, false, true) => Ok(Some(Provider::Azure)),
-            (None, false, false) => Ok(None),
+            return Ok(Some(p));
+        }
+        match flagged.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(*one)),
+            [_, _, ..] => anyhow::bail!(
+                "flags for more than one cloud given; scan one cloud at a time"
+            ),
         }
     }
 
@@ -162,6 +192,7 @@ impl ScanArgs {
         match provider {
             Provider::Aws => !self.aws_selection(),
             Provider::Azure => !self.azure_selection(),
+            Provider::Gcp => !self.gcp_selection(),
         }
     }
 
@@ -188,6 +219,15 @@ impl ScanArgs {
             management_group: self.management_group.clone(),
         }
     }
+
+    pub(crate) fn gcp_options(&self) -> precip_gcp::Options {
+        precip_gcp::Options {
+            organization: self.organization.clone(),
+            folder: self.folder.clone(),
+            projects: self.projects.clone(),
+            exclude_projects: self.exclude_projects.clone(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -195,7 +235,8 @@ pub(crate) enum Command {
     /// Scan the estate the credentials can reach and append the result to
     /// the database, without the interface. In an AWS Organization
     /// management account this covers every active member account through
-    /// the member role; in Azure, every subscription the sign-in can read.
+    /// the member role; in Azure, every subscription the sign-in can read;
+    /// in Google Cloud, every active project it can see.
     Scan,
     /// Regroup the latest scan of a workspace into workloads without
     /// rescanning, and print the result.
@@ -634,5 +675,41 @@ mod tests {
             Cli::try_parse_from(["precip", "scan", "--azure-cloud", "gov"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn google_cloud_flags_select_gcp_and_conflict_with_other_clouds() {
+        assert_eq!(
+            provider(&["scan", "--organization", "9"]).unwrap(),
+            Some(Provider::Gcp)
+        );
+        assert_eq!(
+            provider(&["scan", "--cloud", "gcp"]).unwrap(),
+            Some(Provider::Gcp)
+        );
+        assert!(
+            provider(&["scan", "--cloud", "gcp", "--subscription", "s1"])
+                .is_err()
+        );
+        assert!(
+            provider(&["scan", "--project", "p", "--account", "1"]).is_err()
+        );
+        let cli = Cli::try_parse_from([
+            "precip",
+            "scan",
+            "--folder",
+            "5",
+            "--project",
+            "shop",
+            "--exclude-project",
+            "old",
+        ])
+        .unwrap();
+        assert!(!cli.scan.is_default(Provider::Gcp));
+        assert!(cli.scan.is_default(Provider::Azure));
+        let opts = cli.scan.gcp_options();
+        assert_eq!(opts.folder.as_deref(), Some("5"));
+        assert_eq!(opts.projects, [AccountId::from("shop")]);
+        assert_eq!(opts.exclude_projects, [AccountId::from("old")]);
     }
 }

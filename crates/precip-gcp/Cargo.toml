@@ -1,0 +1,30 @@
+[package]
+name = "precip-gcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Read-only Google Cloud discovery for precip"
+
+[dependencies]
+# rustls on aws-lc-rs, the TLS stack the AWS and Azure clients use. The
+# auth crate's provider feature signs service account assertions with it.
+google-cloud-auth = { workspace = true, features = ["default-rustls-provider"] }
+http = { workspace = true, features = ["std"] }
+jiff = { workspace = true, features = ["std"] }
+precip-collect.workspace = true
+precip-types.workspace = true
+reqwest = { workspace = true, features = ["rustls", "gzip"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+uuid = { workspace = true, features = ["std", "v7"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

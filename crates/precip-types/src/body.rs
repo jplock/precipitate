@@ -160,15 +160,17 @@ macro_rules! bodies {
 }
 
 bodies! {
-    /// A cloud account: an AWS account in the Organization with its OU, or
-    /// an Azure subscription with its management group.
+    /// A cloud account: an AWS account in the Organization with its OU, an
+    /// Azure subscription with its management group, or a Google Cloud
+    /// project with its folder.
     Account {
         name: String,
         status: String,
         parent_id: Option<String>,
         parent_name: Option<String>,
-        /// The AWS partition (`aws`, `aws-us-gov`) or Azure cloud
-        /// (`AzureCloud`, `AzureUSGovernment`) the account lives in.
+        /// The AWS partition (`aws`, `aws-us-gov`), Azure cloud
+        /// (`AzureCloud`, `AzureUSGovernment`) or `gcp` the account lives
+        /// in.
         cloud: String,
     }
     /// A virtual machine. Scanners normalise `architecture` to `x86_64` or

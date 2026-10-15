@@ -1,0 +1,15 @@
+# A custom role for a precip scan. Create it in the organization with
+#   gcloud iam roles create precipReader --organization=ORG_ID --file=iam/gcp-precip-reader.yaml
+# and grant it on the organization, a folder, or each project to scan.
+# The caller also needs serviceusage.services.use on its quota project,
+# where the Cloud Asset API must be enabled.
+title: precip reader
+description: Read-only access for a precip scan.
+stage: GA
+includedPermissions:
+  - cloudasset.assets.listResource
+  - compute.machineTypes.list
+  - resourcemanager.folders.get
+  - resourcemanager.organizations.get
+  - resourcemanager.projects.get
+  - serviceusage.services.use

@@ -184,7 +184,8 @@ string_name!(
     EnvName
 );
 string_name!(
-    /// A 12-digit AWS account id or an Azure subscription id.
+    /// A 12-digit AWS account id, an Azure subscription id or a Google
+    /// Cloud project id.
     AccountId
 );
 string_name!(
@@ -193,8 +194,8 @@ string_name!(
     Region
 );
 string_name!(
-    /// A resource's unique id: an Amazon Resource Name or a lowercased
-    /// Azure resource id.
+    /// A resource's unique id: an Amazon Resource Name, a lowercased
+    /// Azure resource id or a Google Cloud full resource name.
     Arn
 );
 

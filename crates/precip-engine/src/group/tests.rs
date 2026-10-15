@@ -852,3 +852,119 @@ fn azure_naming_prefixes_and_suffixes_are_not_the_workload() {
         assert_eq!((w.as_str(), e.as_str()), ("shop", "prod"), "{name}");
     }
 }
+
+mod gcp {
+    use super::*;
+
+    const C: &str = "//compute.googleapis.com/projects";
+
+    fn gc(
+        id: &str,
+        project: &str,
+        region: &str,
+        kind: ResourceKind,
+        body: serde_json::Value,
+    ) -> Resource {
+        Resource {
+            account_id: project.into(),
+            region: region.into(),
+            ..res(id, kind, &[], body)
+        }
+    }
+
+    /// A shared VPC is global and lives in its host project, so neither
+    /// its account nor its region is the instance's.
+    #[test]
+    fn a_vm_takes_the_name_of_a_shared_vpc_in_another_project() {
+        let net = format!("{C}/net-host/global/networks/billing-vpc");
+        let vm = gc(
+            &format!("{C}/billing-prod/zones/us-central1-a/instances/vm-1"),
+            "billing-prod",
+            "us-central1",
+            ResourceKind::Instance,
+            serde_json::json!({ "network_id": net }),
+        );
+        let resources = [
+            gc(
+                &net,
+                "net-host",
+                "global",
+                ResourceKind::Network,
+                serde_json::json!({ "network_id": net, "name": "billing-vpc" }),
+            ),
+            vm.clone(),
+        ];
+        let m = run(&resources, &[]);
+        let (workload, _, signal) = wl(&m, vm.arn.as_str());
+        assert_eq!(
+            (workload.as_str(), signal),
+            ("billing", GroupingSignal::Network)
+        );
+    }
+
+    #[test]
+    fn gke_nodes_and_their_group_join_the_cluster() {
+        let cluster = "//container.googleapis.com/projects/shop/locations/us-central1/clusters/orders";
+        let nodes = format!("{cluster}#nodes");
+        let mig = gc(
+            &format!(
+                "{C}/shop/zones/us-central1-a/instanceGroupManagers/gke-orders-pool-1a2b3c4d-grp"
+            ),
+            "shop",
+            "us-central1",
+            ResourceKind::ScaleGroup,
+            serde_json::json!({ "name": "gke-orders-pool-1a2b3c4d-grp" }),
+        );
+        let node = gc(
+            &format!(
+                "{C}/shop/zones/us-central1-a/instances/gke-orders-pool-1a2b3c4d-x1y2"
+            ),
+            "shop",
+            "us-central1",
+            ResourceKind::Instance,
+            serde_json::json!({}),
+        );
+        let resources = [
+            gc(
+                cluster,
+                "shop",
+                "us-central1",
+                ResourceKind::ManagedService,
+                serde_json::json!({
+                    "service": "kubernetes", "product": "gke", "name": "orders",
+                }),
+            ),
+            gc(
+                &nodes,
+                "shop",
+                "us-central1",
+                ResourceKind::DeploymentGroup,
+                serde_json::json!({ "name": "orders", "root_id": cluster }),
+            ),
+            mig.clone(),
+            node.clone(),
+        ];
+        let m = run(
+            &resources,
+            &[
+                rel(node.arn.as_str(), Edge::InDeploymentGroup, &nodes),
+                rel(mig.arn.as_str(), Edge::InDeploymentGroup, &nodes),
+                rel(cluster, Edge::InDeploymentGroup, &nodes),
+                rel(
+                    node.arn.as_str(),
+                    Edge::MemberOfScaleGroup,
+                    mig.arn.as_str(),
+                ),
+            ],
+        );
+        assert_eq!(
+            wl(&m, node.arn.as_str()),
+            (
+                "orders".into(),
+                "default".into(),
+                GroupingSignal::DeploymentGroup
+            )
+        );
+        assert_eq!(wl(&m, cluster).0, "orders");
+    }
+}
