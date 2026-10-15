@@ -1,7 +1,8 @@
 # precip
 
 precip scans Amazon Web Services (AWS) accounts, Microsoft Azure
-subscriptions and Google Cloud projects, groups the resources it finds into workloads, sizes the Oxide sleds and racks those workloads need, and
+subscriptions, Google Cloud projects and Oracle Cloud Infrastructure (OCI)
+compartments, groups the resources it finds into workloads, sizes the Oxide sleds and racks those workloads need, and
 schedules each migration on a calendar. It ships as one static binary. The
 binary has a terminal user interface (TUI) and a command line. Both read
 and write the same SQLite file, so every action in one is available in the
@@ -29,9 +30,9 @@ make hooks          # install the prek git hooks
 The TUI opens with a workspace picker. A workspace holds one company's
 assessment in one SQLite file under `$XDG_DATA_HOME/precip/workspaces/`
 (`~/.local/share/precip/workspaces/` by default). One workspace can hold
-AWS, Azure and Google Cloud estates. `--cloud aws`, `--cloud azure` or
-`--cloud gcp` picks which one a scan reads; each cloud's selection flags
-imply it.
+AWS, Azure, Google Cloud and OCI estates. `--cloud aws`, `--cloud azure`,
+`--cloud gcp` or `--cloud oci` picks which one a scan reads; each cloud's
+selection flags imply it.
 
 ```
 precip --profile mgmt                         # open the TUI
@@ -44,6 +45,7 @@ precip --help                                 # list every command
 precip --cloud azure --workspace acme scan    # scan Azure without the TUI
 precip --workspace acme scan --tenant <id> --management-group prod
 precip --workspace acme scan --organization <number>   # scan Google Cloud
+precip --workspace acme --cloud oci scan               # scan OCI
 ```
 
 From an AWS Organizations management account, precip scans every active
@@ -81,6 +83,16 @@ have the Cloud Asset API enabled; set it with
 `GOOGLE_CLOUD_QUOTA_PROJECT`. The Cloud Asset Viewer, Browser and Compute
 Viewer roles are enough; a custom role with only the permissions precip
 uses is in `iam/gcp-precip-reader.yaml`.
+
+In OCI, precip scans every compartment the user can read in every region
+the tenancy subscribes to, or those named with `--compartment`,
+`--exclude-compartment` (by OCID or name) and `--oci-region`. It signs in
+with a profile of the OCI CLI's configuration file (`~/.oci/config`, or
+`OCI_CLI_CONFIG_FILE`): `--oci-profile`, else `OCI_CLI_PROFILE`, else
+`DEFAULT`. A profile with an API key signs each request with it; a
+profile with `security_token_file`, as `oci session authenticate` writes,
+signs with the session. Encrypted keys are not read. The policy
+statements precip needs are in `iam/oci-precip-policy.txt`.
 
 ## What precip does
 
@@ -122,6 +134,17 @@ clusters with their node groups, and 9 managed services: Cloud SQL,
 AlloyDB, Spanner, GKE, Cloud Run, Cloud Functions, Memorystore for Redis,
 Bigtable and Filestore. Network firewall policies and the members of
 unmanaged instance groups are not read.
+
+In OCI, precip asks Resource Search which compartments have resources in
+each region and records the rest as empty, as it does with AWS Resource
+Explorer. In each remaining compartment and region it collects instances,
+boot and block volumes with their attachments, the images in use,
+reserved public IPs, VCNs, subnets, security lists and network security
+groups with their rules, route tables, and internet and NAT gateways. Each
+instance's shape configuration gives its vCPUs and memory; a flexible
+shape is named with the OCPUs and memory chosen, such as
+`VM.Standard.E4.Flex/2ocpu-16gb`. Load balancers, instance pools and
+managed services are not yet read.
 
 precip keeps every scan and versions each resource by its content, so it
 can list what changed between two scans. A scan of one cloud leaves the
@@ -223,11 +246,12 @@ crates/precip-tui     the TUI (ratatui)
 crates/precip-aws     the AWS scanner
 crates/precip-azure   the Azure scanner
 crates/precip-gcp     the Google Cloud scanner
+crates/precip-oci     the OCI scanner
 crates/precip-collect the collector runner the scanners share
 crates/precip-db      the SQLite workspace: scans, plan events, projections, export
 crates/precip-engine  pure functions: grouping, sizing, scheduling, Gantt layout
 crates/precip-types   shared types
-iam/                  the AWS IAM policy and Azure and Google Cloud roles for scanning
+iam/                  the AWS and OCI policies and Azure and Google Cloud roles for scanning
 docs/rfd/             the design document
 ```
 

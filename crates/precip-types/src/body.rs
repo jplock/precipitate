@@ -161,16 +161,16 @@ macro_rules! bodies {
 
 bodies! {
     /// A cloud account: an AWS account in the Organization with its OU, an
-    /// Azure subscription with its management group, or a Google Cloud
-    /// project with its folder. Becomes an Oxide project's scope.
+    /// Azure subscription with its management group, a Google Cloud
+    /// project with its folder, or an OCI compartment with its parent.
     Account {
         name: String,
         status: String,
         parent_id: Option<String>,
         parent_name: Option<String>,
         /// The AWS partition (`aws`, `aws-us-gov`), Azure cloud
-        /// (`AzureCloud`, `AzureUSGovernment`) or `gcp` the account lives
-        /// in.
+        /// (`AzureCloud`, `AzureUSGovernment`), `gcp`, or OCI realm
+        /// (`oc1`) the account lives in.
         cloud: String,
     }
     /// A virtual machine, which becomes an `oxide_instance`. Scanners

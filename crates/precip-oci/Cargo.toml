@@ -1,0 +1,32 @@
+[package]
+name = "precip-oci"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Read-only Oracle Cloud Infrastructure discovery for precip"
+
+[dependencies]
+# Signs requests with RSA-SHA256; the same aws-lc-rs build rustls uses.
+aws-lc-rs = { workspace = true, features = ["aws-lc-sys", "prebuilt-nasm"] }
+base64 = { workspace = true, features = ["std"] }
+camino = { workspace = true }
+configparser = { workspace = true }
+http = { workspace = true, features = ["std"] }
+jiff = { workspace = true, features = ["std"] }
+precip-collect.workspace = true
+precip-types.workspace = true
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+uuid = { workspace = true, features = ["std", "v7"] }
+
+[dev-dependencies]
+precip-collect = { workspace = true, features = ["fake"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

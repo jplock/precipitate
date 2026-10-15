@@ -18,7 +18,7 @@ pub(crate) fn draw_overview(app: &App, frame: &mut Frame, area: Rect) {
                     Span::raw(" to scan the estate the current credentials can reach."),
                 ]),
                 Line::from(Span::styled(
-                    "  From an AWS Organization management account, every active member account; in Azure, every readable subscription; in Google Cloud, every active project.",
+                    "  From an AWS Organization management account, every active member account; in Azure, every readable subscription; in Google Cloud, every active project; in OCI, every readable compartment.",
                     dim(),
                 )),
             ])

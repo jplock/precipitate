@@ -5,11 +5,12 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use jiff::civil::Date;
 use precip_engine::schedule::Weekdays;
 use precip_engine::sizing::Assumptions;
-use precip_types::{AccountId, Provider};
+use precip_types::{AccountId, Provider, Region};
 
 use crate::commands::default_workspaces_dir;
 
-/// Scan AWS, Azure and Google Cloud estates and size them for Oxide racks. With no
+/// Scan AWS, Azure, Google Cloud and OCI estates and size them for Oxide
+/// racks. With no
 /// subcommand, opens the terminal interface.
 #[derive(Parser)]
 #[command(name = "precip", version)]
@@ -39,6 +40,7 @@ pub(crate) enum Cloud {
     Aws,
     Azure,
     Gcp,
+    Oci,
 }
 
 impl From<Cloud> for Provider {
@@ -47,6 +49,7 @@ impl From<Cloud> for Provider {
             Cloud::Aws => Provider::Aws,
             Cloud::Azure => Provider::Azure,
             Cloud::Gcp => Provider::Gcp,
+            Cloud::Oci => Provider::Oci,
         }
     }
 }
@@ -134,6 +137,20 @@ pub(crate) struct ScanArgs {
         help_heading = "Google Cloud"
     )]
     pub(crate) exclude_projects: Vec<AccountId>,
+
+    /// OCI CLI configuration profile to sign in with. Defaults to
+    /// OCI_CLI_PROFILE, else DEFAULT.
+    #[arg(long, global = true, help_heading = "OCI")]
+    pub(crate) oci_profile: Option<String>,
+    /// Scan only these compartments, by OCID or name (repeatable).
+    #[arg(long = "compartment", global = true, help_heading = "OCI")]
+    pub(crate) compartments: Vec<String>,
+    /// Skip these compartments, by OCID or name (repeatable).
+    #[arg(long = "exclude-compartment", global = true, help_heading = "OCI")]
+    pub(crate) exclude_compartments: Vec<String>,
+    /// Scan only these subscribed regions (repeatable).
+    #[arg(long = "oci-region", global = true, help_heading = "OCI")]
+    pub(crate) oci_regions: Vec<Region>,
 }
 
 impl ScanArgs {
@@ -159,6 +176,12 @@ impl ScanArgs {
             || !self.exclude_projects.is_empty()
     }
 
+    fn oci_selection(&self) -> bool {
+        !self.compartments.is_empty()
+            || !self.exclude_compartments.is_empty()
+            || !self.oci_regions.is_empty()
+    }
+
     /// The cloud the flags name: `--cloud`, else the one whose flags are
     /// given. `None` when nothing says.
     pub(crate) fn provider(&self) -> anyhow::Result<Option<Provider>> {
@@ -166,6 +189,7 @@ impl ScanArgs {
             (Provider::Aws, self.aws_selection() || self.profile.is_some()),
             (Provider::Azure, self.azure_selection()),
             (Provider::Gcp, self.gcp_selection()),
+            (Provider::Oci, self.oci_selection() || self.oci_profile.is_some()),
         ]
         .into_iter()
         .filter_map(|(p, given)| given.then_some(p))
@@ -193,6 +217,7 @@ impl ScanArgs {
             Provider::Aws => !self.aws_selection(),
             Provider::Azure => !self.azure_selection(),
             Provider::Gcp => !self.gcp_selection(),
+            Provider::Oci => !self.oci_selection(),
         }
     }
 
@@ -228,6 +253,14 @@ impl ScanArgs {
             exclude_projects: self.exclude_projects.clone(),
         }
     }
+
+    pub(crate) fn oci_options(&self) -> precip_oci::Options {
+        precip_oci::Options {
+            compartments: self.compartments.clone(),
+            exclude_compartments: self.exclude_compartments.clone(),
+            regions: self.oci_regions.clone(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -236,7 +269,8 @@ pub(crate) enum Command {
     /// the database, without the interface. In an AWS Organization
     /// management account this covers every active member account through
     /// the member role; in Azure, every subscription the sign-in can read;
-    /// in Google Cloud, every active project it can see.
+    /// in Google Cloud, every active project it can see; in OCI, every
+    /// compartment it can read in every subscribed region.
     Scan,
     /// Regroup the latest scan of a workspace into workloads without
     /// rescanning, and print the result.
@@ -719,5 +753,40 @@ mod tests {
         assert_eq!(opts.folder.as_deref(), Some("5"));
         assert_eq!(opts.projects, [AccountId::from("shop")]);
         assert_eq!(opts.exclude_projects, [AccountId::from("old")]);
+    }
+
+    #[test]
+    fn oci_flags_select_oci_and_a_profile_alone_keeps_the_saved_selection() {
+        assert_eq!(
+            provider(&["scan", "--compartment", "shop"]).unwrap(),
+            Some(Provider::Oci)
+        );
+        assert_eq!(
+            provider(&["--oci-profile", "prod", "scan"]).unwrap(),
+            Some(Provider::Oci)
+        );
+        assert!(
+            provider(&["scan", "--cloud", "oci", "--project", "p"]).is_err()
+        );
+        let cli =
+            Cli::try_parse_from(["precip", "--oci-profile", "prod", "scan"])
+                .unwrap();
+        assert!(cli.scan.is_default(Provider::Oci));
+        let cli = Cli::try_parse_from([
+            "precip",
+            "scan",
+            "--compartment",
+            "shop",
+            "--exclude-compartment",
+            "sandbox",
+            "--oci-region",
+            "us-ashburn-1",
+        ])
+        .unwrap();
+        assert!(!cli.scan.is_default(Provider::Oci));
+        let opts = cli.scan.oci_options();
+        assert_eq!(opts.compartments, ["shop"]);
+        assert_eq!(opts.exclude_compartments, ["sandbox"]);
+        assert_eq!(opts.regions, [Region::from("us-ashburn-1")]);
     }
 }

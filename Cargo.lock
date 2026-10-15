@@ -1287,6 +1287,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
+name = "configparser"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "031ad3d167622974ed636505ae4556267ed4aa2aea0464122fa6bc9698a32825"
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3056,8 +3062,10 @@ dependencies = [
  "precip-db",
  "precip-engine",
  "precip-gcp",
+ "precip-oci",
  "precip-tui",
  "precip-types",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -3166,6 +3174,26 @@ name = "precip-gcp"
 version = "0.1.0"
 dependencies = [
  "google-cloud-auth",
+ "http",
+ "jiff",
+ "precip-collect",
+ "precip-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "precip-oci"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "camino",
+ "configparser",
  "http",
  "jiff",
  "precip-collect",
