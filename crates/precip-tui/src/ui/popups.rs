@@ -1,6 +1,7 @@
 //! Popups, drawn over the tab in stack order.
 
 use super::{accent, dim, short_date, short_span, value, warn};
+use crate::workloads::merge_preview;
 use crate::{
     ActionMenu, App, DISPOSITIONS, DatePicker, DependsPicker,
     DispositionPicker, ExportPrompt, Fields, HistoryView, HolidayPicker,
@@ -573,18 +574,50 @@ pub(crate) fn draw_depends_picker(app: &mut App, frame: &mut Frame) {
 
 pub(crate) fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
     let Some(p) = app.popups.get::<MergePrompt>() else { return };
-    let popup = popup_rect(frame, 72, 6);
-    frame.render_widget(Clear, popup);
-    let lines = vec![
+    let into = p.text.trim();
+    let landing = merge_preview(&app.workloads, &p.alias, into);
+    let mut lines = vec![
         Line::from(vec![
             Span::raw(format!("{} is really part of ", p.alias)),
             value(format!("{}_", p.text)),
         ]),
-        Line::from(Span::styled(
-            "Its resources move to that workload when the scan is regrouped.",
-            dim(),
-        )),
+        Line::from(""),
     ];
+    // Each environment keeps its name; only the workload changes.
+    for (env, exists) in &landing {
+        let target = if into.is_empty() { "?" } else { into };
+        let mut spans = vec![
+            Span::raw(format!("  {env:<12}")),
+            Span::styled("→ ", dim()),
+            Span::raw(format!("{target} / {env}")),
+        ];
+        if !into.is_empty() {
+            spans.push(Span::styled(
+                if *exists {
+                    "   joins the existing pair"
+                } else {
+                    "   becomes a new pair"
+                },
+                dim(),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Resources move when the scan is regrouped and keep their environment.",
+        dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "The {} pairs' dispositions and migration settings stay behind.",
+            p.alias
+        ),
+        dim(),
+    )));
+    let height = u16::try_from(landing.len()).unwrap_or(4) + 9;
+    let popup = popup_rect(frame, 80, height);
+    frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(popup_block(
             "Fold into another workload".into(),

@@ -2,7 +2,7 @@
 //! one workload into another.
 
 use crate::{Action, App, Tab, TuiError};
-use precip_db::{DispositionChange, MemberDetail};
+use precip_db::{DispositionChange, MemberDetail, WorkloadSummary};
 use precip_types::Disposition;
 use ratatui::widgets::ListState;
 
@@ -10,6 +10,31 @@ use ratatui::widgets::ListState;
 pub(crate) struct MergePrompt {
     pub alias: String,
     pub text: String,
+}
+
+/// Where each environment of `alias` lands when it is folded into
+/// `into`: the environment, and whether `into` already has that pair. A
+/// merge renames the workload and keeps each resource's environment.
+pub(crate) fn merge_preview(
+    workloads: &[WorkloadSummary],
+    alias: &str,
+    into: &str,
+) -> Vec<(String, bool)> {
+    let mut envs: Vec<&str> = workloads
+        .iter()
+        .filter(|w| w.workload == alias)
+        .map(|w| w.environment.as_str())
+        .collect();
+    envs.sort_unstable();
+    envs.dedup();
+    envs.into_iter()
+        .map(|env| {
+            let exists = workloads
+                .iter()
+                .any(|w| w.workload == into && w.environment == env);
+            (env.to_string(), exists)
+        })
+        .collect()
 }
 
 /// What the disposition picker sets.
@@ -282,5 +307,42 @@ impl App {
             .block_on(store.merge_workload(&p.alias, &into))?;
         self.note(format!("{} is now part of {into}", p.alias));
         self.regroup()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use precip_types::Disposition;
+
+    fn pair(workload: &str, environment: &str) -> WorkloadSummary {
+        WorkloadSummary {
+            workload: workload.into(),
+            environment: environment.into(),
+            disposition: Disposition::Rehost,
+            resources: 1,
+            accounts: Vec::new(),
+            regions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_merge_keeps_each_environment_and_says_which_pairs_exist() {
+        let all = [
+            pair("inbox", "prod"),
+            pair("inbox", "dev"),
+            pair("ai", "prod"),
+            pair("other", "dev"),
+        ];
+        assert_eq!(
+            merge_preview(&all, "inbox", "ai"),
+            [("dev".to_string(), false), ("prod".to_string(), true)]
+        );
+        assert_eq!(
+            merge_preview(&all, "inbox", ""),
+            [("dev".to_string(), false), ("prod".to_string(), false)],
+            "nothing typed yet"
+        );
+        assert!(merge_preview(&all, "gone", "ai").is_empty());
     }
 }
