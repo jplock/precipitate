@@ -228,6 +228,16 @@ impl ActionMenu {
             self.confirming = None;
             return Outcome::Stay;
         }
+        // A number picks its row and chooses it, as Enter would. Pressing
+        // it again confirms an action that asks.
+        if let Some(row) = hotkey_row(code).filter(|r| *r < self.actions.len())
+        {
+            if self.state.selected() != Some(row) {
+                self.state.select(Some(row));
+                self.confirming = None;
+            }
+            return Outcome::Submit;
+        }
         if code == KeyCode::Enter { Outcome::Submit } else { Outcome::Stay }
     }
 }
@@ -246,6 +256,13 @@ impl ReasonPicker {
         }
         list_key(&mut self.state, Self::rows(), code)
     }
+}
+
+/// The row a number key picks: `1` is the first row, up to `9`.
+pub(crate) fn hotkey_row(code: KeyCode) -> Option<usize> {
+    let KeyCode::Char(c) = code else { return None };
+    let n = c.to_digit(10)?;
+    (1..=9).contains(&n).then(|| (n - 1) as usize)
 }
 
 /// Keys for a plain list: arrows move, Enter submits, Esc closes.
@@ -380,6 +397,7 @@ impl DispositionPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Action;
 
     fn history() -> HistoryView {
         HistoryView { events: Vec::new(), state: ListState::default() }
@@ -443,5 +461,43 @@ mod tests {
         assert_eq!(p.key(KeyCode::Backspace), Outcome::Stay);
         assert!(!p.confirming_overwrite);
         assert_eq!(p.text, "out.cs");
+    }
+
+    #[test]
+    fn number_keys_pick_their_row_and_choose_it() {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        let mut m = ActionMenu {
+            title: "t".into(),
+            workload: "w".into(),
+            environment: "e".into(),
+            actions: vec![
+                Action::ShowResources,
+                Action::Regroup,
+                Action::Prune,
+            ],
+            state,
+            confirming: Some(Action::ShowResources),
+        };
+        assert_eq!(m.key(KeyCode::Char('2')), Outcome::Submit);
+        assert_eq!(m.state.selected(), Some(1));
+        assert_eq!(
+            m.confirming, None,
+            "moving to another row clears a confirmation"
+        );
+        m.confirming = Some(Action::Regroup);
+        assert_eq!(m.key(KeyCode::Char('2')), Outcome::Submit);
+        assert_eq!(
+            m.confirming,
+            Some(Action::Regroup),
+            "the same number confirms"
+        );
+        assert_eq!(m.key(KeyCode::Char('4')), Outcome::Stay, "no fourth row");
+        assert_eq!(m.key(KeyCode::Char('0')), Outcome::Stay);
+        assert_eq!(m.state.selected(), Some(1));
+        assert_eq!(hotkey_row(KeyCode::Char('1')), Some(0));
+        assert_eq!(hotkey_row(KeyCode::Char('9')), Some(8));
+        assert_eq!(hotkey_row(KeyCode::Char('a')), None);
+        assert_eq!(hotkey_row(KeyCode::Enter), None);
     }
 }

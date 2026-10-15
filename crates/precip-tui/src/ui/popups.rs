@@ -113,13 +113,23 @@ pub(crate) fn draw_action_menu(app: &mut App, frame: &mut Frame) {
     let items: Vec<ListItem> = m
         .actions
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
+            // Rows past the ninth have no number key.
+            let key = if i < 9 {
+                format!("[{}] ", i + 1)
+            } else {
+                "    ".to_string()
+            };
             ListItem::new(vec![
-                Line::from(Span::styled(
-                    a.label(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(format!("  {}", a.help()), dim())),
+                Line::from(vec![
+                    Span::styled(key, accent()),
+                    Span::styled(
+                        a.label(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(Span::styled(format!("      {}", a.help()), dim())),
             ])
         })
         .collect();
@@ -128,7 +138,7 @@ pub(crate) fn draw_action_menu(app: &mut App, frame: &mut Frame) {
             format!("{}? enter again to confirm, esc to go back", a.label()),
             warn(),
         ),
-        None => ("enter to choose   esc to close".to_string(), dim()),
+        None => ("1-9 or enter to choose   esc to close".to_string(), dim()),
     };
     frame.render_stateful_widget(
         List::new(items)
