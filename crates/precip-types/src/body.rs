@@ -11,26 +11,26 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum Body {
     Account(Account),
-    Ec2Instance(Instance),
+    Instance(Instance),
     InstanceType(InstanceType),
-    EbsVolume(Volume),
-    Ami(Image),
-    Vpc(Vpc),
+    Volume(Volume),
+    Image(Image),
+    Network(Network),
     Subnet(Subnet),
     SecurityGroup(SecurityGroup),
     SecurityGroupRule(SecurityGroupRule),
     RouteTable(RouteTable),
     InternetGateway(InternetGateway),
     NatGateway(NatGateway),
-    VpcPeeringConnection(PeeringConnection),
+    PeeringConnection(PeeringConnection),
     PrefixList(PrefixList),
-    AutoScalingGroup(AutoScalingGroup),
+    ScaleGroup(ScaleGroup),
     LaunchTemplate(LaunchTemplate),
     LaunchConfiguration(LaunchConfiguration),
-    ElasticIp(ElasticIp),
+    PublicIp(PublicIp),
     LoadBalancer(LoadBalancer),
     TargetGroup(TargetGroup),
-    CloudFormationStack(Stack),
+    DeploymentGroup(DeploymentGroup),
     ManagedService(Managed),
 }
 
@@ -38,26 +38,26 @@ impl Body {
     pub fn kind(&self) -> ResourceKind {
         match self {
             Self::Account(_) => ResourceKind::Account,
-            Self::Ec2Instance(_) => ResourceKind::Ec2Instance,
+            Self::Instance(_) => ResourceKind::Instance,
             Self::InstanceType(_) => ResourceKind::InstanceType,
-            Self::EbsVolume(_) => ResourceKind::EbsVolume,
-            Self::Ami(_) => ResourceKind::Ami,
-            Self::Vpc(_) => ResourceKind::Vpc,
+            Self::Volume(_) => ResourceKind::Volume,
+            Self::Image(_) => ResourceKind::Image,
+            Self::Network(_) => ResourceKind::Network,
             Self::Subnet(_) => ResourceKind::Subnet,
             Self::SecurityGroup(_) => ResourceKind::SecurityGroup,
             Self::SecurityGroupRule(_) => ResourceKind::SecurityGroupRule,
             Self::RouteTable(_) => ResourceKind::RouteTable,
             Self::InternetGateway(_) => ResourceKind::InternetGateway,
             Self::NatGateway(_) => ResourceKind::NatGateway,
-            Self::VpcPeeringConnection(_) => ResourceKind::VpcPeeringConnection,
+            Self::PeeringConnection(_) => ResourceKind::PeeringConnection,
             Self::PrefixList(_) => ResourceKind::PrefixList,
-            Self::AutoScalingGroup(_) => ResourceKind::AutoScalingGroup,
+            Self::ScaleGroup(_) => ResourceKind::ScaleGroup,
             Self::LaunchTemplate(_) => ResourceKind::LaunchTemplate,
             Self::LaunchConfiguration(_) => ResourceKind::LaunchConfiguration,
-            Self::ElasticIp(_) => ResourceKind::ElasticIp,
+            Self::PublicIp(_) => ResourceKind::PublicIp,
             Self::LoadBalancer(_) => ResourceKind::LoadBalancer,
             Self::TargetGroup(_) => ResourceKind::TargetGroup,
-            Self::CloudFormationStack(_) => ResourceKind::CloudFormationStack,
+            Self::DeploymentGroup(_) => ResourceKind::DeploymentGroup,
             Self::ManagedService(_) => ResourceKind::ManagedService,
         }
     }
@@ -67,26 +67,26 @@ impl Body {
         match self {
             Self::Account(b) => Some(&b.name),
             Self::InstanceType(b) => Some(&b.name),
-            Self::Ami(b) => b.name.as_deref(),
+            Self::Image(b) => b.name.as_deref(),
+            Self::Network(b) => b.name.as_deref(),
             Self::PrefixList(b) => b.name.as_deref(),
-            Self::AutoScalingGroup(b) => b.name.as_deref(),
+            Self::ScaleGroup(b) => b.name.as_deref(),
             Self::LaunchTemplate(b) => b.name.as_deref(),
             Self::LaunchConfiguration(b) => b.name.as_deref(),
             Self::LoadBalancer(b) => b.name.as_deref(),
             Self::TargetGroup(b) => b.name.as_deref(),
-            Self::CloudFormationStack(b) => b.name.as_deref(),
+            Self::DeploymentGroup(b) => b.name.as_deref(),
             Self::ManagedService(b) => b.name.as_deref(),
-            Self::Ec2Instance(_)
-            | Self::EbsVolume(_)
-            | Self::Vpc(_)
+            Self::Instance(_)
+            | Self::Volume(_)
             | Self::Subnet(_)
             | Self::SecurityGroup(_)
             | Self::SecurityGroupRule(_)
             | Self::RouteTable(_)
             | Self::InternetGateway(_)
             | Self::NatGateway(_)
-            | Self::VpcPeeringConnection(_)
-            | Self::ElasticIp(_) => None,
+            | Self::PeeringConnection(_)
+            | Self::PublicIp(_) => None,
         }
     }
 
@@ -94,7 +94,7 @@ impl Body {
     /// launch template or a launch configuration.
     pub fn launch_source(&self) -> Option<(Option<&str>, Option<&str>)> {
         match self {
-            Self::Ec2Instance(b) => {
+            Self::Instance(b) => {
                 Some((b.instance_type.as_deref(), b.image_id.as_deref()))
             }
             Self::LaunchTemplate(b) => {
@@ -105,22 +105,22 @@ impl Body {
             }
             Self::Account(_)
             | Self::InstanceType(_)
-            | Self::EbsVolume(_)
-            | Self::Ami(_)
-            | Self::Vpc(_)
+            | Self::Volume(_)
+            | Self::Image(_)
+            | Self::Network(_)
             | Self::Subnet(_)
             | Self::SecurityGroup(_)
             | Self::SecurityGroupRule(_)
             | Self::RouteTable(_)
             | Self::InternetGateway(_)
             | Self::NatGateway(_)
-            | Self::VpcPeeringConnection(_)
+            | Self::PeeringConnection(_)
             | Self::PrefixList(_)
-            | Self::AutoScalingGroup(_)
-            | Self::ElasticIp(_)
+            | Self::ScaleGroup(_)
+            | Self::PublicIp(_)
             | Self::LoadBalancer(_)
             | Self::TargetGroup(_)
-            | Self::CloudFormationStack(_)
+            | Self::DeploymentGroup(_)
             | Self::ManagedService(_) => None,
         }
     }
@@ -160,31 +160,42 @@ macro_rules! bodies {
 }
 
 bodies! {
-    /// An AWS account in the Organization, with its OU.
+    /// A cloud account: an AWS account in the Organization with its OU, or
+    /// an Azure subscription with its management group.
     Account {
         name: String,
         status: String,
         parent_id: Option<String>,
         parent_name: Option<String>,
-        partition: String,
+        /// The AWS partition (`aws`, `aws-us-gov`) or Azure cloud
+        /// (`AzureCloud`, `AzureUSGovernment`) the account lives in.
+        cloud: String,
     }
+    /// A virtual machine. Scanners normalise `architecture` to `x86_64` or
+    /// `arm64` and `boot_mode` to `legacy-bios` or `uefi` where they can.
     Instance {
         instance_id: String,
         instance_type: Option<String>,
         architecture: Option<String>,
+        /// The operating system as the provider reports it. Every Windows
+        /// variant starts with `Windows`.
         platform: Option<String>,
         state: Option<String>,
         image_id: Option<String>,
         subnet_id: Option<String>,
-        vpc_id: Option<String>,
+        network_id: Option<String>,
         boot_mode: Option<String>,
-        current_boot_mode: Option<String>,
         launch_time: Option<String>,
-        ebs_volume_count: usize,
-        instance_store_volume_count: usize,
+        /// Network-attached data and OS disks.
+        volume_count: usize,
+        /// Disks on the host that do not survive a stop, such as EC2
+        /// instance store.
+        local_disk_count: usize,
         network_interface_count: usize,
         public_ip: Option<String>,
     }
+    /// vCPU and memory for a machine size seen in a region: an EC2
+    /// instance type or an Azure VM size.
     InstanceType {
         name: String,
         vcpus: Option<i32>,
@@ -193,7 +204,7 @@ bodies! {
         bare_metal: Option<bool>,
         gpus: usize,
         accelerators: usize,
-        instance_storage_gb: Option<i64>,
+        local_storage_gb: Option<i64>,
         network_performance: Option<String>,
     }
     Volume {
@@ -203,7 +214,7 @@ bodies! {
         iops: Option<i32>,
         throughput: Option<i32>,
         encrypted: Option<bool>,
-        kms_key_id: Option<String>,
+        encryption_key_id: Option<String>,
         state: Option<String>,
         attached_to: Vec<String>,
     }
@@ -220,8 +231,12 @@ bodies! {
         public: Option<bool>,
         state: Option<String>,
     }
-    Vpc {
-        vpc_id: String,
+    /// A VPC or a virtual network.
+    Network {
+        network_id: String,
+        /// The network's own name, for providers that name networks
+        /// outside their tags.
+        name: Option<String>,
         cidr_block: Option<String>,
         cidr_blocks: Vec<String>,
         is_default: Option<bool>,
@@ -229,24 +244,29 @@ bodies! {
     }
     Subnet {
         subnet_id: String,
-        vpc_id: Option<String>,
+        network_id: Option<String>,
         cidr_block: Option<String>,
         ipv6_cidr_blocks: Vec<String>,
         availability_zone: Option<String>,
         map_public_ip_on_launch: Option<bool>,
     }
+    /// An EC2 security group or an Azure network security group.
     SecurityGroup {
         group_id: String,
         group_name: Option<String>,
         description: Option<String>,
-        vpc_id: Option<String>,
+        network_id: Option<String>,
     }
-    /// One rule, with its source kept distinct: CIDR, prefix list or
-    /// another security group.
+    /// One rule, with its source kept distinct: CIDR, prefix list (or
+    /// Azure service tag) or another security group.
     SecurityGroupRule {
         rule_id: String,
         group_id: Option<String>,
         egress: Option<bool>,
+        /// Azure rules can deny; EC2 rules only allow.
+        deny: bool,
+        /// Azure evaluates rules in priority order, lowest first.
+        priority: Option<i32>,
         ip_protocol: Option<String>,
         from_port: Option<i32>,
         to_port: Option<i32>,
@@ -258,7 +278,7 @@ bodies! {
     }
     RouteTable {
         route_table_id: String,
-        vpc_id: Option<String>,
+        network_id: Option<String>,
         main: bool,
         subnets: Vec<String>,
         routes: Vec<Route>,
@@ -270,28 +290,29 @@ bodies! {
     }
     InternetGateway {
         internet_gateway_id: String,
-        vpcs: Vec<String>,
+        networks: Vec<String>,
     }
     NatGateway {
         nat_gateway_id: String,
-        vpc_id: Option<String>,
+        network_id: Option<String>,
         subnet_id: Option<String>,
         state: Option<String>,
         connectivity: Option<String>,
         public_ips: Vec<String>,
     }
     PeeringConnection {
-        vpc_peering_connection_id: String,
+        peering_id: String,
         status: Option<String>,
         requester: PeeringSide,
         accepter: PeeringSide,
     }
     PeeringSide {
-        vpc_id: Option<String>,
+        network_id: Option<String>,
         owner_id: Option<String>,
         region: Option<String>,
         cidr_block: Option<String>,
     }
+    /// An AWS managed prefix list or an Azure IP group.
     PrefixList {
         prefix_list_id: String,
         name: Option<String>,
@@ -299,7 +320,8 @@ bodies! {
         address_family: Option<String>,
         entries: Vec<String>,
     }
-    AutoScalingGroup {
+    /// An Auto Scaling group or a VM scale set.
+    ScaleGroup {
         name: Option<String>,
         min_size: Option<i32>,
         desired_capacity: Option<i32>,
@@ -308,7 +330,7 @@ bodies! {
         launch_template_id: Option<String>,
         launch_configuration_name: Option<String>,
         launch_template_version: Option<String>,
-        /// Mixed-instance overrides, sorted and distinct.
+        /// The machine sizes the group launches, sorted and distinct.
         instance_types: Vec<String>,
     }
     /// The launch template version an Auto Scaling group points at.
@@ -326,7 +348,8 @@ bodies! {
         image_id: Option<String>,
         created: Option<String>,
     }
-    ElasticIp {
+    /// An Elastic IP or an Azure public IP address.
+    PublicIp {
         allocation_id: String,
         public_ip: Option<String>,
         instance_id: Option<String>,
@@ -338,20 +361,23 @@ bodies! {
         #[serde(rename = "type")]
         lb_type: Option<String>,
         scheme: Option<String>,
-        vpc_id: Option<String>,
+        network_id: Option<String>,
         dns_name: Option<String>,
         security_groups: Vec<String>,
     }
+    /// A target group or a load balancer backend pool.
     TargetGroup {
         name: Option<String>,
         target_type: Option<String>,
         protocol: Option<String>,
         port: Option<i32>,
-        vpc_id: Option<String>,
-        load_balancer_arns: Vec<String>,
+        network_id: Option<String>,
+        load_balancers: Vec<String>,
         instance_targets: usize,
     }
-    Stack {
+    /// A unit resources are deployed in together: a CloudFormation stack
+    /// or an Azure resource group.
+    DeploymentGroup {
         name: Option<String>,
         parent_id: Option<String>,
         root_id: Option<String>,
@@ -369,47 +395,72 @@ pub struct Managed {
     pub service: Service,
 }
 
-/// Which managed service, with the fields its list call returns.
+/// Which kind of managed service, with the fields its list call returns.
+/// `product` names the provider's service, such as `rds` or
+/// `postgresql_flexible`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "service", rename_all = "lowercase")]
+#[serde(tag = "service", rename_all = "snake_case")]
 pub enum Service {
-    Rds {
+    Database {
+        product: String,
         engine: Option<String>,
         engine_version: Option<String>,
         instance_class: Option<String>,
         allocated_storage_gib: Option<i32>,
-        multi_az: Option<bool>,
-        vpc_id: Option<String>,
+        high_availability: Option<bool>,
+        network_id: Option<String>,
     },
-    Eks,
-    Ecs,
-    Lambda {
+    Kubernetes {
+        product: String,
+    },
+    Containers {
+        product: String,
+    },
+    Functions {
+        product: String,
         runtime: Option<String>,
         memory_mib: Option<i32>,
-        vpc_id: Option<String>,
+        network_id: Option<String>,
     },
-    ElastiCache {
+    Cache {
+        product: String,
         engine: Option<String>,
         node_type: Option<String>,
         nodes: Option<i32>,
     },
-    DynamoDb,
-    Efs {
+    KeyValue {
+        product: String,
+    },
+    FileShare {
+        product: String,
         size_bytes: Option<i64>,
     },
 }
 
 impl Service {
-    /// The service's name, as stored in the body.
+    /// The kind of service, as stored in the body.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Rds { .. } => "rds",
-            Self::Eks => "eks",
-            Self::Ecs => "ecs",
-            Self::Lambda { .. } => "lambda",
-            Self::ElastiCache { .. } => "elasticache",
-            Self::DynamoDb => "dynamodb",
-            Self::Efs { .. } => "efs",
+            Self::Database { .. } => "database",
+            Self::Kubernetes { .. } => "kubernetes",
+            Self::Containers { .. } => "containers",
+            Self::Functions { .. } => "functions",
+            Self::Cache { .. } => "cache",
+            Self::KeyValue { .. } => "key_value",
+            Self::FileShare { .. } => "file_share",
+        }
+    }
+
+    /// The provider's name for the service.
+    pub fn product(&self) -> &str {
+        match self {
+            Self::Database { product, .. }
+            | Self::Kubernetes { product }
+            | Self::Containers { product }
+            | Self::Functions { product, .. }
+            | Self::Cache { product, .. }
+            | Self::KeyValue { product }
+            | Self::FileShare { product, .. } => product,
         }
     }
 }

@@ -48,7 +48,8 @@ pub struct DispositionChange {
 pub struct MemberDetail {
     pub arn: String,
     pub kind: String,
-    /// For managed services, which service: lambda, dynamodb, rds, ...
+    /// For managed services, the provider's product: lambda, dynamodb,
+    /// rds, ...
     pub service: Option<String>,
     pub name: String,
     pub account_id: String,
@@ -662,7 +663,7 @@ impl Store {
                     arn,
                     kind: row.try_get("kind")?,
                     service: body
-                        .get("service")
+                        .get("product")
                         .and_then(|v| v.as_str())
                         .map(str::to_string),
                     name,

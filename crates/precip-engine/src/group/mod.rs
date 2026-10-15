@@ -64,9 +64,9 @@ impl<'a> Index<'a> {
         let by_arn: HashMap<&str, &Resource> =
             input.resources.iter().map(|r| (r.arn.as_str(), r)).collect();
 
-        // AWS tooling stacks all collapse into one platform workload.
+        // Cloud tooling groups all collapse into one platform workload.
         let is_platform = |name: &str| {
-            cfg.platform_stack_prefixes
+            cfg.platform_group_prefixes
                 .iter()
                 .any(|p| name.to_lowercase().starts_with(&p.to_lowercase()))
         };
@@ -75,7 +75,7 @@ impl<'a> Index<'a> {
         let mut vpc_names = HashMap::new();
         for r in input.resources {
             match &r.body {
-                Body::CloudFormationStack(stack) => {
+                Body::DeploymentGroup(stack) => {
                     let root = stack
                         .root_id
                         .as_deref()
@@ -100,34 +100,35 @@ impl<'a> Index<'a> {
                         },
                     );
                 }
-                Body::Vpc(vpc) => {
-                    if let Some(name) = r.tags.get("Name") {
+                Body::Network(vpc) => {
+                    let name = r.tags.get("Name").or(vpc.name.as_ref());
+                    if let Some(name) = name {
                         vpc_names.insert(
                             (
                                 r.account_id.as_str(),
                                 r.region.as_str(),
-                                vpc.vpc_id.as_str(),
+                                vpc.network_id.as_str(),
                             ),
                             name.as_str(),
                         );
                     }
                 }
-                Body::Ec2Instance(_)
+                Body::Instance(_)
                 | Body::InstanceType(_)
-                | Body::EbsVolume(_)
-                | Body::Ami(_)
+                | Body::Volume(_)
+                | Body::Image(_)
                 | Body::Subnet(_)
                 | Body::SecurityGroup(_)
                 | Body::SecurityGroupRule(_)
                 | Body::RouteTable(_)
                 | Body::InternetGateway(_)
                 | Body::NatGateway(_)
-                | Body::VpcPeeringConnection(_)
+                | Body::PeeringConnection(_)
                 | Body::PrefixList(_)
-                | Body::AutoScalingGroup(_)
+                | Body::ScaleGroup(_)
                 | Body::LaunchTemplate(_)
                 | Body::LaunchConfiguration(_)
-                | Body::ElasticIp(_)
+                | Body::PublicIp(_)
                 | Body::LoadBalancer(_)
                 | Body::TargetGroup(_)
                 | Body::ManagedService(_) => {}
@@ -171,10 +172,10 @@ impl<'a> Index<'a> {
             .map(|(_, other)| *other)
     }
 
-    /// The root stack a resource belongs to: by an `in_stack` edge from
+    /// The root stack a resource belongs to: by an `in_deployment_group` edge from
     /// `ListStackResources`, else by the stack-id tag CloudFormation sets.
     fn stack_of(&self, r: &Resource) -> Option<&str> {
-        self.related(r.arn.as_str(), Edge::InStack, Direction::Out)
+        self.related(r.arn.as_str(), Edge::InDeploymentGroup, Direction::Out)
             .find_map(|stack| self.stack_root_name.get(stack))
             .or_else(|| {
                 r.tags
@@ -184,10 +185,11 @@ impl<'a> Index<'a> {
             .map(String::as_str)
     }
 
-    /// The Name tag of the VPC an instance is in, else the VPC id.
+    /// The name of the network an instance is in: its `Name` tag, else
+    /// its own name, else its id.
     fn vpc_name(&self, r: &'a Resource) -> Option<&'a str> {
-        let Body::Ec2Instance(instance) = &r.body else { return None };
-        let id = instance.vpc_id.as_deref()?;
+        let Body::Instance(instance) = &r.body else { return None };
+        let id = instance.network_id.as_deref()?;
         Some(
             self.vpc_names
                 .get(&(r.account_id.as_str(), r.region.as_str(), id))
@@ -288,7 +290,7 @@ impl<'a> Grouper<'a> {
 
     fn run(&self) -> Vec<WorkloadMember> {
         let mut members: Vec<WorkloadMember> = self
-            .resources(ResourceKind::Ec2Instance)
+            .resources(ResourceKind::Instance)
             .map(|r| self.resolve(self.place_instance(r)))
             .collect();
         let managed = self.place_managed_services(&members);
@@ -327,15 +329,19 @@ impl<'a> Grouper<'a> {
         let index = &self.index;
         let asg = || {
             index
-                .related(r.arn.as_str(), Edge::MemberOfAsg, Direction::Out)
+                .related(
+                    r.arn.as_str(),
+                    Edge::MemberOfScaleGroup,
+                    Direction::Out,
+                )
                 .find_map(|arn| index.get(arn))
                 .map(|g| match index.stack_of(g) {
                     Some(root) => {
-                        (root.to_string(), GroupingSignal::CloudFormationStack)
+                        (root.to_string(), GroupingSignal::DeploymentGroup)
                     }
                     None => (
                         g.name().unwrap_or(g.arn.as_str()).to_string(),
-                        GroupingSignal::AutoScalingGroup,
+                        GroupingSignal::ScaleGroup,
                     ),
                 })
         };
@@ -360,7 +366,7 @@ impl<'a> Grouper<'a> {
         let (raw, signal) = if let Some(name) = r.first_tag(&[OVERRIDE_TAG]) {
             (name.to_string(), GroupingSignal::OverrideTag)
         } else if let Some(root) = index.stack_of(r) {
-            (root.to_string(), GroupingSignal::CloudFormationStack)
+            (root.to_string(), GroupingSignal::DeploymentGroup)
         } else if let Some((name, signal)) = asg() {
             (name, signal)
         } else if let Some(name) = target_group() {
@@ -368,7 +374,7 @@ impl<'a> Grouper<'a> {
         } else if let Some(name) = r.first_tag(&self.cfg.workload_tags) {
             (name.to_string(), GroupingSignal::Tag)
         } else if let Some(name) = index.vpc_name(r) {
-            (name.to_string(), GroupingSignal::Vpc)
+            (name.to_string(), GroupingSignal::Network)
         } else {
             ("unassigned".to_string(), GroupingSignal::Unassigned)
         };
@@ -454,7 +460,7 @@ impl<'a> Grouper<'a> {
         };
         let siblings = ctx.siblings(i);
         let (slug, signal) = if let Some(root) = self.index.stack_of(r) {
-            (Slug::new(root), GroupingSignal::CloudFormationStack)
+            (Slug::new(root), GroupingSignal::DeploymentGroup)
         } else if let Some(name) = r.first_tag(&self.cfg.workload_tags) {
             (Slug::new(name), GroupingSignal::Tag)
         } else if let Some(prefix) = own.longest_prefix(&ctx.strong_names) {
@@ -512,8 +518,11 @@ impl<'a> Grouper<'a> {
             Some((stripped, env)) if env == environment => stripped,
             Some(_) | None => p.slug,
         };
-        let workload =
-            WorkloadName::from(workload.without_layer(&cfg.layer_tokens));
+        let workload = WorkloadName::from(
+            workload
+                .without_layer(&cfg.layer_tokens)
+                .without_kind_prefix(&cfg.kind_prefixes),
+        );
         let workload =
             self.input.aliases.get(&workload).cloned().unwrap_or(workload);
 
@@ -567,7 +576,7 @@ impl<'a> Grouper<'a> {
             if let Some(root) = self.index.stack_of(r) {
                 out.push(self.resolve(Placed::new(
                     r,
-                    GroupingSignal::CloudFormationStack,
+                    GroupingSignal::DeploymentGroup,
                     Slug::new(root),
                     self.cfg,
                 )));

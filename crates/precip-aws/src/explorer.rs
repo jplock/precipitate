@@ -54,19 +54,10 @@ impl Explorer {
     /// Find the account's aggregator index and default view. `None` when
     /// Resource Explorer is not set up or not permitted.
     pub(crate) async fn discover(config: &SdkConfig) -> Option<Self> {
-        // ListIndexes answers from any region; it returns indexes in all of
-        // them. The aggregator index is the one that can search across
-        // regions.
-        let probe = config
-            .to_builder()
-            .region(
-                config
-                    .region()
-                    .cloned()
-                    .unwrap_or_else(|| aws_config::Region::new("us-east-1")),
-            )
-            .build();
-        let client = aws_sdk_resourceexplorer2::Client::new(&probe);
+        // ListIndexes answers from any region of the partition; it returns
+        // indexes in all of them. The aggregator index is the one that can
+        // search across regions.
+        let client = aws_sdk_resourceexplorer2::Client::new(config);
         let indexes = match client.list_indexes().send().await {
             Ok(out) => out,
             Err(e) => {

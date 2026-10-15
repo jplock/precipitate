@@ -11,7 +11,9 @@ pub mod scan;
 
 pub use body::Body;
 pub use profile::Profile;
-pub use scan::{Relationship, Resource, ResourceKind, Scan, ScanTarget};
+pub use scan::{
+    Provider, Relationship, Resource, ResourceKind, Scan, ScanTarget,
+};
 
 mod disposition;
 pub use disposition::Disposition;

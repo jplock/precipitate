@@ -6,8 +6,8 @@ use crate::schema::{
     RelationshipVersions, ResourceVersions, ScanTargets, Scans,
 };
 use crate::{DbError, Store};
-use precip_types::Scan;
 use precip_types::scan::{Relationship, Resource, TargetStatus};
+use precip_types::{Provider, Scan};
 use sea_query::{Expr, ExprTrait, Func, OnConflict, Order, Query};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -32,9 +32,10 @@ pub struct ScanStats {
 pub struct ScanSummary {
     pub id: String,
     pub seq: i64,
+    pub provider: Provider,
     pub started: jiff::Timestamp,
     pub finished: Option<jiff::Timestamp>,
-    pub caller_arn: String,
+    pub caller: String,
 }
 
 /// Counts for the overview screen at one scan.
@@ -78,7 +79,8 @@ pub(crate) struct Current {
 
 impl Store {
     /// Record a scan. Inserts the scan row, upserts resource and
-    /// relationship versions, and returns what changed.
+    /// relationship versions of the scan's provider, carries the other
+    /// providers' live rows forward, and returns what changed.
     pub async fn record_scan(&self, scan: &Scan) -> Result<ScanStats, DbError> {
         let mut tx = self.pool.begin().await?;
 
@@ -87,9 +89,10 @@ impl Store {
             .columns([
                 Scans::Id,
                 Scans::Seq,
+                Scans::Provider,
                 Scans::Started,
                 Scans::Finished,
-                Scans::CallerArn,
+                Scans::Caller,
             ])
             .values_panic([
                 scan.id.clone().into(),
@@ -105,9 +108,10 @@ impl Store {
                         .from(Scans::Table)
                         .take(),
                 ),
+                scan.provider.as_str().into(),
                 scan.started.to_string().into(),
                 scan.finished.map(|t| t.to_string()).into(),
-                scan.caller_arn.as_str().into(),
+                scan.caller.as_str().into(),
             ]))
         .bound()
         .execute(&mut *tx)
@@ -149,6 +153,26 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
+
+        // The other providers were not read, so what they had at the
+        // previous scan is still there.
+        let provider = scan.provider.as_str();
+        (Query::update()
+            .table(ResourceVersions::Table)
+            .value(ResourceVersions::LastSeenSeq, seq)
+            .and_where(Expr::col(ResourceVersions::LastSeenSeq).eq(seq - 1))
+            .and_where(Expr::col(ResourceVersions::Provider).ne(provider)))
+        .bound()
+        .execute(&mut *tx)
+        .await?;
+        (Query::update()
+            .table(RelationshipVersions::Table)
+            .value(RelationshipVersions::LastSeenSeq, seq)
+            .and_where(Expr::col(RelationshipVersions::LastSeenSeq).eq(seq - 1))
+            .and_where(Expr::col(RelationshipVersions::Provider).ne(provider)))
+        .bound()
+        .execute(&mut *tx)
+        .await?;
 
         // Latest version of every ARN, loaded once.
         let rows = (Query::select()
@@ -239,6 +263,7 @@ impl Store {
                 .columns([
                     ResourceVersions::Arn,
                     ResourceVersions::Version,
+                    ResourceVersions::Provider,
                     ResourceVersions::Kind,
                     ResourceVersions::AccountId,
                     ResourceVersions::Region,
@@ -251,6 +276,7 @@ impl Store {
                 .values_panic([
                     r.arn.as_str().into(),
                     next_version.into(),
+                    provider.into(),
                     r.kind().as_str().into(),
                     r.account_id.as_str().into(),
                     r.region.as_str().into(),
@@ -276,9 +302,8 @@ impl Store {
                 RelationshipVersions::LastSeenSeq,
             ])
             .from(RelationshipVersions::Table)
-            .and_where(
-                Expr::col(RelationshipVersions::LastSeenSeq).eq(seq - 1),
-            ))
+            .and_where(Expr::col(RelationshipVersions::LastSeenSeq).eq(seq - 1))
+            .and_where(Expr::col(RelationshipVersions::Provider).eq(provider)))
         .bound()
         .fetch_all(&mut *tx)
         .await?;
@@ -326,6 +351,7 @@ impl Store {
                         RelationshipVersions::FromArn,
                         RelationshipVersions::Edge,
                         RelationshipVersions::ToArn,
+                        RelationshipVersions::Provider,
                         RelationshipVersions::FirstSeenSeq,
                         RelationshipVersions::LastSeenSeq,
                     ])
@@ -333,6 +359,7 @@ impl Store {
                         key.0.clone().into(),
                         key.1.clone().into(),
                         key.2.clone().into(),
+                        provider.into(),
                         seq.into(),
                         seq.into(),
                     ])
@@ -361,9 +388,10 @@ impl Store {
             .columns([
                 Scans::Id,
                 Scans::Seq,
+                Scans::Provider,
                 Scans::Started,
                 Scans::Finished,
-                Scans::CallerArn,
+                Scans::Caller,
             ])
             .from(Scans::Table)
             .order_by(Scans::Seq, Order::Desc))
@@ -376,9 +404,10 @@ impl Store {
                 Ok(ScanSummary {
                     id: row.try_get("id")?,
                     seq: row.try_get("seq")?,
+                    provider: row.parsed("provider")?,
                     started: row.parsed("started")?,
                     finished: finished.map(|s| s.parse()).transpose()?,
-                    caller_arn: row.try_get("caller_arn")?,
+                    caller: row.try_get("caller")?,
                 })
             })
             .collect()

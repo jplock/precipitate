@@ -32,6 +32,7 @@ pub(crate) async fn enabled_regions(
 pub(crate) struct Instances;
 
 impl Collect for Instances {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeInstances";
 
     async fn collect(
@@ -80,13 +81,13 @@ impl Collect for Instances {
                         );
                     }
                     let mappings = inst.block_device_mappings();
-                    let instance_store_volume_count =
+                    let local_disk_count =
                         mappings.iter().filter(|b| b.ebs().is_none()).count();
                     out.resources.push(
                         ctx.resource(
                             arn,
                             tags(inst.tags()),
-                            Body::Ec2Instance(body::Instance {
+                            Body::Instance(body::Instance {
                                 instance_id: id.to_string(),
                                 instance_type: own(inst
                                     .instance_type()
@@ -98,19 +99,18 @@ impl Collect for Instances {
                                 state: own(state.map(|n| n.as_str())),
                                 image_id: own(inst.image_id()),
                                 subnet_id: own(inst.subnet_id()),
-                                vpc_id: own(inst.vpc_id()),
+                                network_id: own(inst.vpc_id()),
+                                // The mode the instance booted in, else the
+                                // one its image asks for.
                                 boot_mode: own(inst
-                                    .boot_mode()
-                                    .map(|b| b.as_str())),
-                                current_boot_mode: own(inst
                                     .current_instance_boot_mode()
-                                    .map(|b| b.as_str())),
+                                    .map(|b| b.as_str())
+                                    .or(inst.boot_mode().map(|b| b.as_str()))),
                                 launch_time: inst
                                     .launch_time()
                                     .map(|t| t.to_string()),
-                                ebs_volume_count: mappings.len()
-                                    - instance_store_volume_count,
-                                instance_store_volume_count,
+                                volume_count: mappings.len() - local_disk_count,
+                                local_disk_count,
                                 network_interface_count: inst
                                     .network_interfaces()
                                     .len(),
@@ -130,6 +130,7 @@ impl Collect for Instances {
 pub(crate) struct InstanceTypes;
 
 impl Collect for InstanceTypes {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeInstanceTypes";
     const STAGE: Stage = Stage::Second;
 
@@ -143,7 +144,7 @@ impl Collect for InstanceTypes {
             if let Some((Some(ty), _)) = b.launch_source() {
                 types.push(ty);
             }
-            if let Body::AutoScalingGroup(g) = b {
+            if let Body::ScaleGroup(g) = b {
                 types.extend(g.instance_types.iter().map(String::as_str));
             }
             types
@@ -193,7 +194,7 @@ impl Collect for InstanceTypes {
                             accelerators: it
                                 .inference_accelerator_info()
                                 .map_or(0, |g| g.accelerators().len()),
-                            instance_storage_gb: it
+                            local_storage_gb: it
                                 .instance_storage_info()
                                 .and_then(|s| s.total_size_in_gb()),
                             network_performance: own(it
@@ -211,6 +212,7 @@ impl Collect for InstanceTypes {
 pub(crate) struct Volumes;
 
 impl Collect for Volumes {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeVolumes";
 
     async fn collect(
@@ -228,7 +230,7 @@ impl Collect for Volumes {
                     ctx.resource(
                         ctx.arn(ArnType::Volume, id),
                         tags(vol.tags()),
-                        Body::EbsVolume(body::Volume {
+                        Body::Volume(body::Volume {
                             volume_id: id.to_string(),
                             size_gib: vol.size(),
                             volume_type: own(vol
@@ -237,7 +239,7 @@ impl Collect for Volumes {
                             iops: vol.iops(),
                             throughput: vol.throughput(),
                             encrypted: vol.encrypted(),
-                            kms_key_id: own(vol.kms_key_id()),
+                            encryption_key_id: own(vol.kms_key_id()),
                             state: own(vol.state().map(|s| s.as_str())),
                             attached_to: owned(
                                 vol.attachments()
@@ -258,6 +260,7 @@ impl Collect for Volumes {
 pub(crate) struct Images;
 
 impl Collect for Images {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeImages";
     const STAGE: Stage = Stage::Second;
 
@@ -286,7 +289,7 @@ impl Collect for Images {
                 out.resources.push(ctx.resource(
                     ctx.arn(ArnType::Image, id),
                     tags(img.tags()),
-                    Body::Ami(body::Image {
+                    Body::Image(body::Image {
                         image_id: id.to_string(),
                         name: own(img.name()),
                         owner_id: own(img.owner_id()),
@@ -316,6 +319,7 @@ impl Collect for Images {
 pub(crate) struct Addresses;
 
 impl Collect for Addresses {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeAddresses";
 
     async fn collect(
@@ -343,7 +347,7 @@ impl Collect for Addresses {
             out.resources.push(ctx.resource(
                 arn,
                 tags(a.tags()),
-                Body::ElasticIp(body::ElasticIp {
+                Body::PublicIp(body::PublicIp {
                     allocation_id: id.to_string(),
                     public_ip: own(a.public_ip()),
                     instance_id: own(a.instance_id()),

@@ -12,6 +12,7 @@ use crate::collect::{
 pub(crate) struct Vpcs;
 
 impl Collect for Vpcs {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeVpcs";
 
     async fn collect(
@@ -29,8 +30,10 @@ impl Collect for Vpcs {
                     ctx.resource(
                         ctx.arn(ArnType::Vpc, id),
                         tags(vpc.tags()),
-                        Body::Vpc(body::Vpc {
-                            vpc_id: id.to_string(),
+                        Body::Network(body::Network {
+                            network_id: id.to_string(),
+                            // VPCs are named by their Name tag.
+                            name: None,
                             cidr_block: own(vpc.cidr_block()),
                             cidr_blocks: owned(
                                 vpc.cidr_block_association_set()
@@ -51,6 +54,7 @@ impl Collect for Vpcs {
 pub(crate) struct Subnets;
 
 impl Collect for Subnets {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeSubnets";
 
     async fn collect(
@@ -70,7 +74,7 @@ impl Collect for Subnets {
                         tags(s.tags()),
                         Body::Subnet(body::Subnet {
                             subnet_id: id.to_string(),
-                            vpc_id: own(s.vpc_id()),
+                            network_id: own(s.vpc_id()),
                             cidr_block: own(s.cidr_block()),
                             ipv6_cidr_blocks: owned(
                                 s.ipv6_cidr_block_association_set()
@@ -92,6 +96,7 @@ impl Collect for Subnets {
 pub(crate) struct SecurityGroups;
 
 impl Collect for SecurityGroups {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeSecurityGroups";
 
     async fn collect(
@@ -112,7 +117,7 @@ impl Collect for SecurityGroups {
                         group_id: id.to_string(),
                         group_name: own(sg.group_name()),
                         description: own(sg.description()),
-                        vpc_id: own(sg.vpc_id()),
+                        network_id: own(sg.vpc_id()),
                     }),
                 ));
             }
@@ -127,6 +132,7 @@ impl Collect for SecurityGroups {
 pub(crate) struct SecurityGroupRules;
 
 impl Collect for SecurityGroupRules {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeSecurityGroupRules";
 
     async fn collect(
@@ -159,6 +165,8 @@ impl Collect for SecurityGroupRules {
                             rule_id: id.to_string(),
                             group_id: own(rule.group_id()),
                             egress: rule.is_egress(),
+                            deny: false,
+                            priority: None,
                             ip_protocol: own(rule.ip_protocol()),
                             from_port: rule.from_port(),
                             to_port: rule.to_port(),
@@ -181,6 +189,7 @@ impl Collect for SecurityGroupRules {
 pub(crate) struct RouteTables;
 
 impl Collect for RouteTables {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeRouteTables";
 
     async fn collect(
@@ -218,7 +227,7 @@ impl Collect for RouteTables {
                         tags(rt.tags()),
                         Body::RouteTable(body::RouteTable {
                             route_table_id: id.to_string(),
-                            vpc_id: own(rt.vpc_id()),
+                            network_id: own(rt.vpc_id()),
                             main: rt
                                 .associations()
                                 .iter()
@@ -241,6 +250,7 @@ impl Collect for RouteTables {
 pub(crate) struct InternetGateways;
 
 impl Collect for InternetGateways {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeInternetGateways";
 
     async fn collect(
@@ -260,7 +270,7 @@ impl Collect for InternetGateways {
                     tags(igw.tags()),
                     Body::InternetGateway(body::InternetGateway {
                         internet_gateway_id: id.to_string(),
-                        vpcs: owned(
+                        networks: owned(
                             igw.attachments().iter().filter_map(|a| a.vpc_id()),
                         ),
                     }),
@@ -274,6 +284,7 @@ impl Collect for InternetGateways {
 pub(crate) struct NatGateways;
 
 impl Collect for NatGateways {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeNatGateways";
 
     async fn collect(
@@ -293,7 +304,7 @@ impl Collect for NatGateways {
                         tags(nat.tags()),
                         Body::NatGateway(body::NatGateway {
                             nat_gateway_id: id.to_string(),
-                            vpc_id: own(nat.vpc_id()),
+                            network_id: own(nat.vpc_id()),
                             subnet_id: own(nat.subnet_id()),
                             state: own(nat.state().map(|s| s.as_str())),
                             connectivity: own(nat
@@ -316,6 +327,7 @@ impl Collect for NatGateways {
 pub(crate) struct PeeringConnections;
 
 impl Collect for PeeringConnections {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeVpcPeeringConnections";
 
     async fn collect(
@@ -336,7 +348,7 @@ impl Collect for PeeringConnections {
                     &aws_sdk_ec2::types::VpcPeeringConnectionVpcInfo,
                 >| {
                     body::PeeringSide {
-                        vpc_id: own(v.and_then(|x| x.vpc_id())),
+                        network_id: own(v.and_then(|x| x.vpc_id())),
                         owner_id: own(v.and_then(|x| x.owner_id())),
                         region: own(v.and_then(|x| x.region())),
                         cidr_block: own(v.and_then(|x| x.cidr_block())),
@@ -346,8 +358,8 @@ impl Collect for PeeringConnections {
                     ctx.resource(
                         ctx.arn(ArnType::VpcPeeringConnection, id),
                         tags(pc.tags()),
-                        Body::VpcPeeringConnection(body::PeeringConnection {
-                            vpc_peering_connection_id: id.to_string(),
+                        Body::PeeringConnection(body::PeeringConnection {
+                            peering_id: id.to_string(),
                             status: own(pc
                                 .status()
                                 .and_then(|s| s.code())
@@ -369,6 +381,7 @@ impl Collect for PeeringConnections {
 pub(crate) struct PrefixLists;
 
 impl Collect for PrefixLists {
+    type Context = RegionContext;
     const API: &'static str = "ec2:GetManagedPrefixListEntries";
     const STAGE: Stage = Stage::Second;
 

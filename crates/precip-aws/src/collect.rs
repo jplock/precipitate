@@ -1,21 +1,20 @@
-//! The shape every AWS collector shares. A collector is one service's
-//! describe calls for one region. The region scanner runs each collector,
-//! records failures by API name, logs what came back, and merges it.
+//! What AWS collectors share beyond the common runner: the region
+//! context, SDK pagination and SDK tags.
 
 use aws_config::SdkConfig;
 use aws_smithy_async::future::pagination_stream::PaginationStream;
-use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
+use precip_collect::Collector;
+pub(crate) use precip_collect::{
+    Collect, CollectError, Collected, Stage, own, owned,
+};
+use precip_types::scan::Resource;
 use precip_types::{Arn, Body, Region};
-use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
-use std::pin::Pin;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::accounts::CallerIdentity;
 use crate::arn::ArnType;
 use crate::{autoscaling, cloudformation, ec2, elb, managed, tagging, vpc};
-
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Everything a collector needs for one region.
 pub(crate) struct RegionContext {
@@ -54,106 +53,6 @@ impl RegionContext {
     }
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct Collected {
-    pub resources: Vec<Resource>,
-    pub relationships: Vec<Relationship>,
-    /// Tags to merge into resources collected earlier, by ARN. Existing
-    /// keys are kept; missing ones are added.
-    pub tag_updates: Vec<(Arn, BTreeMap<String, String>)>,
-}
-
-impl Collected {
-    /// Fold another collector's output into this one.
-    pub(crate) fn absorb(&mut self, other: Collected) {
-        if !other.tag_updates.is_empty() {
-            let by_arn: HashMap<Arn, usize> = self
-                .resources
-                .iter()
-                .enumerate()
-                .map(|(i, r)| (r.arn.clone(), i))
-                .collect();
-            for (arn, tags) in other.tag_updates {
-                if let Some(&i) = by_arn.get(&arn) {
-                    for (k, v) in tags {
-                        self.resources[i].tags.entry(k).or_insert(v);
-                    }
-                }
-            }
-        }
-        self.resources.extend(other.resources);
-        self.relationships.extend(other.relationships);
-    }
-
-    /// Resources of one kind collected so far.
-    pub(crate) fn of_kind(
-        &self,
-        kind: ResourceKind,
-    ) -> impl Iterator<Item = &Resource> {
-        self.resources.iter().filter(move |r| r.kind() == kind)
-    }
-
-    /// The distinct values `field` picks out of the bodies collected so
-    /// far, sorted.
-    pub(crate) fn distinct<'a, I>(
-        &'a self,
-        field: impl Fn(&'a Body) -> I,
-    ) -> Vec<String>
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        let mut v: Vec<String> = self
-            .resources
-            .iter()
-            .flat_map(|r| field(&r.body))
-            .map(str::to_string)
-            .collect();
-        v.sort();
-        v.dedup();
-        v
-    }
-
-    /// Add an edge between two resources.
-    pub(crate) fn relate(&mut self, from: Arn, edge: Edge, to: Arn) {
-        self.relationships.push(Relationship {
-            from_arn: from,
-            edge,
-            to_arn: to,
-        });
-    }
-}
-
-/// An SDK string as an owned body field.
-pub(crate) fn own(s: Option<&str>) -> Option<String> {
-    s.map(str::to_string)
-}
-
-/// SDK strings as an owned body list.
-pub(crate) fn owned<'a>(
-    items: impl IntoIterator<Item = &'a str>,
-) -> Vec<String> {
-    items.into_iter().map(str::to_string).collect()
-}
-
-/// One failed API call, named so the report can say which permission or
-/// service was the problem.
-#[derive(Debug, thiserror::Error)]
-#[error("{api}")]
-pub(crate) struct CollectError {
-    pub api: &'static str,
-    #[source]
-    pub source: Box<dyn std::error::Error + Send + Sync>,
-}
-
-impl CollectError {
-    pub(crate) fn new<E>(api: &'static str) -> impl FnOnce(E) -> Self
-    where
-        E: std::error::Error + Send + Sync + 'static,
-    {
-        move |e| Self { api, source: Box::new(e) }
-    }
-}
-
 /// The next page of a paginated call, with a failure named after `api`.
 pub(crate) async fn next_page<P, E>(
     api: &'static str,
@@ -163,61 +62,6 @@ where
     E: std::error::Error + Send + Sync + 'static,
 {
     pages.next().await.transpose().map_err(CollectError::new(api))
-}
-
-/// When a collector runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stage {
-    /// Concurrently with the other first-stage collectors.
-    First,
-    /// After the first stage, one at a time in [`all`] order, reading
-    /// everything collected before it.
-    Second,
-}
-
-/// A collector as it is written: a describe call for one region.
-pub(crate) trait Collect: Send + Sync + 'static {
-    /// The API the collector calls, used in logs and partial-scan reports.
-    const API: &'static str;
-    const STAGE: Stage = Stage::First;
-
-    /// `prior` holds everything collectors earlier in [`all`] produced for
-    /// this region, so a second-stage collector can describe only what is
-    /// referenced (images in use, instance types in use).
-    fn collect(
-        &self,
-        ctx: &RegionContext,
-        prior: &Collected,
-    ) -> impl Future<Output = Result<Collected, CollectError>> + Send;
-}
-
-/// A collector as the region scanner holds it.
-pub(crate) trait Collector: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn stage(&self) -> Stage;
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>>;
-}
-
-impl<T: Collect> Collector for T {
-    fn name(&self) -> &'static str {
-        T::API
-    }
-
-    fn stage(&self) -> Stage {
-        T::STAGE
-    }
-
-    fn collect<'a>(
-        &'a self,
-        ctx: &'a RegionContext,
-        prior: &'a Collected,
-    ) -> BoxFuture<'a, Result<Collected, CollectError>> {
-        Box::pin(Collect::collect(self, ctx, prior))
-    }
 }
 
 /// A tag as one of the SDKs models it.
@@ -273,7 +117,7 @@ pub(crate) fn tags<'a, T: SdkTag + 'a>(
 
 /// Every collector. Second-stage collectors run after the rest, in this
 /// order.
-pub(crate) fn all() -> Vec<Arc<dyn Collector>> {
+pub(crate) fn all() -> Vec<Arc<dyn Collector<RegionContext>>> {
     vec![
         Arc::new(ec2::Instances),
         Arc::new(ec2::Volumes),

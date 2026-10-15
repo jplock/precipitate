@@ -9,7 +9,8 @@ use std::str::FromStr;
 precip_types::named_enum! {
     /// A key in the settings table.
     pub(crate) enum Setting {
-        ScanOptions = "scan.options",
+        AwsScanOptions = "scan.options.aws",
+        AzureScanOptions = "scan.options.azure",
         SizingProfile = "sizing.profile",
         DefaultDisposition = "default_disposition",
         PerDay = "schedule.per_day",

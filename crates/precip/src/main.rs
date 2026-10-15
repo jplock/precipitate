@@ -30,11 +30,13 @@ mod commands;
 mod schedule;
 
 /// Logs to stderr. `RUST_LOG` selects levels; the default shows precip at
-/// info and hides the AWS SDK's own chatter.
+/// info and hides the cloud SDKs' own chatter.
 pub(crate) fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {
-            tracing_subscriber::EnvFilter::new("info,aws=warn,hyper=warn")
+            tracing_subscriber::EnvFilter::new(
+                "info,aws=warn,hyper=warn,azure_core=warn,azure_identity=warn,typespec_client_core=warn",
+            )
         });
     tracing_subscriber::fmt()
         .with_env_filter(filter)

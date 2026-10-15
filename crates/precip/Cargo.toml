@@ -19,6 +19,8 @@ clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-
 jiff = { workspace = true, features = ["std", "tz-system"] }
 mimalloc = { workspace = true, features = ["secure"] }
 precip-aws.workspace = true
+precip-azure.workspace = true
+precip-collect.workspace = true
 precip-db.workspace = true
 precip-tui.workspace = true
 precip-engine.workspace = true

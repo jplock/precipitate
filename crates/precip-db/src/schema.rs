@@ -10,7 +10,8 @@ pub(crate) enum Scans {
     Seq,
     Started,
     Finished,
-    CallerArn,
+    Provider,
+    Caller,
 }
 
 #[derive(Iden)]
@@ -28,6 +29,7 @@ pub(crate) enum ResourceVersions {
     Table,
     Arn,
     Version,
+    Provider,
     Kind,
     AccountId,
     Region,
@@ -44,6 +46,7 @@ pub(crate) enum RelationshipVersions {
     FromArn,
     Edge,
     ToArn,
+    Provider,
     FirstSeenSeq,
     LastSeenSeq,
 }

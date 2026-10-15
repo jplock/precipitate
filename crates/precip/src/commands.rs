@@ -5,7 +5,7 @@ use camino::Utf8PathBuf;
 use precip_db::{DispositionSource, Store, Trigger, export};
 use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_tui::workspace::WorkspaceDir;
-use precip_types::Disposition;
+use precip_types::{Disposition, Provider};
 
 use crate::cli::{Cli, ExportWhat, PairArgs, ScanArgs, SizingArgs};
 use crate::schedule::today;
@@ -55,20 +55,94 @@ pub(crate) fn default_workspaces_dir() -> Utf8PathBuf {
         .unwrap_or_else(|| Utf8PathBuf::from(".precip").join("workspaces"))
 }
 
+/// One cloud estate to scan: how to sign in and what to select.
+#[derive(Clone)]
+pub(crate) enum Estate {
+    Aws { config: Box<aws_config::SdkConfig>, opts: precip_aws::Options },
+    Azure { credential: precip_azure::Credential, opts: precip_azure::Options },
+}
+
+impl Estate {
+    /// The estate `provider` names, signed in with the flags' profile or
+    /// tenant.
+    pub(crate) async fn load(
+        provider: Provider,
+        args: &ScanArgs,
+        aws: precip_aws::Options,
+        azure: precip_azure::Options,
+    ) -> anyhow::Result<Self> {
+        Ok(match provider {
+            Provider::Aws => Self::Aws {
+                config: Box::new(
+                    precip_aws::load_config(args.profile.as_deref()).await,
+                ),
+                opts: aws,
+            },
+            Provider::Azure => Self::Azure {
+                credential: precip_azure::load_credential(
+                    azure.tenant.as_deref(),
+                    azure.cloud,
+                )
+                .context("loading Azure credentials")?,
+                opts: azure,
+            },
+        })
+    }
+
+    fn provider(&self) -> Provider {
+        match self {
+            Self::Aws { .. } => Provider::Aws,
+            Self::Azure { .. } => Provider::Azure,
+        }
+    }
+
+    fn options_json(&self) -> serde_json::Result<String> {
+        match self {
+            Self::Aws { opts, .. } => serde_json::to_string(opts),
+            Self::Azure { opts, .. } => serde_json::to_string(opts),
+        }
+    }
+
+    async fn scan(
+        &self,
+        progress: Option<precip_collect::ProgressSender>,
+    ) -> anyhow::Result<precip_types::Scan> {
+        Ok(match self {
+            Self::Aws { config, opts } => {
+                precip_aws::scan_estate(config, opts, progress).await?
+            }
+            Self::Azure { credential, opts } => {
+                precip_azure::scan_estate(credential, opts, progress).await?
+            }
+        })
+    }
+
+    /// What the interface's header says the scan reads.
+    pub(crate) fn describe(&self, args: &ScanArgs) -> String {
+        match self {
+            Self::Aws { .. } => match &args.profile {
+                Some(p) => format!("aws profile {p}"),
+                None => "aws default chain".into(),
+            },
+            Self::Azure { opts, .. } => match &opts.tenant {
+                Some(t) => format!("{} tenant {t}", opts.cloud.name()),
+                None => format!("{} sign-in", opts.cloud.name()),
+            },
+        }
+    }
+}
+
 /// Scan, store, and group. Shared by the headless command and the TUI.
 pub(crate) async fn scan_and_store(
-    config: aws_config::SdkConfig,
-    opts: precip_aws::Options,
+    estate: Estate,
     store: precip_db::Store,
-    progress: Option<precip_aws::ProgressSender>,
+    progress: Option<precip_collect::ProgressSender>,
 ) -> anyhow::Result<precip_db::ScanStats> {
     store
-        .save_scan_options(&serde_json::to_string(&opts)?)
+        .save_scan_options(estate.provider(), &estate.options_json()?)
         .await
         .context("saving the scan selection")?;
-    let scan = precip_aws::scan_estate(&config, &opts, progress)
-        .await
-        .context("scanning estate")?;
+    let scan = estate.scan(progress).await.context("scanning estate")?;
     let stats = store.record_scan(&scan).await.context("storing scan")?;
     let grouped = store
         .group_scan(&scan.id, &precip_types::GroupingConfig::default())
@@ -110,7 +184,7 @@ pub(crate) async fn scan_and_store(
             workload = %f.workload,
             environment = %f.environment,
             remaining = f.remaining,
-            "marked migrated but compute is still in AWS"
+            "marked migrated but compute is still in the cloud"
         );
     }
     Ok(stats)
@@ -188,24 +262,52 @@ pub(crate) async fn scan(env: &Env, args: &ScanArgs) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {parent}"))?;
     }
-    let config = precip_aws::load_config(args.profile.as_deref()).await;
     let store = precip_db::Store::open(&db)
         .await
         .with_context(|| format!("opening {db}"))?;
-    // With no selection on the command line, repeat the last one.
-    let opts = if args.is_default() {
-        match store.saved_scan_options().await? {
-            Some(json) => {
-                tracing::info!("using the workspace's saved scan selection");
-                serde_json::from_str(&json)
-                    .context("reading the saved scan selection")?
+    // With no cloud named, rescan every cloud that has a saved selection.
+    let providers = match args.provider()? {
+        Some(p) => vec![p],
+        None => {
+            let mut saved = Vec::new();
+            for p in Provider::ALL {
+                if store.saved_scan_options(*p).await?.is_some() {
+                    saved.push(*p);
+                }
             }
-            None => args.options(),
+            if saved.is_empty() { vec![Provider::Aws] } else { saved }
         }
-    } else {
-        args.options()
     };
-    scan_and_store(config, opts, store, None).await?;
+    for provider in providers {
+        // With no selection on the command line, repeat the last one.
+        let saved = if args.is_default(provider) {
+            store.saved_scan_options(provider).await?
+        } else {
+            None
+        };
+        if saved.is_some() {
+            tracing::info!(%provider, "using the workspace's saved scan selection");
+        }
+        let estate = match provider {
+            Provider::Aws => {
+                let opts = match &saved {
+                    Some(j) => serde_json::from_str(j)
+                        .context("reading the saved AWS scan selection")?,
+                    None => args.aws_options(),
+                };
+                Estate::load(provider, args, opts, args.azure_options()).await?
+            }
+            Provider::Azure => {
+                let opts = match &saved {
+                    Some(j) => serde_json::from_str(j)
+                        .context("reading the saved Azure scan selection")?,
+                    None => args.azure_options(),
+                };
+                Estate::load(provider, args, args.aws_options(), opts).await?
+            }
+        };
+        scan_and_store(estate, store.clone(), None).await?;
+    }
     Ok(())
 }
 
@@ -215,23 +317,24 @@ pub(crate) async fn tui(env: Env, args: &ScanArgs) -> anyhow::Result<()> {
     if std::env::var_os("RUST_LOG").is_some() {
         init_tracing();
     }
-    let config = precip_aws::load_config(args.profile.as_deref()).await;
-    let opts = args.options();
+    let provider = args.provider()?.unwrap_or(Provider::Aws);
+    let estate =
+        Estate::load(provider, args, args.aws_options(), args.azure_options())
+            .await?;
+    let context = precip_tui::Context {
+        target: estate.describe(args),
+        workspace: String::new(),
+    };
     let launcher: precip_tui::Launcher = Box::new(move |store| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let config = config.clone();
-        let opts = opts.clone();
+        let estate = estate.clone();
         let done = tokio::spawn(async move {
-            scan_and_store(config, opts, store, Some(tx))
+            scan_and_store(estate, store, Some(tx))
                 .await
                 .map_err(|e| format!("{e:#}"))
         });
         precip_tui::ScanHandle { events: rx, done }
     });
-    let context = precip_tui::Context {
-        profile: args.profile.clone(),
-        workspace: String::new(),
-    };
     tokio::task::block_in_place(|| {
         let app = precip_tui::App::new(env.dir, env.db, context, launcher)?;
         app.run()
@@ -375,13 +478,14 @@ pub(crate) async fn scans(env: &Env) -> anyhow::Result<()> {
     let store = env.store("scans").await?;
     for s in store.list_scans().await? {
         out!(
-            "#{:<4} {}  {}  {}",
+            "#{:<4} {:<6} {}  {}  {}",
             s.seq,
+            s.provider,
             s.started.strftime("%Y-%m-%d %H:%M"),
             s.finished
                 .map(|f| f.strftime("%H:%M").to_string())
                 .unwrap_or_else(|| "unfinished".into()),
-            s.caller_arn
+            s.caller
         );
     }
     Ok(())

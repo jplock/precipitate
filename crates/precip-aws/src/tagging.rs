@@ -13,6 +13,7 @@ use crate::collect::{
 pub(crate) struct Tags;
 
 impl Collect for Tags {
+    type Context = RegionContext;
     const API: &'static str = "tag:GetResources";
     const STAGE: Stage = Stage::Second;
 

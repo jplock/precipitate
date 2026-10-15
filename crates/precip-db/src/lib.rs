@@ -6,7 +6,9 @@
 //! Resources are stored as versions. A new row is written only when a
 //! resource first appears or its content changes; otherwise the existing
 //! row's `last_seen_seq` advances. Presence at scan `n` is
-//! `first_seen_seq <= n <= last_seen_seq`.
+//! `first_seen_seq <= n <= last_seen_seq`. Each scan reads one provider;
+//! recording it carries the other providers' live rows forward, so
+//! presence at a scan covers every provider.
 
 pub mod export;
 mod kinds;

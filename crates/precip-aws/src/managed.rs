@@ -30,6 +30,7 @@ impl RegionContext {
 pub(crate) struct Rds;
 
 impl Collect for Rds {
+    type Context = RegionContext;
     const API: &'static str = "rds:DescribeDBInstances";
 
     async fn collect(
@@ -47,13 +48,14 @@ impl Collect for Rds {
                     Arn::from(arn),
                     db.db_instance_identifier(),
                     tags(db.tag_list()),
-                    body::Service::Rds {
+                    body::Service::Database {
+                        product: "rds".into(),
                         engine: own(db.engine()),
                         engine_version: own(db.engine_version()),
                         instance_class: own(db.db_instance_class()),
                         allocated_storage_gib: db.allocated_storage(),
-                        multi_az: db.multi_az(),
-                        vpc_id: own(
+                        high_availability: db.multi_az(),
+                        network_id: own(
                             db.db_subnet_group().and_then(|g| g.vpc_id()),
                         ),
                     },
@@ -67,6 +69,7 @@ impl Collect for Rds {
 pub(crate) struct Eks;
 
 impl Collect for Eks {
+    type Context = RegionContext;
     const API: &'static str = "eks:ListClusters";
 
     async fn collect(
@@ -83,7 +86,7 @@ impl Collect for Eks {
                     ctx.arn(ArnType::EksCluster, name),
                     Some(name),
                     BTreeMap::new(),
-                    body::Service::Eks,
+                    body::Service::Kubernetes { product: "eks".into() },
                 ));
             }
         }
@@ -94,6 +97,7 @@ impl Collect for Eks {
 pub(crate) struct Ecs;
 
 impl Collect for Ecs {
+    type Context = RegionContext;
     const API: &'static str = "ecs:ListClusters";
 
     async fn collect(
@@ -110,7 +114,7 @@ impl Collect for Ecs {
                     Arn::from(arn.as_str()),
                     arn.rsplit('/').next(),
                     BTreeMap::new(),
-                    body::Service::Ecs,
+                    body::Service::Containers { product: "ecs".into() },
                 ));
             }
         }
@@ -121,6 +125,7 @@ impl Collect for Ecs {
 pub(crate) struct Lambda;
 
 impl Collect for Lambda {
+    type Context = RegionContext;
     const API: &'static str = "lambda:ListFunctions";
 
     async fn collect(
@@ -138,10 +143,13 @@ impl Collect for Lambda {
                     Arn::from(arn),
                     f.function_name(),
                     BTreeMap::new(),
-                    body::Service::Lambda {
+                    body::Service::Functions {
+                        product: "lambda".into(),
                         runtime: own(f.runtime().map(|r| r.as_str())),
                         memory_mib: f.memory_size(),
-                        vpc_id: own(f.vpc_config().and_then(|v| v.vpc_id())),
+                        network_id: own(
+                            f.vpc_config().and_then(|v| v.vpc_id()),
+                        ),
                     },
                 ));
             }
@@ -153,6 +161,7 @@ impl Collect for Lambda {
 pub(crate) struct ElastiCache;
 
 impl Collect for ElastiCache {
+    type Context = RegionContext;
     const API: &'static str = "elasticache:DescribeCacheClusters";
 
     async fn collect(
@@ -171,7 +180,8 @@ impl Collect for ElastiCache {
                     Arn::from(arn),
                     c.cache_cluster_id(),
                     BTreeMap::new(),
-                    body::Service::ElastiCache {
+                    body::Service::Cache {
+                        product: "elasticache".into(),
                         engine: own(c.engine()),
                         node_type: own(c.cache_node_type()),
                         nodes: c.num_cache_nodes(),
@@ -186,6 +196,7 @@ impl Collect for ElastiCache {
 pub(crate) struct DynamoDb;
 
 impl Collect for DynamoDb {
+    type Context = RegionContext;
     const API: &'static str = "dynamodb:ListTables";
 
     async fn collect(
@@ -202,7 +213,7 @@ impl Collect for DynamoDb {
                     ctx.arn(ArnType::DynamoDbTable, name),
                     Some(name),
                     BTreeMap::new(),
-                    body::Service::DynamoDb,
+                    body::Service::KeyValue { product: "dynamodb".into() },
                 ));
             }
         }
@@ -213,6 +224,7 @@ impl Collect for DynamoDb {
 pub(crate) struct Efs;
 
 impl Collect for Efs {
+    type Context = RegionContext;
     const API: &'static str = "elasticfilesystem:DescribeFileSystems";
 
     async fn collect(
@@ -230,7 +242,8 @@ impl Collect for Efs {
                     Arn::from(arn),
                     fs.name(),
                     tags(fs.tags()),
-                    body::Service::Efs {
+                    body::Service::FileShare {
+                        product: "efs".into(),
                         size_bytes: fs.size_in_bytes().map(|s| s.value()),
                     },
                 ));

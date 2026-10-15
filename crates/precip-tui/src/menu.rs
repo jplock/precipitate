@@ -33,7 +33,7 @@ impl Action {
             Action::ChangeDate => "Agree a different date",
             Action::Done => "It's done",
             Action::DidNotHappen => "It didn't happen",
-            Action::RolledBack => "It was rolled back to AWS",
+            Action::RolledBack => "It was rolled back to the cloud",
             Action::ShowResources => "Show its resources",
             Action::ChangeDisposition => "Change its disposition",
             Action::PairSettings => "Its migration settings",

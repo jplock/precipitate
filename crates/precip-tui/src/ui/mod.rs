@@ -153,20 +153,15 @@ pub(crate) fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     };
     let mut lines = vec![
         kv("workspace", app.context.workspace.clone()),
-        kv(
-            "profile",
-            app.context
-                .profile
-                .clone()
-                .unwrap_or_else(|| "default chain".into()),
-        ),
+        kv("scans", app.context.target.clone()),
         kv(
             "last scan",
             latest
                 .map(|s| {
                     format!(
-                        "#{} on {}",
+                        "#{} {} on {}",
                         s.seq,
+                        s.provider,
                         s.started.strftime("%Y-%m-%d %H:%M UTC")
                     )
                 })
@@ -176,11 +171,7 @@ pub(crate) fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     if let Some(s) = latest {
         lines.push(kv(
             "caller",
-            s.caller_arn
-                .rsplit('/')
-                .next()
-                .unwrap_or(&s.caller_arn)
-                .to_string(),
+            s.caller.rsplit('/').next().unwrap_or(&s.caller).to_string(),
         ));
     }
     let status = match &app.progress {

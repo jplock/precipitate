@@ -59,7 +59,7 @@ pub(crate) fn disposition_help(d: Disposition) -> &'static str {
         }
         Disposition::Refactor => "re-architect before or during the move",
         Disposition::Repurchase => "replace with a different product",
-        Disposition::Retain => "leave in AWS for now",
+        Disposition::Retain => "leave in the cloud for now",
         Disposition::Retire => "decommission",
     }
 }

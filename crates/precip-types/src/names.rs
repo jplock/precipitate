@@ -1,4 +1,4 @@
-//! Names for things precip reads from AWS or the user, as their own types
+//! Names for things precip reads from a cloud provider or the user, as their own types
 //! so a workload name cannot be passed where an account id belongs. Each
 //! serializes as a plain string, so stored data does not change.
 
@@ -184,16 +184,17 @@ string_name!(
     EnvName
 );
 string_name!(
-    /// A 12-digit AWS account id.
+    /// A 12-digit AWS account id or an Azure subscription id.
     AccountId
 );
 string_name!(
-    /// An AWS region, such as `us-east-1`, or `global` for resources that
+    /// A region, such as `us-east-1` or `eastus`, or `global` for resources that
     /// belong to no region.
     Region
 );
 string_name!(
-    /// An Amazon Resource Name.
+    /// A resource's unique id: an Amazon Resource Name or a lowercased
+    /// Azure resource id.
     Arn
 );
 
