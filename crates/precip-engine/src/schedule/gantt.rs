@@ -62,18 +62,18 @@ pub struct Row {
 
 /// A month name over the column where the month starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MonthLabel {
-    pub column: usize,
-    pub label: String,
+pub(crate) struct MonthLabel {
+    pub(crate) column: usize,
+    pub(crate) label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gantt {
     /// The date the first column starts on.
-    pub start: Date,
+    pub(crate) start: Date,
     pub unit: CellUnit,
-    pub columns: usize,
-    pub months: Vec<MonthLabel>,
+    pub(crate) columns: usize,
+    pub(crate) months: Vec<MonthLabel>,
     /// Column holding today, when it is in range.
     pub today: Option<usize>,
     pub rows: Vec<Row>,

@@ -54,13 +54,13 @@ impl WorkspaceDir {
         Ok(entries)
     }
 
-    pub fn ensure(&self) -> std::io::Result<()> {
+    pub(crate) fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.0)
     }
 }
 
 /// Names become file stems, so keep them to a safe character set.
-pub fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name

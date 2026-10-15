@@ -1,6 +1,6 @@
 //! Domain types shared by the scanner, store, sizing engine and TUI.
 
-pub mod names;
+mod names;
 pub use names::{
     AccountId, Arn, EnvName, PairKey, Region, UnknownName, WorkloadName,
 };
@@ -13,11 +13,11 @@ pub use body::Body;
 pub use profile::Profile;
 pub use scan::{Relationship, Resource, ResourceKind, Scan, ScanTarget};
 
-pub mod disposition;
+mod disposition;
 pub use disposition::Disposition;
 
-pub mod workload;
+mod workload;
 pub use workload::{GroupingConfig, GroupingSignal, WorkloadMember};
 
-pub mod progress;
+mod progress;
 pub use progress::ScanEvent;

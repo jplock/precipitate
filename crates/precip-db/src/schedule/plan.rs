@@ -107,7 +107,7 @@ impl Store {
             .collect()
     }
 
-    pub async fn pair_status(
+    pub(crate) async fn pair_status(
         &self,
         workload: &str,
         environment: &str,
@@ -164,7 +164,8 @@ impl Store {
         .collect()
     }
 
-    pub async fn migration_events(
+    #[cfg(test)]
+    pub(crate) async fn migration_events(
         &self,
         workload: &str,
         environment: &str,
@@ -472,7 +473,7 @@ impl Store {
         Ok(Some((r.get("id"), r.parsed::<Date>("as_of")?, schedule)))
     }
 
-    pub async fn schedule_versions(
+    pub(crate) async fn schedule_versions(
         &self,
     ) -> Result<Vec<ScheduleVersion>, DbError> {
         let rows = (Query::select()

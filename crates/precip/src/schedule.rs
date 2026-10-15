@@ -3,7 +3,7 @@
 use jiff::civil::Date;
 use precip_db::{Store, Trigger};
 use precip_engine::schedule::gantt::Gantt;
-use precip_engine::schedule::{Status, day_name};
+use precip_engine::schedule::{Blackout, Status, day_name, holidays};
 use precip_types::PairKey;
 
 use crate::cli::{PairArgs, ScheduleCommand, TargetEnd};
@@ -153,7 +153,7 @@ pub(crate) async fn run(
             environment,
             remove,
         } => {
-            let b = precip_engine::schedule::Blackout {
+            let b = Blackout {
                 name,
                 start,
                 end: end.unwrap_or(start),
@@ -196,15 +196,13 @@ pub(crate) async fn run(
                 .unwrap_or_default()
             };
             let (only, skip) = (names(only), names(skip));
-            let chosen: Vec<_> =
-                precip_engine::schedule::holidays::us_federal(year)
-                    .into_iter()
-                    .filter(|h| {
-                        let n = h.name.to_lowercase();
-                        (only.is_empty() || only.contains(&n))
-                            && !skip.contains(&n)
-                    })
-                    .collect();
+            let chosen: Vec<_> = holidays::us_federal(year)
+                .into_iter()
+                .filter(|h| {
+                    let n = h.name.to_lowercase();
+                    (only.is_empty() || only.contains(&n)) && !skip.contains(&n)
+                })
+                .collect();
             store.add_holidays(&chosen).await?;
             for h in &chosen {
                 out!("{}  {}", h.date, h.name);
@@ -216,7 +214,7 @@ pub(crate) async fn run(
                 country.eq_ignore_ascii_case("us"),
                 "only US federal holidays are built in"
             );
-            for h in precip_engine::schedule::holidays::us_federal(year) {
+            for h in holidays::us_federal(year) {
                 out!("{}  {}", h.date, h.name);
             }
         }

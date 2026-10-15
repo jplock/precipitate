@@ -12,7 +12,7 @@ use crate::collect::{
     tags,
 };
 
-pub struct Stacks;
+pub(crate) struct Stacks;
 
 impl Collect for Stacks {
     const API: &'static str = "cloudformation:DescribeStacks";
@@ -48,7 +48,7 @@ impl Collect for Stacks {
 /// the authoritative stack membership: it covers resource types whose own
 /// list calls return no tags. Runs after the stacks and the resources
 /// themselves, so physical ids can be matched to collected ARNs.
-pub struct StackResources;
+pub(crate) struct StackResources;
 
 impl Collect for StackResources {
     const API: &'static str = "cloudformation:ListStackResources";
@@ -168,6 +168,7 @@ impl<'a> ByName<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::accounts::CallerIdentity;
 
     fn managed(service: body::Service, name: &str, arn: &str) -> Resource {
         Resource {
@@ -205,7 +206,7 @@ mod tests {
     fn cache_clusters_resolve_only_to_elasticache() {
         let ctx = RegionContext {
             config: aws_config::SdkConfig::builder().build(),
-            identity: crate::accounts::CallerIdentity {
+            identity: CallerIdentity {
                 account_id: "123456789012".into(),
                 arn: "arn:aws:iam::123456789012:user/x".into(),
                 partition: "aws".into(),

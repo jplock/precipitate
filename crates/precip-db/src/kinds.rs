@@ -67,7 +67,7 @@ precip_types::named_enum! {
 
 impl MigrationEventKind {
     /// Whether an agreed date moved: it was missed or replaced.
-    pub fn moved_a_date(self) -> bool {
+    pub(crate) fn moved_a_date(self) -> bool {
         match self {
             Self::Missed | Self::Reconfirmed => true,
             Self::Confirmed

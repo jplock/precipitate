@@ -9,19 +9,19 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::widgets::Widget;
 
-pub const PRECIP: &str = include_str!("../banners/precip.txt");
+pub(crate) const PRECIP: &str = include_str!("../banners/precip.txt");
 
 /// Palette from wicket's `ui/defaults/colors.rs`.
-pub const OX_GREEN_LIGHT: Color = Color::Rgb(0x48, 0xD5, 0x97);
-pub const OX_OFF_WHITE: Color = Color::Rgb(0xE0, 0xE0, 0xE0);
-pub const OX_GRAY_DARK: Color = Color::Rgb(0x62, 0x66, 0x68);
-pub const OX_YELLOW: Color = Color::Rgb(0xF5, 0xCF, 0x65);
+pub(crate) const OX_GREEN_LIGHT: Color = Color::Rgb(0x48, 0xD5, 0x97);
+pub(crate) const OX_OFF_WHITE: Color = Color::Rgb(0xE0, 0xE0, 0xE0);
+pub(crate) const OX_GRAY_DARK: Color = Color::Rgb(0x62, 0x66, 0x68);
+pub(crate) const OX_YELLOW: Color = Color::Rgb(0xF5, 0xCF, 0x65);
 
-pub const NAME: &str = "precip";
-pub const TAGLINE: &str = "AWS estate → Oxide rack sizing";
+pub(crate) const NAME: &str = "precip";
+pub(crate) const TAGLINE: &str = "AWS estate → Oxide rack sizing";
 
 /// Width in cells of the widest banner line.
-pub fn width(text: &str) -> u16 {
+pub(crate) fn width(text: &str) -> u16 {
     text.lines()
         .map(|l| l.chars().count())
         .max()
@@ -29,18 +29,18 @@ pub fn width(text: &str) -> u16 {
         .unwrap_or(0)
 }
 
-pub fn height(text: &str) -> u16 {
+pub(crate) fn height(text: &str) -> u16 {
     u16::try_from(text.lines().count()).unwrap_or(0)
 }
 
-pub struct Banner {
+pub(crate) struct Banner {
     text: &'static str,
     /// Columns painted in the accent colour: the i in "precip".
     accent_columns: std::ops::RangeInclusive<usize>,
 }
 
 impl Banner {
-    pub fn precip() -> Self {
+    pub(crate) fn precip() -> Self {
         Self { text: PRECIP, accent_columns: 28..=33 }
     }
 }

@@ -44,7 +44,7 @@ fn region_query(region: &str, account_id: Option<&str>) -> String {
 
 /// A client bound to an aggregator index and its default view.
 #[derive(Debug, Clone)]
-pub struct Explorer {
+pub(crate) struct Explorer {
     client: aws_sdk_resourceexplorer2::Client,
     view: String,
     pub aggregator_region: String,
@@ -53,7 +53,7 @@ pub struct Explorer {
 impl Explorer {
     /// Find the account's aggregator index and default view. `None` when
     /// Resource Explorer is not set up or not permitted.
-    pub async fn discover(config: &SdkConfig) -> Option<Self> {
+    pub(crate) async fn discover(config: &SdkConfig) -> Option<Self> {
         // ListIndexes answers from any region; it returns indexes in all of
         // them. The aggregator index is the one that can search across
         // regions.
@@ -101,7 +101,10 @@ impl Explorer {
     /// True only with organization-wide multi-account search enabled; a
     /// single-account aggregator returns zero here and must not be used to
     /// prune other accounts' regions.
-    pub async fn sees_other_accounts(&self, own_account: &AccountId) -> bool {
+    pub(crate) async fn sees_other_accounts(
+        &self,
+        own_account: &AccountId,
+    ) -> bool {
         let out = self
             .client
             .search()
@@ -130,7 +133,7 @@ impl Explorer {
     /// Regions with at least one workload resource for `account_id` (or
     /// the index's own account when `None`), or `None` when a search
     /// fails. A region is pruned only on a definite zero count.
-    pub async fn regions_with_resources(
+    pub(crate) async fn regions_with_resources(
         &self,
         account_id: Option<&AccountId>,
         regions: &[Region],

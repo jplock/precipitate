@@ -199,7 +199,7 @@ impl PartialEq<WorkloadName> for Slug {
 /// An account's name and the name of its organizational unit, either of
 /// which can say which environment the account holds.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct AccountNames<'a> {
+pub(super) struct AccountNames<'a> {
     pub name: Option<&'a str>,
     pub ou: Option<&'a str>,
 }
@@ -207,7 +207,7 @@ pub struct AccountNames<'a> {
 impl AccountNames<'_> {
     /// The environment the OU name contains, or the account name starts or
     /// ends with. Longest token wins.
-    pub fn environment(
+    pub(super) fn environment(
         &self,
         tokens: &BTreeMap<String, EnvName>,
     ) -> Option<EnvName> {

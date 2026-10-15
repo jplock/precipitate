@@ -1,29 +1,26 @@
 //! The Sizing tab: the assumptions the user can change, and the result.
 
 use crate::{App, TuiError};
+use precip_engine::sizing::inputs::SizedInstance;
 use precip_engine::sizing::profiles::BuiltinProfile;
+use precip_engine::sizing::{Assumptions, Instance, Sizing, WorkloadDemand};
 
 /// Sizing state: the profile, the assumptions the user can turn, the
 /// assessed instances of the latest scan, and the result.
-pub struct SizingView {
+pub(crate) struct SizingView {
     pub profile: precip_types::Profile,
-    pub assumptions: precip_engine::sizing::Assumptions,
-    pub instances: Vec<precip_engine::sizing::inputs::SizedInstance>,
-    pub result: precip_engine::sizing::Sizing,
-    pub demand: Vec<precip_engine::sizing::WorkloadDemand>,
+    pub assumptions: Assumptions,
+    pub instances: Vec<SizedInstance>,
+    pub result: Sizing,
+    pub demand: Vec<WorkloadDemand>,
 }
 
 impl SizingView {
     pub(crate) fn compute(&mut self) {
-        let inputs: Vec<precip_engine::sizing::Instance> =
+        let inputs: Vec<Instance> =
             self.instances.iter().map(Into::into).collect();
-        self.result = precip_engine::sizing::Sizing::new(
-            &self.profile,
-            &inputs,
-            &self.assumptions,
-        );
-        self.demand =
-            precip_engine::sizing::WorkloadDemand::by_pair(&self.instances);
+        self.result = Sizing::new(&self.profile, &inputs, &self.assumptions);
+        self.demand = WorkloadDemand::by_pair(&self.instances);
     }
 }
 
@@ -54,7 +51,7 @@ impl App {
 
     pub(crate) fn adjust_sizing(
         &mut self,
-        change: impl FnOnce(&mut precip_engine::sizing::Assumptions),
+        change: impl FnOnce(&mut Assumptions),
     ) {
         if let Some(v) = self.sizing.as_mut() {
             change(&mut v.assumptions);

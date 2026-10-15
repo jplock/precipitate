@@ -2,12 +2,13 @@
 
 use crate::{Action, App, TuiError};
 use precip_db::Trigger;
+use precip_engine::schedule::{Blackout, GlobalRules, Schedule, Slot, Status};
 use ratatui::widgets::ListState;
 
 /// The computed migration calendar and the controls over it.
-pub struct ScheduleView {
-    pub rules: precip_engine::schedule::GlobalRules,
-    pub schedule: precip_engine::schedule::Schedule,
+pub(crate) struct ScheduleView {
+    pub rules: GlobalRules,
+    pub schedule: Schedule,
     pub metrics: precip_db::Metrics,
     /// Migrated pairs whose compute the latest scan still sees.
     pub findings: Vec<precip_db::Verification>,
@@ -20,13 +21,13 @@ pub struct ScheduleView {
 
 /// What a reason is being asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Pending {
+pub(crate) enum Pending {
     Missed { workload: String, environment: String },
     Reconfirm { workload: String, environment: String, date: jiff::civil::Date },
 }
 
 /// Why an agreed date moved: the usual reasons, or typed.
-pub struct ReasonPicker {
+pub(crate) struct ReasonPicker {
     pub pending: Pending,
     pub state: ListState,
     /// Text being typed for the "other" row.
@@ -34,19 +35,19 @@ pub struct ReasonPicker {
 }
 
 impl ReasonPicker {
-    pub fn rows() -> usize {
+    pub(crate) fn rows() -> usize {
         precip_db::RESCHEDULE_REASONS.len() + 1
     }
 }
 
 /// Every computed schedule, oldest first.
-pub struct HistoryView {
+pub(crate) struct HistoryView {
     pub events: Vec<precip_db::PlanEventRecord>,
     pub state: ListState,
 }
 
 /// Picker for confirming a date: the proposed date and its alternatives.
-pub struct DatePicker {
+pub(crate) struct DatePicker {
     pub pair: precip_types::PairKey,
     pub dates: Vec<jiff::civil::Date>,
     /// True when a confirmed date is being replaced by another.
@@ -55,7 +56,7 @@ pub struct DatePicker {
 }
 
 /// The one sentence that says what to do now on the Schedule tab.
-pub fn next_step(v: &ScheduleView) -> String {
+pub(crate) fn next_step(v: &ScheduleView) -> String {
     let s = &v.schedule;
     let m = &v.metrics;
     if !v.findings.is_empty() {
@@ -73,7 +74,7 @@ pub fn next_step(v: &ScheduleView) -> String {
     if s.slots.is_empty() {
         return "Everything is migrated.".into();
     }
-    let today_runs: Vec<&precip_engine::schedule::Slot> = s
+    let today_runs: Vec<&Slot> = s
         .slots
         .iter()
         .filter(|x| x.agreed && x.date <= v.today && x.end >= v.today)
@@ -99,7 +100,7 @@ pub(crate) fn parse_freeze(
     from: &str,
     to: &str,
     pair: Option<precip_types::PairKey>,
-) -> Result<precip_engine::schedule::Blackout, String> {
+) -> Result<Blackout, String> {
     if name.is_empty() {
         return Err("the freeze needs a name".into());
     }
@@ -115,12 +116,7 @@ pub(crate) fn parse_freeze(
     if start > end {
         return Err("the freeze ends before it starts".into());
     }
-    Ok(precip_engine::schedule::Blackout {
-        name: name.to_string(),
-        start,
-        end,
-        pair,
-    })
+    Ok(Blackout { name: name.to_string(), start, end, pair })
 }
 
 /// A date box that may be left empty to mean none.
@@ -192,9 +188,7 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn selected_slot(
-        &self,
-    ) -> Option<precip_engine::schedule::Slot> {
+    pub(crate) fn selected_slot(&self) -> Option<Slot> {
         let v = self.schedule.as_ref()?;
         v.schedule.slots.get(v.selected.selected()?).cloned()
     }
@@ -203,7 +197,7 @@ impl App {
         &mut self,
         workload: &str,
         environment: &str,
-        status: precip_engine::schedule::Status,
+        status: Status,
         date: Option<jiff::civil::Date>,
         note: Option<&str>,
     ) -> Result<(), TuiError> {
@@ -221,17 +215,11 @@ impl App {
         match result {
             Ok(()) => {
                 let what = match status {
-                    precip_engine::schedule::Status::Proposed => {
-                        "back to proposed"
-                    }
-                    precip_engine::schedule::Status::Confirmed => "date agreed",
-                    precip_engine::schedule::Status::Missed => {
-                        "didn't happen, a new date is proposed"
-                    }
-                    precip_engine::schedule::Status::Migrated => "done",
-                    precip_engine::schedule::Status::RolledBack => {
-                        "rolled back, a new date is proposed"
-                    }
+                    Status::Proposed => "back to proposed",
+                    Status::Confirmed => "date agreed",
+                    Status::Missed => "didn't happen, a new date is proposed",
+                    Status::Migrated => "done",
+                    Status::RolledBack => "rolled back, a new date is proposed",
                 };
                 self.note(format!(
                     "{workload} / {environment}: {what}{}",
@@ -281,7 +269,7 @@ impl App {
             Pending::Missed { workload, environment } => self.change_status(
                 &workload,
                 &environment,
-                precip_engine::schedule::Status::Missed,
+                Status::Missed,
                 None,
                 Some(&reason),
             ),
@@ -289,7 +277,7 @@ impl App {
                 .change_status(
                     &workload,
                     &environment,
-                    precip_engine::schedule::Status::Confirmed,
+                    Status::Confirmed,
                     Some(date),
                     Some(&reason),
                 ),
@@ -383,13 +371,7 @@ impl App {
             });
             Ok(())
         } else {
-            self.change_status(
-                &w,
-                &e,
-                precip_engine::schedule::Status::Confirmed,
-                Some(d),
-                None,
-            )
+            self.change_status(&w, &e, Status::Confirmed, Some(d), None)
         }
     }
 }

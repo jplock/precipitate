@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use names::{AccountNames, Slug};
 
-pub const OVERRIDE_TAG: &str = "precip:workload";
+pub(crate) const OVERRIDE_TAG: &str = "precip:workload";
 const STACK_ID_TAG: &str = "aws:cloudformation:stack-id";
 
 /// Everything grouping reads, fetched by the store for one scan.

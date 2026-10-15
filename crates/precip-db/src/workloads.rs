@@ -1,14 +1,15 @@
 //! Grouping a scan into workloads, and the disposition of each workload
 //! and environment pair.
 
-use crate::kinds::DispositionSource;
-use crate::kinds::Setting;
+use crate::kinds::{DispositionSource, Setting};
 use crate::query::{Bound, RowExt};
 use crate::schema::{
     DispositionHistory, ResourceVersions, Settings, WorkloadAliases,
     WorkloadEnvironments, WorkloadMembers, WorkloadOverrides, Workloads,
 };
 use crate::{DbError, Store};
+use precip_engine::group;
+use precip_engine::sizing::inputs::{self, SizedInstance};
 use precip_types::{
     Arn, Disposition, GroupingConfig, PairKey, WorkloadMember, WorkloadName,
 };
@@ -148,8 +149,8 @@ impl Store {
         let relationships = self.live_relationships(seq).await?;
         let overrides = self.overrides().await?;
         let aliases = self.aliases().await?;
-        let members = precip_engine::group::group(
-            &precip_engine::group::Input {
+        let members = group::group(
+            &group::Input {
                 resources: &resources,
                 relationships: &relationships,
                 overrides: &overrides,
@@ -267,7 +268,7 @@ impl Store {
     }
 
     /// Workload names that map onto another workload.
-    pub async fn aliases(
+    pub(crate) async fn aliases(
         &self,
     ) -> Result<BTreeMap<WorkloadName, WorkloadName>, DbError> {
         let rows = (Query::select()
@@ -346,7 +347,7 @@ impl Store {
     /// Set the disposition of one workload and environment pair. Every
     /// resource in the pair takes this disposition.
     /// What a pair is set to now, if the pair exists.
-    pub async fn disposition_of(
+    pub(crate) async fn disposition_of(
         &self,
         workload: &str,
         environment: &str,
@@ -676,7 +677,7 @@ impl Store {
     }
 
     /// Disposition of every known pair.
-    pub async fn pair_dispositions(
+    pub(crate) async fn pair_dispositions(
         &self,
     ) -> Result<BTreeMap<PairKey, Disposition>, DbError> {
         let mut conn = self.pool.acquire().await?;
@@ -715,14 +716,13 @@ impl Store {
         &self,
         scan_id: &str,
         profile: &precip_types::Profile,
-    ) -> Result<Vec<precip_engine::sizing::inputs::SizedInstance>, DbError>
-    {
+    ) -> Result<Vec<SizedInstance>, DbError> {
         let seq = self.seq_of(scan_id).await?;
         let resources = self.live_resources(seq).await?;
         let relationships = self.live_relationships(seq).await?;
         let members = self.members(scan_id).await?;
         let dispositions = self.pair_dispositions().await?;
-        Ok(precip_engine::sizing::inputs::sized_instances(
+        Ok(inputs::sized_instances(
             &resources,
             &relationships,
             &members,
@@ -807,7 +807,9 @@ impl Store {
     }
 
     /// Manual placements by ARN.
-    pub async fn overrides(&self) -> Result<BTreeMap<Arn, PairKey>, DbError> {
+    pub(crate) async fn overrides(
+        &self,
+    ) -> Result<BTreeMap<Arn, PairKey>, DbError> {
         let rows = (Query::select()
             .columns([
                 WorkloadOverrides::Arn,

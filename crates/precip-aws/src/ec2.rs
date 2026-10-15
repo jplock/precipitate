@@ -12,7 +12,7 @@ use crate::collect::{
     owned, tags,
 };
 
-pub async fn enabled_regions(
+pub(crate) async fn enabled_regions(
     config: &SdkConfig,
 ) -> Result<Vec<precip_types::Region>, ScanError> {
     let ec2 = aws_sdk_ec2::Client::new(config);
@@ -29,7 +29,7 @@ pub async fn enabled_regions(
         .collect())
 }
 
-pub struct Instances;
+pub(crate) struct Instances;
 
 impl Collect for Instances {
     const API: &'static str = "ec2:DescribeInstances";
@@ -127,7 +127,7 @@ impl Collect for Instances {
 
 /// vCPU and memory for every instance type referenced by an instance or
 /// an Auto Scaling group in the region. Sizing reads these rows.
-pub struct InstanceTypes;
+pub(crate) struct InstanceTypes;
 
 impl Collect for InstanceTypes {
     const API: &'static str = "ec2:DescribeInstanceTypes";
@@ -208,7 +208,7 @@ impl Collect for InstanceTypes {
     }
 }
 
-pub struct Volumes;
+pub(crate) struct Volumes;
 
 impl Collect for Volumes {
     const API: &'static str = "ec2:DescribeVolumes";
@@ -255,7 +255,7 @@ impl Collect for Volumes {
 
 /// Images referenced by instances in the region, whoever owns them.
 /// Platform, boot mode, Marketplace and encryption decide the export path.
-pub struct Images;
+pub(crate) struct Images;
 
 impl Collect for Images {
     const API: &'static str = "ec2:DescribeImages";
@@ -313,7 +313,7 @@ impl Collect for Images {
 }
 
 /// Elastic IPs. Each maps to an Oxide floating IP.
-pub struct Addresses;
+pub(crate) struct Addresses;
 
 impl Collect for Addresses {
     const API: &'static str = "ec2:DescribeAddresses";

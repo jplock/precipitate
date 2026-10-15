@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use precip_db::{DispositionSource, Store, Trigger};
+use precip_db::{DispositionSource, Store, Trigger, export};
 use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_tui::workspace::WorkspaceDir;
 use precip_types::Disposition;
@@ -10,6 +10,8 @@ use precip_types::Disposition;
 use crate::cli::{Cli, ExportWhat, PairArgs, ScanArgs, SizingArgs};
 use crate::schedule::today;
 use crate::{init_tracing, print_line};
+use precip_engine::sizing::{Fit, Instance, Sizing, WorkloadDemand};
+use precip_types::scan::TargetStatus;
 
 /// Where the command works: the workspaces directory and the database
 /// chosen by --workspace or --db.
@@ -80,11 +82,7 @@ pub(crate) async fn scan_and_store(
         .targets
         .iter()
         .filter(|t| {
-            !matches!(
-                t.status,
-                precip_types::scan::TargetStatus::Scanned
-                    | precip_types::scan::TargetStatus::Empty
-            )
+            !matches!(t.status, TargetStatus::Scanned | TargetStatus::Empty)
         })
         .count();
     tracing::info!(
@@ -461,10 +459,8 @@ pub(crate) async fn size(env: &Env, sizing: &SizingArgs) -> anyhow::Result<()> {
     let profile = choose_profile(&store, sizing.profile.clone()).await?;
     let assumptions = sizing.assumptions();
     let instances = store.sized_instances(&latest.id, &profile).await?;
-    let inputs: Vec<precip_engine::sizing::Instance> =
-        instances.iter().map(Into::into).collect();
-    let result =
-        precip_engine::sizing::Sizing::new(&profile, &inputs, &assumptions);
+    let inputs: Vec<Instance> = instances.iter().map(Into::into).collect();
+    let result = Sizing::new(&profile, &inputs, &assumptions);
     let cap = result.sled_capacity;
 
     out!(
@@ -495,7 +491,7 @@ pub(crate) async fn size(env: &Env, sizing: &SizingArgs) -> anyhow::Result<()> {
         "GiB",
         "disk GiB"
     );
-    for d in precip_engine::sizing::WorkloadDemand::by_pair(&instances) {
+    for d in WorkloadDemand::by_pair(&instances) {
         out!(
             "{:<28} {:<8} {:>5} {:>7} {:>9} {:>9}  {} fit as-is, {} need changes, {} cannot move",
             d.pair.workload,
@@ -539,10 +535,8 @@ pub(crate) async fn size(env: &Env, sizing: &SizingArgs) -> anyhow::Result<()> {
             );
         }
     }
-    let remediations: Vec<_> = instances
-        .iter()
-        .filter(|i| i.fit == precip_engine::sizing::Fit::NeedsRemediation)
-        .collect();
+    let remediations: Vec<_> =
+        instances.iter().filter(|i| i.fit == Fit::NeedsRemediation).collect();
     if !remediations.is_empty() {
         out!("");
         out!("need changes before moving ({}):", remediations.len());
@@ -582,30 +576,25 @@ pub(crate) async fn export(
     };
     let latest = latest_scan(&store).await?;
     let text = match (what, format.as_str()) {
-        (ExportWhat::Workloads, "csv") => precip_db::export::workloads_csv(
-            &store.workload_summary(&latest.id).await?,
-        ),
-        (ExportWhat::Workloads, "json") => precip_db::export::workloads_json(
-            &store.workload_summary(&latest.id).await?,
-        )?,
+        (ExportWhat::Workloads, "csv") => {
+            export::workloads_csv(&store.workload_summary(&latest.id).await?)
+        }
+        (ExportWhat::Workloads, "json") => {
+            export::workloads_json(&store.workload_summary(&latest.id).await?)?
+        }
         (ExportWhat::Sizing, "csv" | "json") => {
             let profile =
                 choose_profile(&store, sizing.profile.clone()).await?;
             let assumptions = sizing.assumptions();
             let instances = store.sized_instances(&latest.id, &profile).await?;
             if format == "csv" {
-                precip_db::export::sizing_csv(&instances)
+                export::sizing_csv(&instances)
             } else {
-                let inputs: Vec<precip_engine::sizing::Instance> =
+                let inputs: Vec<Instance> =
                     instances.iter().map(Into::into).collect();
-                let result = precip_engine::sizing::Sizing::new(
-                    &profile,
-                    &inputs,
-                    &assumptions,
-                );
-                let demand =
-                    precip_engine::sizing::WorkloadDemand::by_pair(&instances);
-                precip_db::export::sizing_json(
+                let result = Sizing::new(&profile, &inputs, &assumptions);
+                let demand = WorkloadDemand::by_pair(&instances);
+                export::sizing_json(
                     &profile,
                     &assumptions,
                     &result,
@@ -618,9 +607,9 @@ pub(crate) async fn export(
             let (_, schedule) =
                 store.compute_schedule(today(), Trigger::Export).await?;
             match format.as_str() {
-                "csv" => precip_db::export::schedule_csv(&schedule),
-                "json" => precip_db::export::schedule_json(&schedule)?,
-                _ => precip_db::export::schedule_ics(
+                "csv" => export::schedule_csv(&schedule),
+                "json" => export::schedule_json(&schedule)?,
+                _ => export::schedule_ics(
                     &schedule,
                     env.workspace.as_deref().unwrap_or("precip"),
                     jiff::Timestamp::now(),

@@ -238,6 +238,7 @@ fn uid_part(text: &str) -> String {
 mod tests {
     use super::*;
     use jiff::civil::date;
+    use precip_engine::schedule::Placement;
     use precip_engine::schedule::Slot;
 
     #[test]
@@ -264,7 +265,7 @@ mod tests {
                 end: date(2026, 11, 8),
                 weight: 1,
                 agreed: true,
-                placement: precip_engine::schedule::Placement::Agreed,
+                placement: Placement::Agreed,
                 reopened: None,
                 alternatives: Vec::new(),
             }],

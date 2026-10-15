@@ -4,7 +4,7 @@
 
 use aws_config::SdkConfig;
 use aws_smithy_async::future::pagination_stream::PaginationStream;
-use precip_types::scan::{Relationship, Resource, ResourceKind};
+use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
 use precip_types::{Arn, Body, Region};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -13,11 +13,12 @@ use std::sync::Arc;
 
 use crate::accounts::CallerIdentity;
 use crate::arn::ArnType;
+use crate::{autoscaling, cloudformation, ec2, elb, managed, tagging, vpc};
 
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Everything a collector needs for one region.
-pub struct RegionContext {
+pub(crate) struct RegionContext {
     /// SDK config already pinned to `region`.
     pub config: SdkConfig,
     pub identity: CallerIdentity,
@@ -27,7 +28,7 @@ pub struct RegionContext {
 impl RegionContext {
     /// The ARN of a resource of type `ty` with this id, in this region and
     /// account.
-    pub fn arn(&self, ty: ArnType, id: &str) -> Arn {
+    pub(crate) fn arn(&self, ty: ArnType, id: &str) -> Arn {
         ty.arn(
             &self.identity.partition,
             &self.region,
@@ -37,7 +38,7 @@ impl RegionContext {
     }
 
     /// A resource in this region with the common fields filled.
-    pub fn resource(
+    pub(crate) fn resource(
         &self,
         arn: Arn,
         tags: BTreeMap<String, String>,
@@ -54,7 +55,7 @@ impl RegionContext {
 }
 
 #[derive(Debug, Default)]
-pub struct Collected {
+pub(crate) struct Collected {
     pub resources: Vec<Resource>,
     pub relationships: Vec<Relationship>,
     /// Tags to merge into resources collected earlier, by ARN. Existing
@@ -64,7 +65,7 @@ pub struct Collected {
 
 impl Collected {
     /// Fold another collector's output into this one.
-    pub fn absorb(&mut self, other: Collected) {
+    pub(crate) fn absorb(&mut self, other: Collected) {
         if !other.tag_updates.is_empty() {
             let by_arn: HashMap<Arn, usize> = self
                 .resources
@@ -85,7 +86,7 @@ impl Collected {
     }
 
     /// Resources of one kind collected so far.
-    pub fn of_kind(
+    pub(crate) fn of_kind(
         &self,
         kind: ResourceKind,
     ) -> impl Iterator<Item = &Resource> {
@@ -94,7 +95,7 @@ impl Collected {
 
     /// The distinct values `field` picks out of the bodies collected so
     /// far, sorted.
-    pub fn distinct<'a, I>(
+    pub(crate) fn distinct<'a, I>(
         &'a self,
         field: impl Fn(&'a Body) -> I,
     ) -> Vec<String>
@@ -113,12 +114,7 @@ impl Collected {
     }
 
     /// Add an edge between two resources.
-    pub fn relate(
-        &mut self,
-        from: Arn,
-        edge: precip_types::scan::Edge,
-        to: Arn,
-    ) {
+    pub(crate) fn relate(&mut self, from: Arn, edge: Edge, to: Arn) {
         self.relationships.push(Relationship {
             from_arn: from,
             edge,
@@ -128,12 +124,14 @@ impl Collected {
 }
 
 /// An SDK string as an owned body field.
-pub fn own(s: Option<&str>) -> Option<String> {
+pub(crate) fn own(s: Option<&str>) -> Option<String> {
     s.map(str::to_string)
 }
 
 /// SDK strings as an owned body list.
-pub fn owned<'a>(items: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+pub(crate) fn owned<'a>(
+    items: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
     items.into_iter().map(str::to_string).collect()
 }
 
@@ -141,14 +139,14 @@ pub fn owned<'a>(items: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 /// service was the problem.
 #[derive(Debug, thiserror::Error)]
 #[error("{api}")]
-pub struct CollectError {
+pub(crate) struct CollectError {
     pub api: &'static str,
     #[source]
     pub source: Box<dyn std::error::Error + Send + Sync>,
 }
 
 impl CollectError {
-    pub fn new<E>(api: &'static str) -> impl FnOnce(E) -> Self
+    pub(crate) fn new<E>(api: &'static str) -> impl FnOnce(E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
     {
@@ -157,7 +155,7 @@ impl CollectError {
 }
 
 /// The next page of a paginated call, with a failure named after `api`.
-pub async fn next_page<P, E>(
+pub(crate) async fn next_page<P, E>(
     api: &'static str,
     pages: &mut PaginationStream<Result<P, E>>,
 ) -> Result<Option<P>, CollectError>
@@ -169,7 +167,7 @@ where
 
 /// When a collector runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stage {
+pub(crate) enum Stage {
     /// Concurrently with the other first-stage collectors.
     First,
     /// After the first stage, one at a time in [`all`] order, reading
@@ -178,7 +176,7 @@ pub enum Stage {
 }
 
 /// A collector as it is written: a describe call for one region.
-pub trait Collect: Send + Sync + 'static {
+pub(crate) trait Collect: Send + Sync + 'static {
     /// The API the collector calls, used in logs and partial-scan reports.
     const API: &'static str;
     const STAGE: Stage = Stage::First;
@@ -194,7 +192,7 @@ pub trait Collect: Send + Sync + 'static {
 }
 
 /// A collector as the region scanner holds it.
-pub trait Collector: Send + Sync {
+pub(crate) trait Collector: Send + Sync {
     fn name(&self) -> &'static str;
     fn stage(&self) -> Stage;
     fn collect<'a>(
@@ -223,7 +221,7 @@ impl<T: Collect> Collector for T {
 }
 
 /// A tag as one of the SDKs models it.
-pub trait SdkTag {
+pub(crate) trait SdkTag {
     fn tag_key(&self) -> Option<&str>;
     fn tag_value(&self) -> Option<&str>;
 }
@@ -263,7 +261,7 @@ sdk_tag!(required:
 );
 
 /// A tag map from SDK tags. Tags with a missing key or value are dropped.
-pub fn tags<'a, T: SdkTag + 'a>(
+pub(crate) fn tags<'a, T: SdkTag + 'a>(
     tags: impl IntoIterator<Item = &'a T>,
 ) -> BTreeMap<String, String> {
     tags.into_iter()
@@ -275,38 +273,38 @@ pub fn tags<'a, T: SdkTag + 'a>(
 
 /// Every collector. Second-stage collectors run after the rest, in this
 /// order.
-pub fn all() -> Vec<Arc<dyn Collector>> {
+pub(crate) fn all() -> Vec<Arc<dyn Collector>> {
     vec![
-        Arc::new(crate::ec2::Instances),
-        Arc::new(crate::ec2::Volumes),
-        Arc::new(crate::ec2::Addresses),
-        Arc::new(crate::vpc::Vpcs),
-        Arc::new(crate::vpc::Subnets),
-        Arc::new(crate::vpc::SecurityGroups),
-        Arc::new(crate::vpc::SecurityGroupRules),
-        Arc::new(crate::vpc::RouteTables),
-        Arc::new(crate::vpc::InternetGateways),
-        Arc::new(crate::vpc::NatGateways),
-        Arc::new(crate::vpc::PeeringConnections),
-        Arc::new(crate::autoscaling::Groups),
-        Arc::new(crate::elb::LoadBalancers),
-        Arc::new(crate::elb::TargetGroups),
-        Arc::new(crate::cloudformation::Stacks),
-        Arc::new(crate::managed::Rds),
-        Arc::new(crate::managed::Eks),
-        Arc::new(crate::managed::Ecs),
-        Arc::new(crate::managed::Lambda),
-        Arc::new(crate::managed::ElastiCache),
-        Arc::new(crate::managed::DynamoDb),
-        Arc::new(crate::managed::Efs),
+        Arc::new(ec2::Instances),
+        Arc::new(ec2::Volumes),
+        Arc::new(ec2::Addresses),
+        Arc::new(vpc::Vpcs),
+        Arc::new(vpc::Subnets),
+        Arc::new(vpc::SecurityGroups),
+        Arc::new(vpc::SecurityGroupRules),
+        Arc::new(vpc::RouteTables),
+        Arc::new(vpc::InternetGateways),
+        Arc::new(vpc::NatGateways),
+        Arc::new(vpc::PeeringConnections),
+        Arc::new(autoscaling::Groups),
+        Arc::new(elb::LoadBalancers),
+        Arc::new(elb::TargetGroups),
+        Arc::new(cloudformation::Stacks),
+        Arc::new(managed::Rds),
+        Arc::new(managed::Eks),
+        Arc::new(managed::Ecs),
+        Arc::new(managed::Lambda),
+        Arc::new(managed::ElastiCache),
+        Arc::new(managed::DynamoDb),
+        Arc::new(managed::Efs),
         // Second stage, in order: each reads what ran before it.
-        Arc::new(crate::tagging::Tags),
-        Arc::new(crate::cloudformation::StackResources),
-        Arc::new(crate::autoscaling::LaunchTemplates),
-        Arc::new(crate::autoscaling::LaunchConfigurations),
-        Arc::new(crate::ec2::Images),
-        Arc::new(crate::ec2::InstanceTypes),
-        Arc::new(crate::vpc::PrefixLists),
+        Arc::new(tagging::Tags),
+        Arc::new(cloudformation::StackResources),
+        Arc::new(autoscaling::LaunchTemplates),
+        Arc::new(autoscaling::LaunchConfigurations),
+        Arc::new(ec2::Images),
+        Arc::new(ec2::InstanceTypes),
+        Arc::new(vpc::PrefixLists),
     ]
 }
 

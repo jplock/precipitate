@@ -9,7 +9,7 @@ use crate::collect::{
     owned, tags,
 };
 
-pub struct Vpcs;
+pub(crate) struct Vpcs;
 
 impl Collect for Vpcs {
     const API: &'static str = "ec2:DescribeVpcs";
@@ -48,7 +48,7 @@ impl Collect for Vpcs {
     }
 }
 
-pub struct Subnets;
+pub(crate) struct Subnets;
 
 impl Collect for Subnets {
     const API: &'static str = "ec2:DescribeSubnets";
@@ -89,7 +89,7 @@ impl Collect for Subnets {
     }
 }
 
-pub struct SecurityGroups;
+pub(crate) struct SecurityGroups;
 
 impl Collect for SecurityGroups {
     const API: &'static str = "ec2:DescribeSecurityGroups";
@@ -124,7 +124,7 @@ impl Collect for SecurityGroups {
 /// One row per rule, with the source kept distinct: CIDR, prefix list or
 /// another security group. The group-to-group case is what the firewall
 /// translation has to flag.
-pub struct SecurityGroupRules;
+pub(crate) struct SecurityGroupRules;
 
 impl Collect for SecurityGroupRules {
     const API: &'static str = "ec2:DescribeSecurityGroupRules";
@@ -178,7 +178,7 @@ impl Collect for SecurityGroupRules {
     }
 }
 
-pub struct RouteTables;
+pub(crate) struct RouteTables;
 
 impl Collect for RouteTables {
     const API: &'static str = "ec2:DescribeRouteTables";
@@ -238,7 +238,7 @@ impl Collect for RouteTables {
     }
 }
 
-pub struct InternetGateways;
+pub(crate) struct InternetGateways;
 
 impl Collect for InternetGateways {
     const API: &'static str = "ec2:DescribeInternetGateways";
@@ -271,7 +271,7 @@ impl Collect for InternetGateways {
     }
 }
 
-pub struct NatGateways;
+pub(crate) struct NatGateways;
 
 impl Collect for NatGateways {
     const API: &'static str = "ec2:DescribeNatGateways";
@@ -313,7 +313,7 @@ impl Collect for NatGateways {
     }
 }
 
-pub struct PeeringConnections;
+pub(crate) struct PeeringConnections;
 
 impl Collect for PeeringConnections {
     const API: &'static str = "ec2:DescribeVpcPeeringConnections";
@@ -366,7 +366,7 @@ impl Collect for PeeringConnections {
 /// Managed prefix lists with their entries, so a security group rule that
 /// names one can be expanded to CIDRs. Only lists referenced by a rule
 /// are described, in the second stage.
-pub struct PrefixLists;
+pub(crate) struct PrefixLists;
 
 impl Collect for PrefixLists {
     const API: &'static str = "ec2:GetManagedPrefixListEntries";
