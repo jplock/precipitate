@@ -583,8 +583,14 @@ pub(crate) fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
         ]),
         Line::from(""),
     ];
+    if into == p.alias {
+        lines.push(Line::from(Span::styled(
+            "  That is this workload; saving changes nothing.",
+            dim(),
+        )));
+    }
     // Each environment keeps its name; only the workload changes.
-    for (env, exists) in &landing {
+    for (env, exists) in landing.iter().filter(|_| into != p.alias) {
         let target = if into.is_empty() { "?" } else { into };
         let mut spans = vec![
             Span::raw(format!("  {env:<12}")),

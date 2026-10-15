@@ -300,6 +300,18 @@ async fn a_pairs_terraform_holds_its_instances_and_attached_disks() {
 }
 
 #[tokio::test]
+async fn folding_a_workload_into_itself_records_nothing() {
+    let store = memory_store().await;
+    let before = store.events().await.unwrap().len();
+    store.merge_workload("shop", " shop ").await.unwrap();
+    assert_eq!(store.events().await.unwrap().len(), before);
+    assert!(store.aliases().await.unwrap().is_empty());
+    store.merge_workload("shop-eu", "shop").await.unwrap();
+    assert_eq!(store.events().await.unwrap().len(), before + 1);
+    assert_eq!(store.aliases().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn disposition_changes_are_kept_as_lineage() {
     let (store, _) = grouped(fixture(
         "s",

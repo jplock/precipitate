@@ -205,11 +205,16 @@ impl Store {
 
     /// Record that `alias` is really `workload`; the next regroup moves
     /// its resources.
+    /// Record that `alias` is really `workload`. Folding a name into
+    /// itself changes nothing and records nothing.
     pub async fn merge_workload(
         &self,
         alias: &str,
         workload: &str,
     ) -> Result<(), DbError> {
+        if alias.trim() == workload.trim() {
+            return Ok(());
+        }
         self.apply(PlanEvent::WorkloadMerged {
             alias: alias.into(),
             into: workload.into(),

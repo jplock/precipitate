@@ -299,8 +299,12 @@ impl App {
         let Some(p) = self.popups.close::<MergePrompt>() else { return Ok(()) };
         let Some(store) = &self.store else { return Ok(()) };
         let into = p.text.trim().to_string();
-        if into.is_empty() || into == p.alias {
+        if into.is_empty() {
             self.note("type the workload this name belongs to");
+            return Ok(());
+        }
+        if into == p.alias {
+            self.note(format!("{into} is already {into}; nothing changed"));
             return Ok(());
         }
         tokio::runtime::Handle::current()
