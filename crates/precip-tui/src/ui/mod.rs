@@ -43,7 +43,7 @@ pub(crate) fn panel(title: &str) -> Block<'_> {
     )
 }
 
-pub fn draw(app: &mut App, frame: &mut Frame) {
+pub(crate) fn draw(app: &mut App, frame: &mut Frame) {
     if let Screen::Picker(_) = app.screen {
         draw_picker(app, frame);
         return;

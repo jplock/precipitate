@@ -9,6 +9,7 @@ use crate::schema::{
 };
 use crate::{DbError, Store};
 use jiff::civil::Date;
+use precip_engine::schedule::holidays::Holiday;
 use precip_engine::schedule::{
     Blackout, GlobalRules, Schedule, Status, Weekdays,
 };
@@ -42,7 +43,7 @@ impl Store {
 
     /// Append an event, project it, and compute the schedule it leads
     /// to. Every change to the plan goes through here.
-    pub async fn apply(
+    pub(crate) async fn apply(
         &self,
         event: PlanEvent,
     ) -> Result<(i64, Schedule), DbError> {
@@ -51,7 +52,7 @@ impl Store {
     }
 
     /// `apply` from a chosen day, for status changes that carry one.
-    pub async fn apply_as_of(
+    pub(crate) async fn apply_as_of(
         &self,
         event: PlanEvent,
         today: Date,
@@ -227,7 +228,7 @@ impl Store {
     /// Add the chosen holidays of a year as freezes, one each.
     pub async fn add_holidays(
         &self,
-        holidays: &[precip_engine::schedule::holidays::Holiday],
+        holidays: &[Holiday],
     ) -> Result<(), DbError> {
         for h in holidays {
             self.add_blackout(&Blackout {

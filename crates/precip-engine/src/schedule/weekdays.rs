@@ -57,13 +57,13 @@ impl WeekdayPreset {
 /// A token in a weekday list that names no day or preset.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0:?} is not a day; use mon..sun, weekdays, weekends or any")]
-pub struct UnknownWeekday(pub String);
+pub struct UnknownWeekday(String);
 
 impl Weekdays {
     /// Every day of the week.
     pub const EVERY_DAY: [Weekday; 7] = ALL;
 
-    pub fn any() -> Self {
+    pub(crate) fn any() -> Self {
         Self(Vec::new())
     }
 
@@ -85,7 +85,7 @@ impl Weekdays {
         &self.0
     }
 
-    pub fn allows(&self, day: Weekday) -> bool {
+    pub(crate) fn allows(&self, day: Weekday) -> bool {
         self.0.is_empty() || self.0.contains(&day)
     }
 

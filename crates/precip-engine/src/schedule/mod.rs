@@ -69,7 +69,7 @@ pub struct Blackout {
 
 impl Blackout {
     /// Whether this freeze stops `pair` from migrating on `day`.
-    pub fn covers(&self, day: Date, pair: &PairKey) -> bool {
+    pub(crate) fn covers(&self, day: Date, pair: &PairKey) -> bool {
         day >= self.start
             && day <= self.end
             && self.pair.as_ref().is_none_or(|p| p == pair)
@@ -93,7 +93,7 @@ precip_types::named_enum! {
 
 impl Status {
     /// Statuses that need a date proposed.
-    pub fn is_open(self) -> bool {
+    pub(crate) fn is_open(self) -> bool {
         match self {
             Status::Proposed | Status::Missed | Status::RolledBack => true,
             Status::Confirmed | Status::Migrated => false,
@@ -125,7 +125,7 @@ impl PairState {
     }
 
     /// The agreed start date, for confirmed pairs.
-    pub fn agreed(self) -> Option<Date> {
+    pub(crate) fn agreed(self) -> Option<Date> {
         match self {
             Self::Confirmed(d) => Some(d),
             Self::Proposed
@@ -183,7 +183,7 @@ impl PairInput {
     }
 
     /// The last day of a migration that starts on `start`.
-    pub fn span_end(&self, start: Date) -> Date {
+    pub(crate) fn span_end(&self, start: Date) -> Date {
         let extra = i64::from(self.duration.get()) - 1;
         start.checked_add(extra.days()).unwrap_or(start)
     }
@@ -203,7 +203,7 @@ impl PairInput {
 }
 
 /// Every date from `start` to `end`, inclusive.
-pub fn days(start: Date, end: Date) -> impl Iterator<Item = Date> {
+pub(crate) fn days(start: Date, end: Date) -> impl Iterator<Item = Date> {
     start.series(1.day()).take_while(move |d| *d <= end)
 }
 
@@ -391,17 +391,6 @@ pub struct Schedule {
     pub conflicts: Vec<(PairKey, Conflict)>,
 }
 
-impl Schedule {
-    /// Slots grouped by start date, for a calendar view.
-    pub fn by_date(&self) -> BTreeMap<Date, Vec<&Slot>> {
-        let mut map: BTreeMap<Date, Vec<&Slot>> = BTreeMap::new();
-        for s in &self.slots {
-            map.entry(s.date).or_default().push(s);
-        }
-        map
-    }
-}
-
 /// Capacity used so far, per day, ISO week and month.
 struct Capacity<'a> {
     rules: &'a GlobalRules,
@@ -564,7 +553,7 @@ pub struct Plan<'a> {
 impl Plan<'_> {
     /// What `pair` waits for: its explicit dependencies plus, by rule, the
     /// other environments of its workload when it is production.
-    pub fn dependencies(&self, pair: &PairInput) -> Vec<PairKey> {
+    pub(crate) fn dependencies(&self, pair: &PairInput) -> Vec<PairKey> {
         let mut deps = pair.depends_on.clone();
         if self.rules.nonprod_before_prod
             && pair.key.environment.is_production()

@@ -2,6 +2,8 @@ use super::*;
 use crate::kinds::Setting;
 use crate::query::Bound;
 use crate::schema::{Settings, WorkloadOverrides};
+use precip_engine::schedule::{Blackout, Schedule, Slot, Weekdays};
+use precip_types::body::Instance;
 use precip_types::scan::{
     Edge, Relationship, Resource, ResourceKind, ScanTarget, TargetStatus,
 };
@@ -32,7 +34,7 @@ fn instance(arn: &str, instance_type: &str) -> Resource {
         account_id: "123456789012".into(),
         region: "us-east-1".into(),
         tags: BTreeMap::from([("Name".into(), "web".into())]),
-        body: precip_types::Body::Ec2Instance(precip_types::body::Instance {
+        body: precip_types::Body::Ec2Instance(Instance {
             instance_type: Some(instance_type.into()),
             ..Default::default()
         }),
@@ -569,7 +571,7 @@ async fn senseless_status_changes_are_refused() {
     status(Status::RolledBack, None).await.unwrap();
     assert!(refused(status(Status::RolledBack, None).await));
 
-    let b = precip_engine::schedule::Blackout {
+    let b = Blackout {
         name: "freeze".into(),
         start: date(2026, 12, 20),
         end: date(2027, 1, 5),
@@ -778,7 +780,7 @@ async fn reconfirming_frees_the_old_date_for_another_pair() {
     rules.nonprod_before_prod = false;
     store.set_global_rules(&rules).await.unwrap();
     let today = date(2026, 10, 14);
-    let dev_date = |s: &precip_engine::schedule::Schedule| {
+    let dev_date = |s: &Schedule| {
         s.slots.iter().find(|x| x.pair.environment == "dev").unwrap().date
     };
 
@@ -850,9 +852,7 @@ async fn schedule_round_trips_rules_status_and_versions() {
         .set_pair_rule(
             "shop",
             "prod",
-            Some(&precip_engine::schedule::Weekdays::only([
-                jiff::civil::Weekday::Saturday,
-            ])),
+            Some(&Weekdays::only([jiff::civil::Weekday::Saturday])),
             None,
             0,
         )
@@ -862,7 +862,7 @@ async fn schedule_round_trips_rules_status_and_versions() {
     let today = date(2026, 10, 14);
     let (v1, s1) =
         store.compute_schedule(today, Trigger::Command).await.unwrap();
-    let by: BTreeMap<&str, &precip_engine::schedule::Slot> =
+    let by: BTreeMap<&str, &Slot> =
         s1.slots.iter().map(|x| (x.pair.environment.as_str(), x)).collect();
     assert_eq!(by["dev"].date, today);
     assert_eq!(by["prod"].date, date(2026, 10, 17), "saturday, after dev");

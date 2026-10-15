@@ -16,17 +16,18 @@ mod schedule;
 mod schema;
 mod workloads;
 
-pub use kinds::{DispositionSource, EventKind, MigrationEventKind, Trigger};
+pub use kinds::{DispositionSource, Trigger};
 pub use scans::{Overview, ScanDiff, ScanStats, ScanSummary};
 pub use schedule::{
-    Metrics, MigrationEvent, PairStatus, PlanEvent, PlanEventRecord,
-    RESCHEDULE_REASONS, ScheduleVersion, Verification, WaveMetrics,
+    Metrics, PlanEvent, PlanEventRecord, RESCHEDULE_REASONS, Verification,
+    WaveMetrics,
 };
 pub use workloads::{
     DispositionChange, GroupStats, MemberDetail, WorkloadSummary,
 };
 
 use camino::Utf8Path;
+use precip_engine::schedule::UnknownWeekday;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 
@@ -47,7 +48,7 @@ pub enum DbError {
     #[error(transparent)]
     Infallible(#[from] std::convert::Infallible),
     #[error("reading a weekday rule")]
-    Weekdays(#[from] precip_engine::schedule::UnknownWeekday),
+    Weekdays(#[from] UnknownWeekday),
     #[error("{0}")]
     Invalid(String),
 }

@@ -27,7 +27,7 @@ impl RegionContext {
     }
 }
 
-pub struct Rds;
+pub(crate) struct Rds;
 
 impl Collect for Rds {
     const API: &'static str = "rds:DescribeDBInstances";
@@ -64,7 +64,7 @@ impl Collect for Rds {
     }
 }
 
-pub struct Eks;
+pub(crate) struct Eks;
 
 impl Collect for Eks {
     const API: &'static str = "eks:ListClusters";
@@ -91,7 +91,7 @@ impl Collect for Eks {
     }
 }
 
-pub struct Ecs;
+pub(crate) struct Ecs;
 
 impl Collect for Ecs {
     const API: &'static str = "ecs:ListClusters";
@@ -118,7 +118,7 @@ impl Collect for Ecs {
     }
 }
 
-pub struct Lambda;
+pub(crate) struct Lambda;
 
 impl Collect for Lambda {
     const API: &'static str = "lambda:ListFunctions";
@@ -150,7 +150,7 @@ impl Collect for Lambda {
     }
 }
 
-pub struct ElastiCache;
+pub(crate) struct ElastiCache;
 
 impl Collect for ElastiCache {
     const API: &'static str = "elasticache:DescribeCacheClusters";
@@ -183,7 +183,7 @@ impl Collect for ElastiCache {
     }
 }
 
-pub struct DynamoDb;
+pub(crate) struct DynamoDb;
 
 impl Collect for DynamoDb {
     const API: &'static str = "dynamodb:ListTables";
@@ -210,7 +210,7 @@ impl Collect for DynamoDb {
     }
 }
 
-pub struct Efs;
+pub(crate) struct Efs;
 
 impl Collect for Efs {
     const API: &'static str = "elasticfilesystem:DescribeFileSystems";

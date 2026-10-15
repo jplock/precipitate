@@ -134,7 +134,7 @@ pub enum Finding {
 impl Finding {
     /// Whether the finding stops the move, rather than being work to do
     /// before it.
-    pub fn blocks(&self) -> bool {
+    pub(crate) fn blocks(&self) -> bool {
         match self {
             Self::ArmNeedsReplatform
             | Self::UnsupportedArchitecture { .. }
@@ -211,7 +211,7 @@ impl fmt::Display for Finding {
 /// Whether an instance can move, and every reason it cannot as it is,
 /// blocking findings first.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Assessment {
+pub(crate) struct Assessment {
     pub fit: Fit,
     pub findings: Vec<Finding>,
 }
@@ -392,7 +392,7 @@ pub fn sized_instances(
 }
 
 /// What fit assessment looks at.
-pub struct FitInput<'a> {
+pub(crate) struct FitInput<'a> {
     pub architecture: &'a Architecture,
     pub vcpus: u32,
     pub memory_gib: u64,
@@ -411,7 +411,7 @@ pub struct FitInput<'a> {
 impl FitInput<'_> {
     /// RFD 0001, "Fit checks and blockers". Blocked conditions win over
     /// remediations.
-    pub fn assess(
+    pub(crate) fn assess(
         &self,
         profile: &Profile,
         disposition: Disposition,
@@ -495,9 +495,10 @@ impl FitInput<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sizing::profiles::BuiltinProfile;
 
     fn gen1() -> Profile {
-        crate::sizing::profiles::BuiltinProfile::Gen1.profile().expect("parses")
+        BuiltinProfile::Gen1.profile().expect("parses")
     }
 
     const X86: Architecture = Architecture::X86_64;

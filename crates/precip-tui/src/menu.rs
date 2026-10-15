@@ -1,13 +1,15 @@
 //! Row menus of actions, and exports.
 
 use crate::{App, MergePrompt, Pending, PickerMode, TuiError};
+use precip_db::export;
+use precip_engine::schedule::Status;
 use ratatui::widgets::ListState;
 
 /// One thing the user can do from a row menu. Only the actions that make
 /// sense for the row are offered, and the ones that change more than a
 /// single pair, or record an outcome, ask once more before they act.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action {
+pub(crate) enum Action {
     AgreeDate,
     ChangeDate,
     Done,
@@ -25,7 +27,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Action::AgreeDate => "Agree a date with the owners",
             Action::ChangeDate => "Agree a different date",
@@ -46,7 +48,7 @@ impl Action {
         }
     }
 
-    pub fn help(self) -> &'static str {
+    pub(crate) fn help(self) -> &'static str {
         match self {
             Action::AgreeDate => {
                 "Pick one of the proposed dates. Once agreed, the tool never moves it."
@@ -94,7 +96,7 @@ impl Action {
     }
 
     /// Actions that record an outcome or touch many pairs ask once more.
-    pub fn needs_confirmation(self) -> bool {
+    pub(crate) fn needs_confirmation(self) -> bool {
         match self {
             Action::AgreeDate
             | Action::ChangeDate
@@ -114,7 +116,7 @@ impl Action {
     }
 }
 
-pub struct ActionMenu {
+pub(crate) struct ActionMenu {
     pub title: String,
     pub workload: String,
     pub environment: String,
@@ -126,14 +128,14 @@ pub struct ActionMenu {
 
 /// What an export writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportKind {
+pub(crate) enum ExportKind {
     Workloads,
     Sizing,
     Schedule,
 }
 
 /// Typing the path an export goes to. The extension picks the format.
-pub struct ExportPrompt {
+pub(crate) struct ExportPrompt {
     pub kind: ExportKind,
     pub text: String,
     /// The path exists; a second Enter overwrites it.
@@ -176,17 +178,17 @@ impl App {
         let ext = path.extension().unwrap_or_default().to_lowercase();
         let text = match (kind, ext.as_str()) {
             (ExportKind::Workloads, "csv") => {
-                precip_db::export::workloads_csv(&self.workloads)
+                export::workloads_csv(&self.workloads)
             }
             (ExportKind::Workloads, "json") => {
-                precip_db::export::workloads_json(&self.workloads)?
+                export::workloads_json(&self.workloads)?
             }
             (ExportKind::Sizing, "csv") => match &self.sizing {
-                Some(v) => precip_db::export::sizing_csv(&v.instances),
+                Some(v) => export::sizing_csv(&v.instances),
                 None => return Ok(()),
             },
             (ExportKind::Sizing, "json") => match &self.sizing {
-                Some(v) => precip_db::export::sizing_json(
+                Some(v) => export::sizing_json(
                     &v.profile,
                     &v.assumptions,
                     &v.result,
@@ -196,15 +198,15 @@ impl App {
                 None => return Ok(()),
             },
             (ExportKind::Schedule, "csv") => match &self.schedule {
-                Some(v) => precip_db::export::schedule_csv(&v.schedule),
+                Some(v) => export::schedule_csv(&v.schedule),
                 None => return Ok(()),
             },
             (ExportKind::Schedule, "json") => match &self.schedule {
-                Some(v) => precip_db::export::schedule_json(&v.schedule)?,
+                Some(v) => export::schedule_json(&v.schedule)?,
                 None => return Ok(()),
             },
             (ExportKind::Schedule, "ics") => match &self.schedule {
-                Some(v) => precip_db::export::schedule_ics(
+                Some(v) => export::schedule_ics(
                     &v.schedule,
                     &self.context.workspace,
                     jiff::Timestamp::now(),
@@ -275,23 +277,15 @@ impl App {
                     self.open_date_picker();
                 }
             }
-            Action::Done => self.change_status(
-                &w,
-                &e,
-                precip_engine::schedule::Status::Migrated,
-                None,
-                None,
-            )?,
+            Action::Done => {
+                self.change_status(&w, &e, Status::Migrated, None, None)?
+            }
             Action::DidNotHappen => {
                 self.ask_reason(Pending::Missed { workload: w, environment: e })
             }
-            Action::RolledBack => self.change_status(
-                &w,
-                &e,
-                precip_engine::schedule::Status::RolledBack,
-                None,
-                None,
-            )?,
+            Action::RolledBack => {
+                self.change_status(&w, &e, Status::RolledBack, None, None)?
+            }
             Action::ShowResources => {
                 if self.expanded.is_none() {
                     self.toggle_expand()?;

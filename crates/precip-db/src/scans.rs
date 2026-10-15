@@ -426,8 +426,12 @@ impl Store {
         Ok(diff)
     }
 
+    #[cfg(test)]
     /// Number of resources present at scan `seq`.
-    pub async fn resource_count(&self, seq: i64) -> Result<i64, DbError> {
+    pub(crate) async fn resource_count(
+        &self,
+        seq: i64,
+    ) -> Result<i64, DbError> {
         let row = (Query::select()
             .expr(Expr::col(ResourceVersions::Arn).count())
             .from(ResourceVersions::Table)

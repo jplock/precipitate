@@ -1,17 +1,17 @@
 //! Read-only discovery of an AWS estate. Every call here is a describe or
 //! list; the shipped IAM policy grants nothing else.
 
-pub mod accounts;
-pub mod arn;
-pub mod autoscaling;
-pub mod cloudformation;
-pub mod collect;
-pub mod ec2;
-pub mod elb;
-pub mod explorer;
-pub mod managed;
-pub mod tagging;
-pub mod vpc;
+mod accounts;
+mod arn;
+mod autoscaling;
+mod cloudformation;
+mod collect;
+mod ec2;
+mod elb;
+mod explorer;
+mod managed;
+mod tagging;
+mod vpc;
 
 use aws_config::{BehaviorVersion, SdkConfig};
 use precip_types::scan::{Relationship, Resource, ScanTarget, TargetStatus};
@@ -44,7 +44,7 @@ const REGION_CONCURRENCY: usize = 8;
 
 /// Roles AWS itself creates in member accounts: the first by
 /// Organizations when it creates an account, the second by Control Tower.
-pub const DEFAULT_MEMBER_ROLES: &[&str] =
+const DEFAULT_MEMBER_ROLES: &[&str] =
     &["OrganizationAccountAccessRole", "AWSControlTowerExecution"];
 
 /// Scan options from the command line.

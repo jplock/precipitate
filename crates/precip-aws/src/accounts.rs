@@ -5,10 +5,10 @@ use aws_config::sts::AssumeRoleProvider;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use precip_types::{AccountId, Arn, Body, Region, Resource, body};
 
-use crate::ScanError;
+use crate::{ScanError, arn};
 
 #[derive(Debug, Clone)]
-pub struct CallerIdentity {
+pub(crate) struct CallerIdentity {
     pub account_id: AccountId,
     pub arn: Arn,
     /// The ARN partition the credentials belong to: `aws`, `aws-us-gov`,
@@ -17,7 +17,7 @@ pub struct CallerIdentity {
     pub partition: String,
 }
 
-pub async fn caller_identity(
+pub(crate) async fn caller_identity(
     config: &SdkConfig,
 ) -> Result<CallerIdentity, ScanError> {
     let sts = aws_sdk_sts::Client::new(config);
@@ -30,7 +30,7 @@ pub async fn caller_identity(
     let account_id = AccountId::from(
         out.account().ok_or(ScanError::IdentityField("Account"))?,
     );
-    let partition = crate::arn::partition_of(arn.as_str())
+    let partition = arn::partition_of(arn.as_str())
         .ok_or_else(|| ScanError::Partition(arn.to_string()))?
         .to_string();
     Ok(CallerIdentity { account_id, arn, partition })
@@ -39,7 +39,7 @@ pub async fn caller_identity(
 /// Whether the caller is the management account of an Organization.
 /// `AWSOrganizationsNotInUseException` and `AccessDenied` both mean
 /// single-account mode, so any error is treated as "no".
-pub async fn is_management_account(
+pub(crate) async fn is_management_account(
     config: &SdkConfig,
     account_id: &AccountId,
 ) -> bool {
@@ -61,7 +61,7 @@ pub async fn is_management_account(
 
 /// One member of the Organization.
 #[derive(Debug, Clone)]
-pub struct MemberAccount {
+pub(crate) struct MemberAccount {
     pub id: AccountId,
     pub arn: Arn,
     pub name: String,
@@ -72,7 +72,7 @@ pub struct MemberAccount {
 }
 
 impl MemberAccount {
-    pub fn to_resource(&self, partition: &str) -> Resource {
+    pub(crate) fn to_resource(&self, partition: &str) -> Resource {
         Resource {
             arn: self.arn.clone(),
             account_id: self.id.clone(),
@@ -92,7 +92,7 @@ impl MemberAccount {
 /// Every account in the Organization, with its parent OU name. Suspended
 /// and pending accounts are included so the report can say they were
 /// skipped; the caller filters on `status`.
-pub async fn list_accounts(
+pub(crate) async fn list_accounts(
     config: &SdkConfig,
 ) -> Result<Vec<MemberAccount>, ScanError> {
     let orgs = aws_sdk_organizations::Client::new(config);
@@ -190,7 +190,7 @@ pub async fn list_accounts(
 
 /// SDK config whose credentials come from assuming `role_name` in
 /// `account_id`, chained from the management account's credentials.
-pub async fn assume_member_role(
+pub(crate) async fn assume_member_role(
     base: &SdkConfig,
     partition: &str,
     account_id: &AccountId,

@@ -10,7 +10,7 @@ use crate::collect::{
     owned, tags,
 };
 
-pub struct Groups;
+pub(crate) struct Groups;
 
 impl Collect for Groups {
     const API: &'static str = "autoscaling:DescribeAutoScalingGroups";
@@ -93,7 +93,7 @@ impl Collect for Groups {
 
 /// The launch template version each ASG points at, for its instance type.
 /// Runs after the groups so it only describes templates in use.
-pub struct LaunchTemplates;
+pub(crate) struct LaunchTemplates;
 
 impl Collect for LaunchTemplates {
     const API: &'static str = "ec2:DescribeLaunchTemplateVersions";
@@ -157,7 +157,7 @@ impl Collect for LaunchTemplates {
 /// Launch configurations the groups reference. Older than launch
 /// templates and no longer creatable in new accounts, but existing groups
 /// keep using them.
-pub struct LaunchConfigurations;
+pub(crate) struct LaunchConfigurations;
 
 impl Collect for LaunchConfigurations {
     const API: &'static str = "autoscaling:DescribeLaunchConfigurations";

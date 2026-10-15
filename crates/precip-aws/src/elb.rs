@@ -10,7 +10,7 @@ use crate::collect::{
     Collect, CollectError, Collected, RegionContext, next_page, own, owned,
 };
 
-pub struct LoadBalancers;
+pub(crate) struct LoadBalancers;
 
 impl Collect for LoadBalancers {
     const API: &'static str = "elasticloadbalancing:DescribeLoadBalancers";
@@ -49,7 +49,7 @@ impl Collect for LoadBalancers {
 
 /// Target groups plus their healthy and unhealthy instance targets, as
 /// `target_of` edges from instance to target group.
-pub struct TargetGroups;
+pub(crate) struct TargetGroups;
 
 impl Collect for TargetGroups {
     const API: &'static str = "elasticloadbalancing:DescribeTargetGroups";

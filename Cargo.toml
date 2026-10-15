@@ -68,6 +68,7 @@ xdg = { version = "=3.0.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unreachable_pub = "warn"
 
 # Mirrors Omicron's tree-wide Clippy configuration.
 [workspace.lints.clippy]
@@ -94,6 +95,7 @@ wildcard_enum_match_arm = "warn"
 match_wildcard_for_single_variants = "warn"
 print_stdout = "deny"
 print_stderr = "deny"
+absolute_paths = "deny"
 
 [profile.release]
 lto = "fat"

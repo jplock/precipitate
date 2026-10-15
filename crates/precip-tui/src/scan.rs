@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 #[derive(Debug, Default, Clone)]
-pub struct AccountProgress {
+pub(crate) struct AccountProgress {
     pub name: Option<String>,
     pub planned: usize,
     pub skipped: usize,
@@ -20,12 +20,12 @@ pub struct AccountProgress {
 
 impl AccountProgress {
     /// Whether this account has nothing left to do.
-    pub fn finished(&self) -> bool {
+    pub(crate) fn finished(&self) -> bool {
         self.note.is_some()
             || (self.planned + self.skipped > 0 && self.done >= self.planned)
     }
 
-    pub fn state(&self) -> String {
+    pub(crate) fn state(&self) -> String {
         match &self.note {
             Some(n) => n.clone(),
             None if self.planned == 0 && self.skipped > 0 => {
@@ -38,7 +38,7 @@ impl AccountProgress {
     }
 }
 
-pub struct Progress {
+pub(crate) struct Progress {
     handle: ScanHandle,
     pub started: Instant,
     pub accounts_total: usize,
@@ -47,19 +47,19 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn regions_planned(&self) -> usize {
+    pub(crate) fn regions_planned(&self) -> usize {
         self.accounts.values().map(|a| a.planned).sum()
     }
 
-    pub fn regions_done(&self) -> usize {
+    pub(crate) fn regions_done(&self) -> usize {
         self.accounts.values().map(|a| a.done).sum()
     }
 
-    pub fn accounts_done(&self) -> usize {
+    pub(crate) fn accounts_done(&self) -> usize {
         self.accounts.values().filter(|a| a.finished()).count()
     }
 
-    pub fn running(&self) -> bool {
+    pub(crate) fn running(&self) -> bool {
         self.outcome.is_none()
     }
 }

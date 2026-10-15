@@ -172,7 +172,7 @@ impl PlanEvent {
         }
     }
 
-    pub fn kind(&self) -> EventKind {
+    pub(crate) fn kind(&self) -> EventKind {
         match self {
             PlanEvent::RulesSet { .. } => EventKind::RulesSet,
             PlanEvent::BlackoutAdded { .. } => EventKind::BlackoutAdded,
@@ -366,7 +366,7 @@ pub struct PlanEventRecord {
 
 /// A pair's current standing, with when it was confirmed or migrated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PairStatus {
+pub(crate) struct PairStatus {
     pub status: Status,
     pub confirmed_date: Option<Date>,
     pub migrated_date: Option<Date>,
@@ -390,7 +390,7 @@ impl PairStatus {
 
     /// The scheduler's view. An agreed status is always written with its
     /// date; one read without a date has nothing to hold and is proposed.
-    pub fn state(&self) -> PairState {
+    pub(crate) fn state(&self) -> PairState {
         match (self.status, self.confirmed_date) {
             (Status::Confirmed, Some(d)) => PairState::Confirmed(d),
             (Status::Confirmed | Status::Proposed, _) => PairState::Proposed,
@@ -402,7 +402,7 @@ impl PairStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationEvent {
+pub(crate) struct MigrationEvent {
     pub event: MigrationEventKind,
     pub date: Option<Date>,
     pub at: jiff::Timestamp,
@@ -421,7 +421,7 @@ impl MigrationEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScheduleVersion {
+pub(crate) struct ScheduleVersion {
     pub id: i64,
     pub computed_at: jiff::Timestamp,
     pub as_of: Date,
@@ -440,8 +440,9 @@ impl Store {
             .unwrap_or_else(|| jiff::Zoned::now().date())
     }
 
+    #[cfg(test)]
     /// Pin "today" so schedules computed by `apply` are reproducible.
-    pub fn freeze_today(&self, day: Date) {
+    pub(crate) fn freeze_today(&self, day: Date) {
         if let Ok(mut t) = self.today_override.lock() {
             *t = Some(day);
         }

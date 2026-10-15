@@ -4,7 +4,7 @@
 use sea_query::Iden;
 
 #[derive(Iden)]
-pub enum Scans {
+pub(crate) enum Scans {
     Table,
     Id,
     Seq,
@@ -14,7 +14,7 @@ pub enum Scans {
 }
 
 #[derive(Iden)]
-pub enum ScanTargets {
+pub(crate) enum ScanTargets {
     Table,
     ScanId,
     AccountId,
@@ -24,7 +24,7 @@ pub enum ScanTargets {
 }
 
 #[derive(Iden)]
-pub enum ResourceVersions {
+pub(crate) enum ResourceVersions {
     Table,
     Arn,
     Version,
@@ -39,7 +39,7 @@ pub enum ResourceVersions {
 }
 
 #[derive(Iden)]
-pub enum RelationshipVersions {
+pub(crate) enum RelationshipVersions {
     Table,
     FromArn,
     Edge,
@@ -49,13 +49,13 @@ pub enum RelationshipVersions {
 }
 
 #[derive(Iden)]
-pub enum Workloads {
+pub(crate) enum Workloads {
     Table,
     Name,
 }
 
 #[derive(Iden)]
-pub enum WorkloadEnvironments {
+pub(crate) enum WorkloadEnvironments {
     Table,
     Workload,
     Environment,
@@ -63,7 +63,7 @@ pub enum WorkloadEnvironments {
 }
 
 #[derive(Iden)]
-pub enum WorkloadMembers {
+pub(crate) enum WorkloadMembers {
     Table,
     ScanId,
     Arn,
@@ -73,7 +73,7 @@ pub enum WorkloadMembers {
 }
 
 #[derive(Iden)]
-pub enum WorkloadOverrides {
+pub(crate) enum WorkloadOverrides {
     Table,
     Arn,
     Workload,
@@ -81,21 +81,21 @@ pub enum WorkloadOverrides {
 }
 
 #[derive(Iden)]
-pub enum Settings {
+pub(crate) enum Settings {
     Table,
     Key,
     Value,
 }
 
 #[derive(Iden)]
-pub enum WorkloadAliases {
+pub(crate) enum WorkloadAliases {
     Table,
     Alias,
     Workload,
 }
 
 #[derive(Iden)]
-pub enum DispositionHistory {
+pub(crate) enum DispositionHistory {
     Table,
     Id,
     Workload,
@@ -108,7 +108,7 @@ pub enum DispositionHistory {
 }
 
 #[derive(Iden)]
-pub enum ScheduleBlackouts {
+pub(crate) enum ScheduleBlackouts {
     Table,
     Name,
     StartDate,
@@ -118,7 +118,7 @@ pub enum ScheduleBlackouts {
 }
 
 #[derive(Iden)]
-pub enum ScheduleRules {
+pub(crate) enum ScheduleRules {
     Table,
     Workload,
     Environment,
@@ -131,7 +131,7 @@ pub enum ScheduleRules {
 }
 
 #[derive(Iden)]
-pub enum ScheduleDependencies {
+pub(crate) enum ScheduleDependencies {
     Table,
     Workload,
     Environment,
@@ -140,7 +140,7 @@ pub enum ScheduleDependencies {
 }
 
 #[derive(Iden)]
-pub enum ScheduleWaves {
+pub(crate) enum ScheduleWaves {
     Table,
     Wave,
     Name,
@@ -148,7 +148,7 @@ pub enum ScheduleWaves {
 }
 
 #[derive(Iden)]
-pub enum MigrationStatus {
+pub(crate) enum MigrationStatus {
     Table,
     Workload,
     Environment,
@@ -158,7 +158,7 @@ pub enum MigrationStatus {
 }
 
 #[derive(Iden)]
-pub enum MigrationEvents {
+pub(crate) enum MigrationEvents {
     Table,
     Id,
     Workload,
@@ -170,7 +170,7 @@ pub enum MigrationEvents {
 }
 
 #[derive(Iden)]
-pub enum ScheduleVersions {
+pub(crate) enum ScheduleVersions {
     Table,
     Id,
     ComputedAt,
@@ -184,7 +184,7 @@ pub enum ScheduleVersions {
 }
 
 #[derive(Iden)]
-pub enum ScheduleSlots {
+pub(crate) enum ScheduleSlots {
     Table,
     VersionId,
     Workload,
@@ -198,7 +198,7 @@ pub enum ScheduleSlots {
 }
 
 #[derive(Iden)]
-pub enum PlanEvents {
+pub(crate) enum PlanEvents {
     Table,
     Id,
     At,

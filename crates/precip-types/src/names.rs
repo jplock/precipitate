@@ -43,10 +43,10 @@ macro_rules! named_enum {
 
         impl $name {
             /// Every variant, in declaration order.
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+            $vis const ALL: &'static [Self] = &[$(Self::$variant),+];
 
             /// The name stored in the database and shown to the user.
-            pub fn as_str(self) -> &'static str {
+            $vis fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $text),+
                 }
@@ -60,14 +60,14 @@ macro_rules! named_enum {
         }
 
         impl ::std::str::FromStr for $name {
-            type Err = $crate::names::UnknownName;
+            type Err = $crate::UnknownName;
 
             fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
                 Self::ALL
                     .iter()
                     .copied()
                     .find(|v| v.as_str() == s)
-                    .ok_or_else(|| $crate::names::UnknownName {
+                    .ok_or_else(|| $crate::UnknownName {
                         kind: stringify!($name),
                         value: s.to_string(),
                     })
@@ -212,7 +212,7 @@ impl Region {
 
 impl EnvName {
     /// The production environment's canonical name.
-    pub const PRODUCTION: &'static str = "prod";
+    pub(crate) const PRODUCTION: &'static str = "prod";
 
     pub fn is_production(&self) -> bool {
         self.0 == Self::PRODUCTION

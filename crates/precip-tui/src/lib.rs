@@ -22,6 +22,7 @@ use crossterm::event::{
 use precip_db::{
     Overview, ScanStats, ScanSummary, Store, Trigger, WorkloadSummary,
 };
+use precip_engine::sizing::Sizing;
 use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_types::ScanEvent;
 use ratatui::DefaultTerminal;
@@ -30,18 +31,18 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 use workspace::{WorkspaceDir, WorkspaceEntry};
 
-pub use editors::{
+pub(crate) use editors::{
     DependsPicker, Fields, HolidayPicker, PairEditor, PairRow, RuleRow,
-    RulesEditor, WEEKDAY_ROWS, WeekdayPicker, WeekdayTarget,
+    RulesEditor, WEEKDAY_ROWS, WeekdayPicker,
 };
-pub use menu::{Action, ActionMenu, ExportKind, ExportPrompt};
-pub use scan::{AccountProgress, Progress};
-pub use schedule::{
+pub(crate) use menu::{Action, ActionMenu, ExportKind, ExportPrompt};
+pub(crate) use scan::Progress;
+pub(crate) use schedule::{
     DatePicker, HistoryView, Pending, ReasonPicker, ScheduleView, next_step,
 };
 pub(crate) use schedule::{parse_freeze, parse_optional_date};
-pub use sizing::SizingView;
-pub use workloads::{
+pub(crate) use sizing::SizingView;
+pub(crate) use workloads::{
     DISPOSITIONS, DispositionPicker, Expanded, MergePrompt, PickerMode,
     disposition_help,
 };
@@ -154,29 +155,29 @@ pub struct Activity {
 }
 
 pub struct App {
-    pub screen: Screen,
+    pub(crate) screen: Screen,
     store: Option<Store>,
-    pub context: Context,
-    pub scans: Vec<ScanSummary>,
-    pub overview: Option<Overview>,
-    pub workloads: Vec<WorkloadSummary>,
+    pub(crate) context: Context,
+    pub(crate) scans: Vec<ScanSummary>,
+    pub(crate) overview: Option<Overview>,
+    pub(crate) workloads: Vec<WorkloadSummary>,
     /// Account id to name, from the latest scan.
-    pub account_names: BTreeMap<String, String>,
-    pub workload_selected: ratatui::widgets::TableState,
+    pub(crate) account_names: BTreeMap<String, String>,
+    pub(crate) workload_selected: ratatui::widgets::TableState,
     /// The expanded pair's resources, when a workload is open.
-    pub expanded: Option<Expanded>,
+    pub(crate) expanded: Option<Expanded>,
     /// Popups open over the tab, bottom first.
-    pub popups: popup::Popups,
-    pub sizing: Option<SizingView>,
-    pub schedule: Option<ScheduleView>,
+    pub(crate) popups: popup::Popups,
+    pub(crate) sizing: Option<SizingView>,
+    pub(crate) schedule: Option<ScheduleView>,
     /// Screen area of the workload table's rows, for mouse clicks.
-    pub workload_rows_area: ratatui::layout::Rect,
-    pub selected: ListState,
-    pub tab: Tab,
+    pub(crate) workload_rows_area: ratatui::layout::Rect,
+    pub(crate) selected: ListState,
+    pub(crate) tab: Tab,
     launcher: Launcher,
-    pub progress: Option<Progress>,
-    pub activity: VecDeque<Activity>,
-    pub opened: Instant,
+    pub(crate) progress: Option<Progress>,
+    pub(crate) activity: VecDeque<Activity>,
+    pub(crate) opened: Instant,
 }
 
 const ACTIVITY_LIMIT: usize = 200;
@@ -242,7 +243,7 @@ impl App {
         Ok(())
     }
 
-    pub fn note(&mut self, text: impl Into<String>) {
+    pub(crate) fn note(&mut self, text: impl Into<String>) {
         self.activity
             .push_front(Activity { at: Instant::now(), text: text.into() });
         self.activity.truncate(ACTIVITY_LIMIT);
@@ -289,11 +290,7 @@ impl App {
                 Some(profile) => {
                     let instances =
                         rt.block_on(store.sized_instances(&s.id, &profile))?;
-                    let result = precip_engine::sizing::Sizing::new(
-                        &profile,
-                        &[],
-                        &assumptions,
-                    );
+                    let result = Sizing::new(&profile, &[], &assumptions);
                     let mut view = SizingView {
                         profile,
                         assumptions,
@@ -580,7 +577,7 @@ impl App {
     }
 
     /// `name (id)` when the name is known, else the id.
-    pub fn account_label(&self, id: &str) -> String {
+    pub(crate) fn account_label(&self, id: &str) -> String {
         match self.account_names.get(id) {
             Some(name) => format!("{name} ({id})"),
             None => id.to_string(),

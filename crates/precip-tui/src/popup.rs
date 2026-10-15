@@ -14,7 +14,7 @@ use crate::{
 
 /// What a key did to the popup on top.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// Handled inside the popup, or ignored.
     Stay,
     /// The popup is done without acting.
@@ -43,7 +43,7 @@ fn step_list(state: &mut ListState, len: usize, code: KeyCode) -> bool {
 }
 
 /// Type into a line of text. Returns whether the key changed it.
-pub fn edit_text(text: &mut String, code: KeyCode) -> bool {
+pub(crate) fn edit_text(text: &mut String, code: KeyCode) -> bool {
     if let KeyCode::Char(c) = code {
         text.push(c);
         true
@@ -106,24 +106,24 @@ fn editor_key(
 macro_rules! popups {
     ($($variant:ident($ty:ty)),+ $(,)?) => {
         /// Every kind of popup.
-        pub enum Popup {
+        pub(crate) enum Popup {
             $($variant($ty)),+
         }
 
         /// The kind of a popup, for drawing in stack order.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub enum PopupTag {
+        pub(crate) enum PopupTag {
             $($variant),+
         }
 
         impl Popup {
-            pub fn tag(&self) -> PopupTag {
+            pub(crate) fn tag(&self) -> PopupTag {
                 match self {
                     $(Self::$variant(_) => PopupTag::$variant),+
                 }
             }
 
-            pub fn key(&mut self, code: KeyCode) -> Outcome {
+            pub(crate) fn key(&mut self, code: KeyCode) -> Outcome {
                 match self {
                     $(Self::$variant(p) => p.key(code)),+
                 }
@@ -153,7 +153,7 @@ macro_rules! popups {
 }
 
 /// A type that is one kind of popup.
-pub trait PopupKind: Sized {
+pub(crate) trait PopupKind: Sized {
     fn of(p: &Popup) -> Option<&Self>;
     fn of_mut(p: &mut Popup) -> Option<&mut Self>;
     fn into_popup(self) -> Popup;
@@ -177,45 +177,41 @@ popups! {
 
 /// The open popups, bottom first.
 #[derive(Default)]
-pub struct Popups(Vec<Popup>);
+pub(crate) struct Popups(Vec<Popup>);
 
 impl Popups {
     /// Open a popup on top of the others.
-    pub fn open(&mut self, p: impl PopupKind) {
+    pub(crate) fn open(&mut self, p: impl PopupKind) {
         self.0.push(p.into_popup());
     }
 
     /// The topmost popup of this kind.
-    pub fn get<T: PopupKind>(&self) -> Option<&T> {
+    pub(crate) fn get<T: PopupKind>(&self) -> Option<&T> {
         self.0.iter().rev().find_map(T::of)
     }
 
-    pub fn get_mut<T: PopupKind>(&mut self) -> Option<&mut T> {
+    pub(crate) fn get_mut<T: PopupKind>(&mut self) -> Option<&mut T> {
         self.0.iter_mut().rev().find_map(T::of_mut)
     }
 
     /// Close the topmost popup of this kind and hand it back.
-    pub fn close<T: PopupKind>(&mut self) -> Option<T> {
+    pub(crate) fn close<T: PopupKind>(&mut self) -> Option<T> {
         let i = self.0.iter().rposition(|p| T::of(p).is_some())?;
         T::from_popup(self.0.remove(i))
     }
 
     /// Close the popup on top.
-    pub fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.0.pop();
     }
 
-    pub fn top_mut(&mut self) -> Option<&mut Popup> {
+    pub(crate) fn top_mut(&mut self) -> Option<&mut Popup> {
         self.0.last_mut()
     }
 
     /// The kind of each open popup, bottom first.
-    pub fn tags(&self) -> Vec<PopupTag> {
+    pub(crate) fn tags(&self) -> Vec<PopupTag> {
         self.0.iter().map(Popup::tag).collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 }
 
@@ -396,7 +392,7 @@ mod tests {
     #[test]
     fn the_stack_finds_closes_and_orders_popups() {
         let mut s = Popups::default();
-        assert!(s.is_empty());
+        assert!(s.tags().is_empty());
         s.open(history());
         s.open(merge());
         assert_eq!(s.tags(), [PopupTag::History, PopupTag::Merge]);

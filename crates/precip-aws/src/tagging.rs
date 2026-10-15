@@ -10,7 +10,7 @@ use crate::collect::{
     Collect, CollectError, Collected, RegionContext, Stage, next_page, tags,
 };
 
-pub struct Tags;
+pub(crate) struct Tags;
 
 impl Collect for Tags {
     const API: &'static str = "tag:GetResources";

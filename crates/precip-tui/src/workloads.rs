@@ -7,14 +7,14 @@ use precip_types::Disposition;
 use ratatui::widgets::ListState;
 
 /// Typing the workload a name folds into.
-pub struct MergePrompt {
+pub(crate) struct MergePrompt {
     pub alias: String,
     pub text: String,
 }
 
 /// What the disposition picker sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerMode {
+pub(crate) enum PickerMode {
     Pair,
     /// The default for new pairs; `apply` also changes untouched pairs.
     Default {
@@ -23,7 +23,7 @@ pub enum PickerMode {
 }
 
 /// A workload and environment pair opened to show its resources.
-pub struct Expanded {
+pub(crate) struct Expanded {
     pub workload: String,
     pub environment: String,
     pub members: Vec<MemberDetail>,
@@ -32,14 +32,14 @@ pub struct Expanded {
 }
 
 /// The disposition picker, open over the Workloads tab.
-pub struct DispositionPicker {
+pub(crate) struct DispositionPicker {
     pub workload: String,
     pub environment: String,
     pub mode: PickerMode,
     pub state: ListState,
 }
 
-pub const DISPOSITIONS: [Disposition; 7] = [
+pub(crate) const DISPOSITIONS: [Disposition; 7] = [
     Disposition::Rehost,
     Disposition::Relocate,
     Disposition::Replatform,
@@ -50,7 +50,7 @@ pub const DISPOSITIONS: [Disposition; 7] = [
 ];
 
 /// What a disposition means, for the picker.
-pub fn disposition_help(d: Disposition) -> &'static str {
+pub(crate) fn disposition_help(d: Disposition) -> &'static str {
     match d {
         Disposition::Rehost => "move the instances to Oxide as they are",
         Disposition::Relocate => "move by re-importing images, no app change",

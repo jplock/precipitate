@@ -2,6 +2,7 @@
 
 use super::{accent, dim, panel, stat_card};
 use crate::{App, logo};
+use precip_engine::sizing::{Bound, Fit};
 use ratatui::prelude::*;
 use ratatui::widgets::{Padding, Paragraph, Row, Table};
 
@@ -27,8 +28,8 @@ pub(crate) fn draw_sizing(app: &App, frame: &mut Frame, area: Rect) {
     let card_areas =
         Layout::horizontal([Constraint::Ratio(1, 5); 5]).split(cards);
     let bound = match r.bound {
-        precip_engine::sizing::Bound::Compute => "compute bound",
-        precip_engine::sizing::Bound::Storage => "storage bound",
+        Bound::Compute => "compute bound",
+        Bound::Storage => "storage bound",
     };
     let cards = [
         (
@@ -206,15 +207,14 @@ pub(crate) fn draw_sizing(app: &App, frame: &mut Frame, area: Rect) {
     let lines: Vec<Line> = v
         .instances
         .iter()
-        .filter(|i| i.fit != precip_engine::sizing::Fit::CleanFit)
+        .filter(|i| i.fit != Fit::CleanFit)
         .map(|i| {
             let tag = match i.fit {
-                precip_engine::sizing::Fit::CannotMove => Span::styled(
+                Fit::CannotMove => Span::styled(
                     "cannot move    ",
                     Style::default().fg(logo::OX_YELLOW),
                 ),
-                precip_engine::sizing::Fit::NeedsRemediation
-                | precip_engine::sizing::Fit::CleanFit => {
+                Fit::NeedsRemediation | Fit::CleanFit => {
                     Span::styled("needs changes  ", accent())
                 }
             };

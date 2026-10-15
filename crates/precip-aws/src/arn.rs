@@ -7,7 +7,7 @@ use precip_types::{AccountId, Arn, Region};
 /// A resource type whose ARN is `arn:<partition>:<service>:<region>:
 /// <account>:<prefix><id>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArnType {
+pub(crate) enum ArnType {
     Instance,
     Volume,
     Image,
@@ -84,7 +84,7 @@ impl ArnType {
     }
 
     /// The type whose CloudFormation physical id is the id in its ARN.
-    pub fn from_cloudformation(resource_type: &str) -> Option<Self> {
+    pub(crate) fn from_cloudformation(resource_type: &str) -> Option<Self> {
         Some(match resource_type {
             "AWS::EC2::Instance" => Self::Instance,
             "AWS::EC2::Volume" => Self::Volume,
@@ -100,7 +100,7 @@ impl ArnType {
         })
     }
 
-    pub fn arn(
+    pub(crate) fn arn(
         self,
         partition: &str,
         region: &Region,
@@ -138,7 +138,7 @@ impl ArnType {
 }
 
 /// The partition segment of an ARN (`arn:<partition>:...`).
-pub fn partition_of(arn: &str) -> Option<&str> {
+pub(crate) fn partition_of(arn: &str) -> Option<&str> {
     let mut parts = arn.splitn(3, ':');
     match (parts.next(), parts.next()) {
         (Some("arn"), Some(p)) if !p.is_empty() => Some(p),

@@ -2,22 +2,22 @@
 
 use crate::{App, TuiError, parse_freeze, parse_optional_date};
 use precip_db::Trigger;
+use precip_engine::schedule::{
+    Blackout, GlobalRules, PairInput, Wave, Weekdays, holidays,
+};
 use ratatui::widgets::ListState;
 
 /// Picker for the global weekday rule: three presets, then each day of
 /// the week as a toggle.
-pub struct WeekdayPicker {
-    pub days: precip_engine::schedule::Weekdays,
+pub(crate) struct WeekdayPicker {
+    pub days: Weekdays,
     pub state: ListState,
     /// The editor the answer goes back to.
     pub target: WeekdayTarget,
 }
 
 impl WeekdayPicker {
-    fn new(
-        days: precip_engine::schedule::Weekdays,
-        target: WeekdayTarget,
-    ) -> Self {
+    fn new(days: Weekdays, target: WeekdayTarget) -> Self {
         let mut state = ListState::default();
         state.select(Some(0));
         Self { days, state, target }
@@ -42,7 +42,7 @@ impl WeekdayPicker {
 }
 
 /// Rows of the weekday picker, presets first.
-pub const WEEKDAY_ROWS: [&str; 10] = [
+pub(crate) const WEEKDAY_ROWS: [&str; 10] = [
     "any day", "weekdays", "weekends", "mon", "tue", "wed", "thu", "fri",
     "sat", "sun",
 ];
@@ -50,39 +50,39 @@ pub const WEEKDAY_ROWS: [&str; 10] = [
 /// A small form inside an editor row: one box per field, Tab between
 /// them, so the shape of what to type is visible before typing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fields {
+pub(crate) struct Fields {
     pub labels: Vec<&'static str>,
     pub values: Vec<String>,
     pub active: usize,
 }
 
 impl Fields {
-    pub fn new(labels: &[&'static str], values: &[&str]) -> Self {
+    pub(crate) fn new(labels: &[&'static str], values: &[&str]) -> Self {
         let mut values: Vec<String> =
             values.iter().map(|v| (*v).to_string()).collect();
         values.resize(labels.len(), String::new());
         Self { labels: labels.to_vec(), values, active: 0 }
     }
 
-    pub fn get(&self, i: usize) -> &str {
+    pub(crate) fn get(&self, i: usize) -> &str {
         self.values.get(i).map(String::as_str).unwrap_or_default().trim()
     }
 
-    pub fn next(&mut self) {
+    pub(crate) fn next(&mut self) {
         self.active = (self.active + 1) % self.labels.len();
     }
 
-    pub fn prev(&mut self) {
+    pub(crate) fn prev(&mut self) {
         self.active = (self.active + self.labels.len() - 1) % self.labels.len();
     }
 
-    pub fn push(&mut self, c: char) {
+    pub(crate) fn push(&mut self, c: char) {
         if let Some(v) = self.values.get_mut(self.active) {
             v.push(c);
         }
     }
 
-    pub fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         if let Some(v) = self.values.get_mut(self.active) {
             v.pop();
         }
@@ -92,7 +92,7 @@ impl Fields {
 /// Rows of the rules editor, rebuilt after every change. Headers are
 /// skipped when moving the selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuleRow {
+pub(crate) enum RuleRow {
     Header(&'static str),
     PerDay,
     PerWeek,
@@ -109,16 +109,16 @@ pub enum RuleRow {
 }
 
 impl RuleRow {
-    pub fn is_header(self) -> bool {
+    pub(crate) fn is_header(self) -> bool {
         matches!(self, RuleRow::Header(_))
     }
 }
 
 /// The global rules, freezes and waves, editable in words.
-pub struct RulesEditor {
-    pub rules: precip_engine::schedule::GlobalRules,
-    pub blackouts: Vec<precip_engine::schedule::Blackout>,
-    pub waves: Vec<precip_engine::schedule::Wave>,
+pub(crate) struct RulesEditor {
+    pub rules: GlobalRules,
+    pub blackouts: Vec<Blackout>,
+    pub waves: Vec<Wave>,
     pub rows: Vec<RuleRow>,
     pub today: jiff::civil::Date,
     pub state: ListState,
@@ -129,7 +129,7 @@ pub struct RulesEditor {
 }
 
 impl RulesEditor {
-    pub fn rebuild_rows(&mut self) {
+    pub(crate) fn rebuild_rows(&mut self) {
         let mut rows = vec![
             RuleRow::Header("PACE"),
             RuleRow::PerDay,
@@ -162,11 +162,11 @@ impl RulesEditor {
         }));
     }
 
-    pub fn row(&self) -> RuleRow {
+    pub(crate) fn row(&self) -> RuleRow {
         self.rows[self.state.selected().unwrap_or(1)]
     }
 
-    pub fn step(&mut self, delta: isize) {
+    pub(crate) fn step(&mut self, delta: isize) {
         let i = self.state.selected().unwrap_or(1);
         self.state.select(Some(step_over_headers(
             i,
@@ -199,7 +199,7 @@ pub(crate) fn step_over_headers(
 
 /// Rows of the per-pair editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PairRow {
+pub(crate) enum PairRow {
     Header(&'static str),
     Wave,
     Weekdays,
@@ -214,16 +214,16 @@ pub enum PairRow {
 }
 
 impl PairRow {
-    pub fn is_header(self) -> bool {
+    pub(crate) fn is_header(self) -> bool {
         matches!(self, PairRow::Header(_))
     }
 }
 
 /// One pair's migration settings, editable in words.
-pub struct PairEditor {
-    pub pair: precip_engine::schedule::PairInput,
+pub(crate) struct PairEditor {
+    pub pair: PairInput,
     /// Freezes that apply only to this pair.
-    pub freezes: Vec<precip_engine::schedule::Blackout>,
+    pub freezes: Vec<Blackout>,
     pub rows: Vec<PairRow>,
     pub state: ListState,
     pub input: Option<Fields>,
@@ -231,7 +231,7 @@ pub struct PairEditor {
 }
 
 impl PairEditor {
-    pub fn rebuild_rows(&mut self) {
+    pub(crate) fn rebuild_rows(&mut self) {
         let mut rows = vec![
             PairRow::Header("WHEN"),
             PairRow::Wave,
@@ -257,11 +257,11 @@ impl PairEditor {
         }));
     }
 
-    pub fn row(&self) -> PairRow {
+    pub(crate) fn row(&self) -> PairRow {
         self.rows[self.state.selected().unwrap_or(1)]
     }
 
-    pub fn step(&mut self, delta: isize) {
+    pub(crate) fn step(&mut self, delta: isize) {
         let i = self.state.selected().unwrap_or(1);
         self.state.select(Some(step_over_headers(
             i,
@@ -274,22 +274,22 @@ impl PairEditor {
 
 /// Which editor the weekday picker reports back to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WeekdayTarget {
+pub(crate) enum WeekdayTarget {
     Global,
     Pair,
 }
 
 /// A year's holidays with a tick each; only the ticked ones become
 /// freezes, since not every company honours every one.
-pub struct HolidayPicker {
+pub(crate) struct HolidayPicker {
     pub year: i16,
-    pub holidays: Vec<precip_engine::schedule::holidays::Holiday>,
+    pub holidays: Vec<holidays::Holiday>,
     pub chosen: Vec<bool>,
     pub state: ListState,
 }
 
 /// Pick another pair for the open pair editor to depend on.
-pub struct DependsPicker {
+pub(crate) struct DependsPicker {
     pub candidates: Vec<precip_types::PairKey>,
     pub state: ListState,
 }
@@ -518,8 +518,7 @@ impl App {
                     self.note("the year should look like 2027");
                     return Ok(());
                 };
-                let holidays =
-                    precip_engine::schedule::holidays::us_federal(year);
+                let holidays = holidays::us_federal(year);
                 let chosen = vec![true; holidays.len()];
                 let mut state = ListState::default();
                 state.select(Some(0));
