@@ -390,6 +390,12 @@ impl DatePicker {
 
 impl DispositionPicker {
     fn key(&mut self, code: KeyCode) -> Outcome {
+        // A number picks its disposition and sets it, as Enter would.
+        if let Some(row) = hotkey_row(code).filter(|r| *r < DISPOSITIONS.len())
+        {
+            self.state.select(Some(row));
+            return Outcome::Submit;
+        }
         list_key(&mut self.state, DISPOSITIONS.len(), code)
     }
 }
@@ -499,5 +505,23 @@ mod tests {
         assert_eq!(hotkey_row(KeyCode::Char('9')), Some(8));
         assert_eq!(hotkey_row(KeyCode::Char('a')), None);
         assert_eq!(hotkey_row(KeyCode::Enter), None);
+    }
+
+    #[test]
+    fn number_keys_set_a_disposition() {
+        let mut p = DispositionPicker {
+            workload: "w".into(),
+            environment: "e".into(),
+            mode: crate::PickerMode::Pair,
+            state: ListState::default(),
+        };
+        assert_eq!(p.key(KeyCode::Char('4')), Outcome::Submit);
+        assert_eq!(p.state.selected(), Some(3));
+        assert_eq!(
+            p.key(KeyCode::Char('8')),
+            Outcome::Stay,
+            "seven dispositions"
+        );
+        assert_eq!(p.state.selected(), Some(3));
     }
 }

@@ -722,7 +722,7 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
     };
     let longest_help = DISPOSITIONS
         .iter()
-        .map(|d| 12 + disposition_help(*d).chars().count())
+        .map(|d| 16 + disposition_help(*d).chars().count())
         .max()
         .unwrap_or(40);
     let wanted = longest_help.max(title.chars().count()) + 6;
@@ -756,6 +756,7 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
             ))));
         }
         items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("[{}] ", i + 1), accent()),
             Span::styled(
                 format!("{d:<12}"),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -778,7 +779,10 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
                         accent().add_modifier(Modifier::BOLD),
                     ))
                     .title_bottom(Span::styled(
-                        " enter to set   esc to cancel ",
+                        format!(
+                            " 1-{} or enter to set   esc to cancel ",
+                            DISPOSITIONS.len()
+                        ),
                         dim(),
                     ))
                     .padding(Padding::new(1, 1, 1, 0)),
