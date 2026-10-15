@@ -5,7 +5,7 @@
 use aws_config::SdkConfig;
 use aws_smithy_async::future::pagination_stream::PaginationStream;
 use precip_types::scan::{Relationship, Resource, ResourceKind};
-use precip_types::{Arn, Region};
+use precip_types::{Arn, Body, Region};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -40,13 +40,11 @@ impl RegionContext {
     pub fn resource(
         &self,
         arn: Arn,
-        kind: ResourceKind,
         tags: BTreeMap<String, String>,
-        body: serde_json::Value,
+        body: Body,
     ) -> Resource {
         Resource {
             arn,
-            kind,
             account_id: self.identity.account_id.clone(),
             region: self.region.clone(),
             tags,
@@ -91,18 +89,22 @@ impl Collected {
         &self,
         kind: ResourceKind,
     ) -> impl Iterator<Item = &Resource> {
-        self.resources.iter().filter(move |r| r.kind == kind)
+        self.resources.iter().filter(move |r| r.kind() == kind)
     }
 
-    /// Distinct string values of `field` across resources of `kind`.
-    pub fn distinct_field(
-        &self,
-        kind: ResourceKind,
-        field: &str,
-    ) -> Vec<String> {
+    /// The distinct values `field` picks out of the bodies collected so
+    /// far, sorted.
+    pub fn distinct<'a, I>(
+        &'a self,
+        field: impl Fn(&'a Body) -> I,
+    ) -> Vec<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
         let mut v: Vec<String> = self
-            .of_kind(kind)
-            .filter_map(|r| r.body_str(field))
+            .resources
+            .iter()
+            .flat_map(|r| field(&r.body))
             .map(str::to_string)
             .collect();
         v.sort();
@@ -123,6 +125,16 @@ impl Collected {
             to_arn: to,
         });
     }
+}
+
+/// An SDK string as an owned body field.
+pub fn own(s: Option<&str>) -> Option<String> {
+    s.map(str::to_string)
+}
+
+/// SDK strings as an owned body list.
+pub fn owned<'a>(items: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    items.into_iter().map(str::to_string).collect()
 }
 
 /// One failed API call, named so the report can say which permission or

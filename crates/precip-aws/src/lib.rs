@@ -186,7 +186,7 @@ pub async fn scan_estate(
             .resources
             .iter()
             .find(|r| r.account_id == identity.account_id)
-            .and_then(|r| r.body.get("name")?.as_str().map(str::to_string));
+            .and_then(|r| r.name().map(str::to_string));
         let limit = limit.clone();
         let progress = progress.clone();
         tasks.spawn(async move {
@@ -618,9 +618,8 @@ mod tests {
             let mut out = Collected::default();
             out.resources.push(ctx.resource(
                 ctx.arn(arn::ArnType::Instance, "i-1"),
-                precip_types::ResourceKind::Ec2Instance,
                 Default::default(),
-                serde_json::json!({}),
+                precip_types::Body::Ec2Instance(Default::default()),
             ));
             Ok(out)
         }

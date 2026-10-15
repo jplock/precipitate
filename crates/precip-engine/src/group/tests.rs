@@ -15,14 +15,14 @@ fn res(
 ) -> Resource {
     Resource {
         arn: arn.into(),
-        kind,
         account_id: ACCT.into(),
         region: "us-east-1".into(),
         tags: tags
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
-        body,
+        body: precip_types::Body::from_value(kind, body)
+            .expect("fixture body matches its kind"),
     }
 }
 

@@ -2,33 +2,28 @@
 //! resource is stored by ARN with `service` in its body so dependencies
 //! can be counted per workload. Nothing here is sized.
 
-use precip_types::scan::ResourceKind;
-use precip_types::{Arn, Resource};
+use precip_types::{Arn, Body, Resource, body};
 use std::collections::BTreeMap;
 
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, next_page, tags,
+    Collect, CollectError, Collected, RegionContext, next_page, own, tags,
 };
 
 impl RegionContext {
-    /// A managed-service resource: `service` and `name` in its body, plus
-    /// the service's own fields from `extra`.
+    /// A managed-service resource.
     fn managed(
         &self,
-        service: &str,
         arn: Arn,
         name: Option<&str>,
         tags: BTreeMap<String, String>,
-        extra: serde_json::Value,
+        service: body::Service,
     ) -> Resource {
-        let mut body = serde_json::json!({ "service": service, "name": name });
-        if let (Some(b), serde_json::Value::Object(e)) =
-            (body.as_object_mut(), extra)
-        {
-            b.extend(e);
-        }
-        self.resource(arn, ResourceKind::ManagedService, tags, body)
+        self.resource(
+            arn,
+            tags,
+            Body::ManagedService(body::Managed { name: own(name), service }),
+        )
     }
 }
 
@@ -49,18 +44,19 @@ impl Collect for Rds {
             for db in page.db_instances() {
                 let Some(arn) = db.db_instance_arn() else { continue };
                 out.resources.push(ctx.managed(
-                    "rds",
                     Arn::from(arn),
                     db.db_instance_identifier(),
                     tags(db.tag_list()),
-                    serde_json::json!({
-                        "engine": db.engine(),
-                        "engine_version": db.engine_version(),
-                        "instance_class": db.db_instance_class(),
-                        "allocated_storage_gib": db.allocated_storage(),
-                        "multi_az": db.multi_az(),
-                        "vpc_id": db.db_subnet_group().and_then(|g| g.vpc_id()),
-                    }),
+                    body::Service::Rds {
+                        engine: own(db.engine()),
+                        engine_version: own(db.engine_version()),
+                        instance_class: own(db.db_instance_class()),
+                        allocated_storage_gib: db.allocated_storage(),
+                        multi_az: db.multi_az(),
+                        vpc_id: own(
+                            db.db_subnet_group().and_then(|g| g.vpc_id()),
+                        ),
+                    },
                 ));
             }
         }
@@ -84,11 +80,10 @@ impl Collect for Eks {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for name in page.clusters() {
                 out.resources.push(ctx.managed(
-                    "eks",
                     ctx.arn(ArnType::EksCluster, name),
                     Some(name),
                     BTreeMap::new(),
-                    serde_json::json!({}),
+                    body::Service::Eks,
                 ));
             }
         }
@@ -112,11 +107,10 @@ impl Collect for Ecs {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for arn in page.cluster_arns() {
                 out.resources.push(ctx.managed(
-                    "ecs",
                     Arn::from(arn.as_str()),
                     arn.rsplit('/').next(),
                     BTreeMap::new(),
-                    serde_json::json!({}),
+                    body::Service::Ecs,
                 ));
             }
         }
@@ -141,15 +135,14 @@ impl Collect for Lambda {
             for f in page.functions() {
                 let Some(arn) = f.function_arn() else { continue };
                 out.resources.push(ctx.managed(
-                    "lambda",
                     Arn::from(arn),
                     f.function_name(),
                     BTreeMap::new(),
-                    serde_json::json!({
-                        "runtime": f.runtime().map(|r| r.as_str()),
-                        "memory_mib": f.memory_size(),
-                        "vpc_id": f.vpc_config().and_then(|v| v.vpc_id()),
-                    }),
+                    body::Service::Lambda {
+                        runtime: own(f.runtime().map(|r| r.as_str())),
+                        memory_mib: f.memory_size(),
+                        vpc_id: own(f.vpc_config().and_then(|v| v.vpc_id())),
+                    },
                 ));
             }
         }
@@ -175,15 +168,14 @@ impl Collect for ElastiCache {
             for c in page.cache_clusters() {
                 let Some(arn) = c.arn() else { continue };
                 out.resources.push(ctx.managed(
-                    "elasticache",
                     Arn::from(arn),
                     c.cache_cluster_id(),
                     BTreeMap::new(),
-                    serde_json::json!({
-                        "engine": c.engine(),
-                        "node_type": c.cache_node_type(),
-                        "nodes": c.num_cache_nodes(),
-                    }),
+                    body::Service::ElastiCache {
+                        engine: own(c.engine()),
+                        node_type: own(c.cache_node_type()),
+                        nodes: c.num_cache_nodes(),
+                    },
                 ));
             }
         }
@@ -207,11 +199,10 @@ impl Collect for DynamoDb {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for name in page.table_names() {
                 out.resources.push(ctx.managed(
-                    "dynamodb",
                     ctx.arn(ArnType::DynamoDbTable, name),
                     Some(name),
                     BTreeMap::new(),
-                    serde_json::json!({}),
+                    body::Service::DynamoDb,
                 ));
             }
         }
@@ -236,13 +227,12 @@ impl Collect for Efs {
             for fs in page.file_systems() {
                 let Some(arn) = fs.file_system_arn() else { continue };
                 out.resources.push(ctx.managed(
-                    "efs",
                     Arn::from(arn),
                     fs.name(),
                     tags(fs.tags()),
-                    serde_json::json!({
-                        "size_bytes": fs.size_in_bytes().map(|s| s.value()),
-                    }),
+                    body::Service::Efs {
+                        size_bytes: fs.size_in_bytes().map(|s| s.value()),
+                    },
                 ));
             }
         }

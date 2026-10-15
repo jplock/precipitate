@@ -168,13 +168,17 @@ fn group_concat(col: impl IntoColumnRef) -> Expr {
     Func::cust(sea_query::Alias::new("GROUP_CONCAT")).arg(Expr::col(col)).into()
 }
 
-/// SHA-256 over the canonical JSON of tags and body. `serde_json::Value`
-/// objects are sorted maps, so the encoding is canonical.
-fn content_hash(r: &Resource) -> Result<String, DbError> {
+/// SHA-256 over the canonical JSON of tags and the stored body.
+/// `serde_json::Value` objects are sorted maps, so the encoding is
+/// canonical.
+fn content_hash(
+    tags: &BTreeMap<String, String>,
+    body: &serde_json::Value,
+) -> Result<String, DbError> {
     let mut h = Sha256::new();
-    h.update(serde_json::to_vec(&r.tags)?);
+    h.update(serde_json::to_vec(tags)?);
     h.update(b"\n");
-    h.update(serde_json::to_vec(&r.body)?);
+    h.update(serde_json::to_vec(body)?);
     Ok(format!("{:x}", h.finalize()))
 }
 
@@ -324,7 +328,8 @@ impl Store {
 
         let mut stats = ScanStats { seq, ..Default::default() };
         for r in resources {
-            let hash = content_hash(r)?;
+            let body = r.body.to_value()?;
+            let hash = content_hash(&r.tags, &body)?;
             let next_version = match current.get(r.arn.as_str()) {
                 Some(c)
                     if c.content_hash == hash && c.last_seen_seq == seq - 1 =>
@@ -375,11 +380,11 @@ impl Store {
                 .values_panic([
                     r.arn.as_str().into(),
                     next_version.into(),
-                    r.kind.as_str().into(),
+                    r.kind().as_str().into(),
                     r.account_id.as_str().into(),
                     r.region.as_str().into(),
                     serde_json::to_string(&r.tags)?.into(),
-                    serde_json::to_string(&r.body)?.into(),
+                    serde_json::to_string(&body)?.into(),
                     hash.into(),
                     seq.into(),
                     seq.into(),
@@ -897,13 +902,15 @@ impl Store {
                 let body: String = row.try_get("body")?;
                 Ok(Resource {
                     arn: Arn::from(row.try_get::<String, _>("arn")?),
-                    kind: kind.parse()?,
                     account_id: AccountId::from(
                         row.try_get::<String, _>("account_id")?,
                     ),
                     region: Region::from(row.try_get::<String, _>("region")?),
                     tags: serde_json::from_str(&tags)?,
-                    body: serde_json::from_str(&body)?,
+                    body: precip_types::Body::from_value(
+                        kind.parse()?,
+                        serde_json::from_str(&body)?,
+                    )?,
                 })
             })
             .collect()
@@ -1570,11 +1577,15 @@ mod tests {
     fn instance(arn: &str, instance_type: &str) -> Resource {
         Resource {
             arn: arn.into(),
-            kind: ResourceKind::Ec2Instance,
             account_id: "123456789012".into(),
             region: "us-east-1".into(),
             tags: BTreeMap::from([("Name".into(), "web".into())]),
-            body: serde_json::json!({ "instance_type": instance_type }),
+            body: precip_types::Body::Ec2Instance(
+                precip_types::body::Instance {
+                    instance_type: Some(instance_type.into()),
+                    ..Default::default()
+                },
+            ),
         }
     }
 
@@ -1692,14 +1703,14 @@ mod tests {
     ) -> Resource {
         Resource {
             arn: arn.into(),
-            kind,
             account_id: ACCT.into(),
             region: "us-east-1".into(),
             tags: tags
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
-            body,
+            body: precip_types::Body::from_value(kind, body)
+                .expect("fixture body matches its kind"),
         }
     }
 
@@ -2026,7 +2037,9 @@ mod tests {
         // The next scan no longer sees the instance: nothing to flag. A
         // terminated instance does not count either.
         let mut gone = inst("i-2", &[("app", "shop-dev")]);
-        gone.body["state"] = serde_json::json!("terminated");
+        if let precip_types::Body::Ec2Instance(i) = &mut gone.body {
+            i.state = Some("terminated".into());
+        }
         let s2 = fixture("s2", vec![gone], vec![]);
         store.record_scan(&s2).await.unwrap();
         store.group_scan("s2", &GroupingConfig::default()).await.unwrap();

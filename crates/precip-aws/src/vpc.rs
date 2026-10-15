@@ -1,11 +1,12 @@
 //! VPCs, subnets, security groups and their rules.
 
-use precip_types::Arn;
-use precip_types::scan::{Edge, ResourceKind};
+use precip_types::scan::Edge;
+use precip_types::{Arn, Body, body};
 
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, Stage, next_page, tags,
+    Collect, CollectError, Collected, RegionContext, Stage, next_page, own,
+    owned, tags,
 };
 
 pub struct Vpcs;
@@ -24,23 +25,23 @@ impl Collect for Vpcs {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for vpc in page.vpcs() {
                 let Some(id) = vpc.vpc_id() else { continue };
-                let cidrs: Vec<&str> = vpc
-                    .cidr_block_association_set()
-                    .iter()
-                    .filter_map(|c| c.cidr_block())
-                    .collect();
-                out.resources.push(ctx.resource(
-                    ctx.arn(ArnType::Vpc, id),
-                    ResourceKind::Vpc,
-                    tags(vpc.tags()),
-                    serde_json::json!({
-                        "vpc_id": id,
-                        "cidr_block": vpc.cidr_block(),
-                        "cidr_blocks": cidrs,
-                        "is_default": vpc.is_default(),
-                        "owner_id": vpc.owner_id(),
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        ctx.arn(ArnType::Vpc, id),
+                        tags(vpc.tags()),
+                        Body::Vpc(body::Vpc {
+                            vpc_id: id.to_string(),
+                            cidr_block: own(vpc.cidr_block()),
+                            cidr_blocks: owned(
+                                vpc.cidr_block_association_set()
+                                    .iter()
+                                    .filter_map(|c| c.cidr_block()),
+                            ),
+                            is_default: vpc.is_default(),
+                            owner_id: own(vpc.owner_id()),
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -63,24 +64,25 @@ impl Collect for Subnets {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for s in page.subnets() {
                 let Some(id) = s.subnet_id() else { continue };
-                let ipv6: Vec<&str> = s
-                    .ipv6_cidr_block_association_set()
-                    .iter()
-                    .filter_map(|c| c.ipv6_cidr_block())
-                    .collect();
-                out.resources.push(ctx.resource(
-                    ctx.arn(ArnType::Subnet, id),
-                    ResourceKind::Subnet,
-                    tags(s.tags()),
-                    serde_json::json!({
-                        "subnet_id": id,
-                        "vpc_id": s.vpc_id(),
-                        "cidr_block": s.cidr_block(),
-                        "ipv6_cidr_blocks": ipv6,
-                        "availability_zone": s.availability_zone(),
-                        "map_public_ip_on_launch": s.map_public_ip_on_launch(),
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        ctx.arn(ArnType::Subnet, id),
+                        tags(s.tags()),
+                        Body::Subnet(body::Subnet {
+                            subnet_id: id.to_string(),
+                            vpc_id: own(s.vpc_id()),
+                            cidr_block: own(s.cidr_block()),
+                            ipv6_cidr_blocks: owned(
+                                s.ipv6_cidr_block_association_set()
+                                    .iter()
+                                    .filter_map(|c| c.ipv6_cidr_block()),
+                            ),
+                            availability_zone: own(s.availability_zone()),
+                            map_public_ip_on_launch: s
+                                .map_public_ip_on_launch(),
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -105,13 +107,12 @@ impl Collect for SecurityGroups {
                 let Some(id) = sg.group_id() else { continue };
                 out.resources.push(ctx.resource(
                     ctx.arn(ArnType::SecurityGroup, id),
-                    ResourceKind::SecurityGroup,
                     tags(sg.tags()),
-                    serde_json::json!({
-                        "group_id": id,
-                        "group_name": sg.group_name(),
-                        "description": sg.description(),
-                        "vpc_id": sg.vpc_id(),
+                    Body::SecurityGroup(body::SecurityGroup {
+                        group_id: id.to_string(),
+                        group_name: own(sg.group_name()),
+                        description: own(sg.description()),
+                        vpc_id: own(sg.vpc_id()),
                     }),
                 ));
             }
@@ -150,26 +151,27 @@ impl Collect for SecurityGroupRules {
                         ctx.arn(ArnType::SecurityGroup, g),
                     );
                 }
-                let referenced_group =
-                    rule.referenced_group_info().and_then(|r| r.group_id());
-                out.resources.push(ctx.resource(
-                    arn,
-                    ResourceKind::SecurityGroupRule,
-                    tags(rule.tags()),
-                    serde_json::json!({
-                        "rule_id": id,
-                        "group_id": rule.group_id(),
-                        "egress": rule.is_egress(),
-                        "ip_protocol": rule.ip_protocol(),
-                        "from_port": rule.from_port(),
-                        "to_port": rule.to_port(),
-                        "cidr_ipv4": rule.cidr_ipv4(),
-                        "cidr_ipv6": rule.cidr_ipv6(),
-                        "prefix_list_id": rule.prefix_list_id(),
-                        "referenced_group_id": referenced_group,
-                        "description": rule.description(),
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        arn,
+                        tags(rule.tags()),
+                        Body::SecurityGroupRule(body::SecurityGroupRule {
+                            rule_id: id.to_string(),
+                            group_id: own(rule.group_id()),
+                            egress: rule.is_egress(),
+                            ip_protocol: own(rule.ip_protocol()),
+                            from_port: rule.from_port(),
+                            to_port: rule.to_port(),
+                            cidr_ipv4: own(rule.cidr_ipv4()),
+                            cidr_ipv6: own(rule.cidr_ipv6()),
+                            prefix_list_id: own(rule.prefix_list_id()),
+                            referenced_group_id: own(rule
+                                .referenced_group_info()
+                                .and_then(|r| r.group_id())),
+                            description: own(rule.description()),
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -192,43 +194,44 @@ impl Collect for RouteTables {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for rt in page.route_tables() {
                 let Some(id) = rt.route_table_id() else { continue };
-                let routes: Vec<serde_json::Value> = rt
+                let routes = rt
                     .routes()
                     .iter()
-                    .map(|r| {
-                        serde_json::json!({
-                            "destination": r.destination_cidr_block()
-                                .or(r.destination_ipv6_cidr_block())
-                                .or(r.destination_prefix_list_id()),
-                            "target": r.gateway_id()
-                                .or(r.nat_gateway_id())
-                                .or(r.transit_gateway_id())
-                                .or(r.vpc_peering_connection_id())
-                                .or(r.instance_id())
-                                .or(r.network_interface_id()),
-                            "state": r.state().map(|s| s.as_str()),
-                        })
+                    .map(|r| body::Route {
+                        destination: own(r
+                            .destination_cidr_block()
+                            .or(r.destination_ipv6_cidr_block())
+                            .or(r.destination_prefix_list_id())),
+                        target: own(r
+                            .gateway_id()
+                            .or(r.nat_gateway_id())
+                            .or(r.transit_gateway_id())
+                            .or(r.vpc_peering_connection_id())
+                            .or(r.instance_id())
+                            .or(r.network_interface_id())),
+                        state: own(r.state().map(|s| s.as_str())),
                     })
                     .collect();
-                let subnets: Vec<&str> = rt
-                    .associations()
-                    .iter()
-                    .filter_map(|a| a.subnet_id())
-                    .collect();
-                let is_main =
-                    rt.associations().iter().any(|a| a.main() == Some(true));
-                out.resources.push(ctx.resource(
-                    ctx.arn(ArnType::RouteTable, id),
-                    ResourceKind::RouteTable,
-                    tags(rt.tags()),
-                    serde_json::json!({
-                        "route_table_id": id,
-                        "vpc_id": rt.vpc_id(),
-                        "main": is_main,
-                        "subnets": subnets,
-                        "routes": routes,
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        ctx.arn(ArnType::RouteTable, id),
+                        tags(rt.tags()),
+                        Body::RouteTable(body::RouteTable {
+                            route_table_id: id.to_string(),
+                            vpc_id: own(rt.vpc_id()),
+                            main: rt
+                                .associations()
+                                .iter()
+                                .any(|a| a.main() == Some(true)),
+                            subnets: owned(
+                                rt.associations()
+                                    .iter()
+                                    .filter_map(|a| a.subnet_id()),
+                            ),
+                            routes,
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -252,16 +255,15 @@ impl Collect for InternetGateways {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for igw in page.internet_gateways() {
                 let Some(id) = igw.internet_gateway_id() else { continue };
-                let vpcs: Vec<&str> = igw
-                    .attachments()
-                    .iter()
-                    .filter_map(|a| a.vpc_id())
-                    .collect();
                 out.resources.push(ctx.resource(
                     ctx.arn(ArnType::InternetGateway, id),
-                    ResourceKind::InternetGateway,
                     tags(igw.tags()),
-                    serde_json::json!({ "internet_gateway_id": id, "vpcs": vpcs }),
+                    Body::InternetGateway(body::InternetGateway {
+                        internet_gateway_id: id.to_string(),
+                        vpcs: owned(
+                            igw.attachments().iter().filter_map(|a| a.vpc_id()),
+                        ),
+                    }),
                 ));
             }
         }
@@ -285,24 +287,26 @@ impl Collect for NatGateways {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for nat in page.nat_gateways() {
                 let Some(id) = nat.nat_gateway_id() else { continue };
-                let public_ips: Vec<&str> = nat
-                    .nat_gateway_addresses()
-                    .iter()
-                    .filter_map(|a| a.public_ip())
-                    .collect();
-                out.resources.push(ctx.resource(
-                    ctx.arn(ArnType::NatGateway, id),
-                    ResourceKind::NatGateway,
-                    tags(nat.tags()),
-                    serde_json::json!({
-                        "nat_gateway_id": id,
-                        "vpc_id": nat.vpc_id(),
-                        "subnet_id": nat.subnet_id(),
-                        "state": nat.state().map(|s| s.as_str()),
-                        "connectivity": nat.connectivity_type().map(|c| c.as_str()),
-                        "public_ips": public_ips,
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        ctx.arn(ArnType::NatGateway, id),
+                        tags(nat.tags()),
+                        Body::NatGateway(body::NatGateway {
+                            nat_gateway_id: id.to_string(),
+                            vpc_id: own(nat.vpc_id()),
+                            subnet_id: own(nat.subnet_id()),
+                            state: own(nat.state().map(|s| s.as_str())),
+                            connectivity: own(nat
+                                .connectivity_type()
+                                .map(|c| c.as_str())),
+                            public_ips: owned(
+                                nat.nat_gateway_addresses()
+                                    .iter()
+                                    .filter_map(|a| a.public_ip()),
+                            ),
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -331,24 +335,28 @@ impl Collect for PeeringConnections {
                 let side = |v: Option<
                     &aws_sdk_ec2::types::VpcPeeringConnectionVpcInfo,
                 >| {
-                    serde_json::json!({
-                        "vpc_id": v.and_then(|x| x.vpc_id()),
-                        "owner_id": v.and_then(|x| x.owner_id()),
-                        "region": v.and_then(|x| x.region()),
-                        "cidr_block": v.and_then(|x| x.cidr_block()),
-                    })
+                    body::PeeringSide {
+                        vpc_id: own(v.and_then(|x| x.vpc_id())),
+                        owner_id: own(v.and_then(|x| x.owner_id())),
+                        region: own(v.and_then(|x| x.region())),
+                        cidr_block: own(v.and_then(|x| x.cidr_block())),
+                    }
                 };
-                out.resources.push(ctx.resource(
-                    ctx.arn(ArnType::VpcPeeringConnection, id),
-                    ResourceKind::VpcPeeringConnection,
-                    tags(pc.tags()),
-                    serde_json::json!({
-                        "vpc_peering_connection_id": id,
-                        "status": pc.status().and_then(|s| s.code()).map(|c| c.as_str()),
-                        "requester": side(pc.requester_vpc_info()),
-                        "accepter": side(pc.accepter_vpc_info()),
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        ctx.arn(ArnType::VpcPeeringConnection, id),
+                        tags(pc.tags()),
+                        Body::VpcPeeringConnection(body::PeeringConnection {
+                            vpc_peering_connection_id: id.to_string(),
+                            status: own(pc
+                                .status()
+                                .and_then(|s| s.code())
+                                .map(|c| c.as_str())),
+                            requester: side(pc.requester_vpc_info()),
+                            accepter: side(pc.accepter_vpc_info()),
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -370,8 +378,13 @@ impl Collect for PrefixLists {
         prior: &Collected,
     ) -> Result<Collected, CollectError> {
         let mut out = Collected::default();
-        let ids = prior
-            .distinct_field(ResourceKind::SecurityGroupRule, "prefix_list_id");
+        let ids = prior.distinct(|b| {
+            if let Body::SecurityGroupRule(r) = b {
+                r.prefix_list_id.as_deref()
+            } else {
+                None
+            }
+        });
         if ids.is_empty() {
             return Ok(out);
         }
@@ -391,25 +404,22 @@ impl Collect for PrefixLists {
                 .into_paginator()
                 .send();
             while let Some(page) = next_page(Self::API, &mut pages).await? {
-                entries.extend(
-                    page.entries()
-                        .iter()
-                        .filter_map(|e| e.cidr().map(str::to_string)),
-                );
+                entries.extend(owned(
+                    page.entries().iter().filter_map(|e| e.cidr()),
+                ));
             }
             let arn = pl
                 .prefix_list_arn()
                 .map_or_else(|| ctx.arn(ArnType::PrefixList, id), Arn::from);
             out.resources.push(ctx.resource(
                 arn,
-                ResourceKind::PrefixList,
                 tags(pl.tags()),
-                serde_json::json!({
-                    "prefix_list_id": id,
-                    "name": pl.prefix_list_name(),
-                    "owner_id": pl.owner_id(),
-                    "address_family": pl.address_family(),
-                    "entries": entries,
+                Body::PrefixList(body::PrefixList {
+                    prefix_list_id: id.to_string(),
+                    name: own(pl.prefix_list_name()),
+                    owner_id: own(pl.owner_id()),
+                    address_family: own(pl.address_family()),
+                    entries,
                 }),
             ));
         }

@@ -3,8 +3,7 @@
 use aws_config::SdkConfig;
 use aws_config::sts::AssumeRoleProvider;
 use aws_credential_types::provider::SharedCredentialsProvider;
-use precip_types::scan::{Resource, ResourceKind};
-use precip_types::{AccountId, Arn, Region};
+use precip_types::{AccountId, Arn, Body, Region, Resource, body};
 
 use crate::ScanError;
 
@@ -76,16 +75,15 @@ impl MemberAccount {
     pub fn to_resource(&self, partition: &str) -> Resource {
         Resource {
             arn: self.arn.clone(),
-            kind: ResourceKind::Account,
             account_id: self.id.clone(),
             region: Region::global(),
             tags: Default::default(),
-            body: serde_json::json!({
-                "name": self.name,
-                "status": self.status,
-                "parent_id": self.parent_id,
-                "parent_name": self.parent_name,
-                "partition": partition,
+            body: Body::Account(body::Account {
+                name: self.name.clone(),
+                status: self.status.clone(),
+                parent_id: self.parent_id.clone(),
+                parent_name: self.parent_name.clone(),
+                partition: partition.to_string(),
             }),
         }
     }

@@ -1,12 +1,13 @@
 //! Auto Scaling groups. The group is the resource; its instances are
 //! observed counts, not tracked by id.
 
-use precip_types::Arn;
-use precip_types::scan::{Edge, ResourceKind};
+use precip_types::scan::Edge;
+use precip_types::{Arn, Body, body};
 
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, Stage, next_page, tags,
+    Collect, CollectError, Collected, RegionContext, Stage, next_page, own,
+    owned, tags,
 };
 
 pub struct Groups;
@@ -54,28 +55,36 @@ impl Collect for Groups {
                     }
                 }
 
-                out.resources.push(ctx.resource(
-                    Arn::from(arn),
-                    ResourceKind::AutoScalingGroup,
-                    tags(group.tags()),
-                    serde_json::json!({
-                        "name": group.auto_scaling_group_name(),
-                        "min_size": group.min_size(),
-                        "desired_capacity": group.desired_capacity(),
-                        "max_size": group.max_size(),
-                        "observed_instances": group.instances().len(),
-                        "launch_template_id": group
-                            .launch_template()
-                            .and_then(|lt| lt.launch_template_id())
-                            .or_else(|| mixed_spec.and_then(|s| s.launch_template_id())),
-                        "launch_configuration_name": group.launch_configuration_name(),
-                        "launch_template_version": group
-                            .launch_template()
-                            .and_then(|lt| lt.version())
-                            .or_else(|| mixed_spec.and_then(|s| s.version())),
-                        "instance_types": instance_types,
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        Arn::from(arn),
+                        tags(group.tags()),
+                        Body::AutoScalingGroup(body::AutoScalingGroup {
+                            name: own(group.auto_scaling_group_name()),
+                            min_size: group.min_size(),
+                            desired_capacity: group.desired_capacity(),
+                            max_size: group.max_size(),
+                            observed_instances: group.instances().len(),
+                            launch_template_id: own(group
+                                .launch_template()
+                                .and_then(|lt| lt.launch_template_id())
+                                .or_else(|| {
+                                    mixed_spec
+                                        .and_then(|s| s.launch_template_id())
+                                })),
+                            launch_configuration_name: own(
+                                group.launch_configuration_name()
+                            ),
+                            launch_template_version: own(group
+                                .launch_template()
+                                .and_then(|lt| lt.version())
+                                .or_else(|| {
+                                    mixed_spec.and_then(|s| s.version())
+                                })),
+                            instance_types: owned(instance_types),
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -98,11 +107,13 @@ impl Collect for LaunchTemplates {
         let mut out = Collected::default();
         // (template id, version) pairs the groups reference.
         let mut wanted: Vec<(&str, &str)> = prior
-            .of_kind(ResourceKind::AutoScalingGroup)
-            .filter_map(|g| {
-                let id = g.body_str("launch_template_id")?;
+            .resources
+            .iter()
+            .filter_map(|r| {
+                let Body::AutoScalingGroup(g) = &r.body else { return None };
+                let id = g.launch_template_id.as_deref()?;
                 let version =
-                    g.body_str("launch_template_version").unwrap_or("$Default");
+                    g.launch_template_version.as_deref().unwrap_or("$Default");
                 Some((id, version))
             })
             .collect();
@@ -125,15 +136,16 @@ impl Collect for LaunchTemplates {
                 let number = v.version_number().unwrap_or_default();
                 out.resources.push(ctx.resource(
                     ctx.arn(ArnType::LaunchTemplate, &format!("{id}:{number}")),
-                    ResourceKind::LaunchTemplate,
                     Default::default(),
-                    serde_json::json!({
-                        "launch_template_id": id,
-                        "name": v.launch_template_name(),
-                        "version": number,
-                        "requested_version": version,
-                        "instance_type": data.instance_type().map(|t| t.as_str()),
-                        "image_id": data.image_id(),
+                    Body::LaunchTemplate(body::LaunchTemplate {
+                        launch_template_id: id.to_string(),
+                        name: own(v.launch_template_name()),
+                        version: number,
+                        requested_version: version.to_string(),
+                        instance_type: own(
+                            data.instance_type().map(|t| t.as_str()),
+                        ),
+                        image_id: own(data.image_id()),
                     }),
                 ));
             }
@@ -157,10 +169,13 @@ impl Collect for LaunchConfigurations {
         prior: &Collected,
     ) -> Result<Collected, CollectError> {
         let mut out = Collected::default();
-        let names = prior.distinct_field(
-            ResourceKind::AutoScalingGroup,
-            "launch_configuration_name",
-        );
+        let names = prior.distinct(|b| {
+            if let Body::AutoScalingGroup(g) = b {
+                g.launch_configuration_name.as_deref()
+            } else {
+                None
+            }
+        });
         if names.is_empty() {
             return Ok(out);
         }
@@ -179,13 +194,12 @@ impl Collect for LaunchConfigurations {
                     };
                     out.resources.push(ctx.resource(
                         Arn::from(arn),
-                        ResourceKind::LaunchConfiguration,
                         Default::default(),
-                        serde_json::json!({
-                            "name": lc.launch_configuration_name(),
-                            "instance_type": lc.instance_type(),
-                            "image_id": lc.image_id(),
-                            "created": lc.created_time().map(|t| t.to_string()),
+                        Body::LaunchConfiguration(body::LaunchConfiguration {
+                            name: own(lc.launch_configuration_name()),
+                            instance_type: own(lc.instance_type()),
+                            image_id: own(lc.image_id()),
+                            created: lc.created_time().map(|t| t.to_string()),
                         }),
                     ));
                 }

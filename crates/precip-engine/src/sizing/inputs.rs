@@ -2,9 +2,10 @@
 //! and placements of one scan.
 
 use crate::sizing::{Fit, Instance};
-use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
+use precip_types::scan::{Edge, Relationship, Resource};
 use precip_types::{
-    AccountId, Arn, Disposition, PairKey, Profile, Region, WorkloadMember,
+    AccountId, Arn, Body, Disposition, PairKey, Profile, Region,
+    WorkloadMember, body,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -122,7 +123,7 @@ pub enum Finding {
         max: u64,
     },
     TooManyNics {
-        nics: u64,
+        nics: usize,
         max: u32,
     },
     InstanceStore,
@@ -290,49 +291,54 @@ pub fn sized_instances(
         members.iter().map(|m| (m.arn.as_str(), m)).collect();
 
     // Instance types by (region, name).
-    let types: HashMap<(&str, &str), &Resource> = resources
-        .iter()
-        .filter(|r| r.kind == ResourceKind::InstanceType)
-        .filter_map(|r| Some(((r.region.as_str(), r.name()?), r)))
-        .collect();
+    let mut types: HashMap<(&str, &str), &body::InstanceType> = HashMap::new();
+    for r in resources {
+        if let Body::InstanceType(t) = &r.body {
+            types.insert((r.region.as_str(), t.name.as_str()), t);
+        }
+    }
 
     // Volumes attached to each instance.
-    let mut volumes: HashMap<&str, Vec<&Resource>> = HashMap::new();
+    let mut volumes: HashMap<&str, Vec<&body::Volume>> = HashMap::new();
     for rel in relationships.iter().filter(|r| r.edge == Edge::AttachedTo) {
-        if let Some(v) = by_arn.get(rel.from_arn.as_str()) {
-            if v.kind == ResourceKind::EbsVolume {
-                volumes.entry(rel.to_arn.as_str()).or_default().push(v);
-            }
+        if let Some(Body::EbsVolume(v)) =
+            by_arn.get(rel.from_arn.as_str()).map(|r| &r.body)
+        {
+            volumes.entry(rel.to_arn.as_str()).or_default().push(v);
         }
     }
 
     let mut out = Vec::new();
-    for r in resources.iter().filter(|r| r.kind == ResourceKind::Ec2Instance) {
+    for r in resources {
+        let Body::Ec2Instance(inst) = &r.body else { continue };
         let Some(m) = placement.get(r.arn.as_str()) else { continue };
         let Some(disposition) =
             dispositions.get(&m.pair).copied().filter(|d| d.is_sized())
         else {
             continue;
         };
-        let instance_type = r.body_str("instance_type").unwrap_or("unknown");
+        let instance_type = inst.instance_type.as_deref().unwrap_or("unknown");
         let ty = types.get(&(r.region.as_str(), instance_type)).copied();
         let vcpus = ty
-            .and_then(|t| t.body_u64("vcpus"))
+            .and_then(|t| t.vcpus)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(0);
         let memory_gib = ty
-            .and_then(|t| t.body_u64("memory_mib"))
-            .map(|mib| mib.div_ceil(1024))
-            .unwrap_or(0);
+            .and_then(|t| t.memory_mib)
+            .and_then(|mib| u64::try_from(mib).ok())
+            .map_or(0, |mib| mib.div_ceil(1024));
         let vols =
             volumes.get(r.arn.as_str()).map(Vec::as_slice).unwrap_or_default();
-        let sizes: Vec<u64> =
-            vols.iter().filter_map(|v| v.body_u64("size_gib")).collect();
+        let sizes: Vec<u64> = vols
+            .iter()
+            .filter_map(|v| v.size_gib.and_then(|g| u64::try_from(g).ok()))
+            .collect();
         let disk_gib = sizes.iter().sum();
         let largest_volume_gib = sizes.iter().copied().max().unwrap_or(0);
         let volume_count = u32::try_from(vols.len()).unwrap_or(u32::MAX);
-        let architecture =
-            Architecture::from(r.body_str("architecture").unwrap_or("unknown"));
+        let architecture = Architecture::from(
+            inst.architecture.as_deref().unwrap_or("unknown"),
+        );
 
         let Assessment { fit, findings } = FitInput {
             architecture: &architecture,
@@ -340,34 +346,32 @@ pub fn sized_instances(
             memory_gib,
             volumes: volume_count,
             largest_volume_gib,
-            instance_store_volumes: r
-                .body_u64("instance_store_volume_count")
-                .unwrap_or(0),
-            nics: r.body_u64("network_interface_count").unwrap_or(0),
-            boot_mode: r
-                .body_str("current_boot_mode")
-                .or(r.body_str("boot_mode"))
+            instance_store_volumes: inst.instance_store_volume_count,
+            nics: inst.network_interface_count,
+            boot_mode: inst
+                .current_boot_mode
+                .as_deref()
+                .or(inst.boot_mode.as_deref())
                 .map(BootMode::from),
-            platform: r.body_str("platform").map(Platform::from),
-            bare_metal: ty
-                .and_then(|t| t.body_bool("bare_metal"))
-                .unwrap_or(false),
-            gpus: ty.and_then(|t| t.body_u64("gpus")).unwrap_or(0),
-            accelerators: ty
-                .and_then(|t| t.body_u64("accelerators"))
-                .unwrap_or(0),
+            platform: inst.platform.as_deref().map(Platform::from),
+            bare_metal: ty.and_then(|t| t.bare_metal).unwrap_or(false),
+            gpus: ty.map_or(0, |t| t.gpus),
+            accelerators: ty.map_or(0, |t| t.accelerators),
             type_known: ty.is_some(),
         }
         .assess(profile, disposition);
 
+        let instance_id =
+            Some(inst.instance_id.as_str()).filter(|id| !id.is_empty());
         out.push(SizedInstance {
             arn: r.arn.clone(),
             name: r
                 .tags
                 .get("Name")
-                .cloned()
-                .or_else(|| r.body_str("instance_id").map(str::to_string))
-                .unwrap_or_else(|| r.arn.to_string()),
+                .map(String::as_str)
+                .or(instance_id)
+                .unwrap_or(r.arn.as_str())
+                .to_string(),
             pair: m.pair.clone(),
             disposition,
             account_id: r.account_id.clone(),
@@ -394,13 +398,13 @@ pub struct FitInput<'a> {
     pub memory_gib: u64,
     pub volumes: u32,
     pub largest_volume_gib: u64,
-    pub instance_store_volumes: u64,
-    pub nics: u64,
+    pub instance_store_volumes: usize,
+    pub nics: usize,
     pub boot_mode: Option<BootMode>,
     pub platform: Option<Platform>,
     pub bare_metal: bool,
-    pub gpus: u64,
-    pub accelerators: u64,
+    pub gpus: usize,
+    pub accelerators: usize,
     pub type_known: bool,
 }
 
@@ -469,7 +473,7 @@ impl FitInput<'_> {
                 max: limits.max_disk_gib,
             });
         }
-        if self.nics > u64::from(limits.max_nics) {
+        if self.nics > usize::try_from(limits.max_nics).unwrap_or(usize::MAX) {
             findings.push(Finding::TooManyNics {
                 nics: self.nics,
                 max: limits.max_nics,

@@ -2,12 +2,12 @@
 //! balancer are one workload.
 
 use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
-use precip_types::Arn;
-use precip_types::scan::{Edge, ResourceKind};
+use precip_types::scan::Edge;
+use precip_types::{Arn, Body, body};
 
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, next_page,
+    Collect, CollectError, Collected, RegionContext, next_page, own, owned,
 };
 
 pub struct LoadBalancers;
@@ -29,15 +29,16 @@ impl Collect for LoadBalancers {
                 let Some(arn) = lb.load_balancer_arn() else { continue };
                 out.resources.push(ctx.resource(
                     Arn::from(arn),
-                    ResourceKind::LoadBalancer,
                     Default::default(),
-                    serde_json::json!({
-                        "name": lb.load_balancer_name(),
-                        "type": lb.r#type().map(|t| t.as_str()),
-                        "scheme": lb.scheme().map(|s| s.as_str()),
-                        "vpc_id": lb.vpc_id(),
-                        "dns_name": lb.dns_name(),
-                        "security_groups": lb.security_groups(),
+                    Body::LoadBalancer(body::LoadBalancer {
+                        name: own(lb.load_balancer_name()),
+                        lb_type: own(lb.r#type().map(|t| t.as_str())),
+                        scheme: own(lb.scheme().map(|s| s.as_str())),
+                        vpc_id: own(lb.vpc_id()),
+                        dns_name: own(lb.dns_name()),
+                        security_groups: owned(
+                            lb.security_groups().iter().map(String::as_str),
+                        ),
                     }),
                 ));
             }
@@ -95,16 +96,17 @@ impl Collect for TargetGroups {
                 }
                 out.resources.push(ctx.resource(
                     Arn::from(arn),
-                    ResourceKind::TargetGroup,
                     Default::default(),
-                    serde_json::json!({
-                        "name": tg.target_group_name(),
-                        "target_type": tg.target_type().map(|t| t.as_str()),
-                        "protocol": tg.protocol().map(|p| p.as_str()),
-                        "port": tg.port(),
-                        "vpc_id": tg.vpc_id(),
-                        "load_balancer_arns": tg.load_balancer_arns(),
-                        "instance_targets": targets,
+                    Body::TargetGroup(body::TargetGroup {
+                        name: own(tg.target_group_name()),
+                        target_type: own(tg.target_type().map(|t| t.as_str())),
+                        protocol: own(tg.protocol().map(|p| p.as_str())),
+                        port: tg.port(),
+                        vpc_id: own(tg.vpc_id()),
+                        load_balancer_arns: owned(
+                            tg.load_balancer_arns().iter().map(String::as_str),
+                        ),
+                        instance_targets: targets,
                     }),
                 ));
             }

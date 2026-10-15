@@ -2,12 +2,14 @@
 
 use aws_config::SdkConfig;
 use aws_sdk_ec2::types::InstanceStateName;
-use precip_types::scan::{Edge, ResourceKind};
+use precip_types::scan::Edge;
+use precip_types::{Body, body};
 
 use crate::ScanError;
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, Stage, next_page, tags,
+    Collect, CollectError, Collected, RegionContext, Stage, next_page, own,
+    owned, tags,
 };
 
 pub async fn enabled_regions(
@@ -77,33 +79,45 @@ impl Collect for Instances {
                             ctx.arn(ArnType::Subnet, subnet),
                         );
                     }
-                    let instance_store_volumes = inst
-                        .block_device_mappings()
-                        .iter()
-                        .filter(|b| b.ebs().is_none())
-                        .count();
-                    out.resources.push(ctx.resource(
-                        arn,
-                        ResourceKind::Ec2Instance,
-                        tags(inst.tags()),
-                        serde_json::json!({
-                            "instance_id": id,
-                            "instance_type": inst.instance_type().map(|t| t.as_str()),
-                            "architecture": inst.architecture().map(|a| a.as_str()),
-                            "platform": inst.platform_details(),
-                            "state": state.map(|n| n.as_str()),
-                            "image_id": inst.image_id(),
-                            "subnet_id": inst.subnet_id(),
-                            "vpc_id": inst.vpc_id(),
-                            "boot_mode": inst.boot_mode().map(|b| b.as_str()),
-                            "current_boot_mode": inst.current_instance_boot_mode().map(|b| b.as_str()),
-                            "launch_time": inst.launch_time().map(|t| t.to_string()),
-                            "ebs_volume_count": inst.block_device_mappings().len() - instance_store_volumes,
-                            "instance_store_volume_count": instance_store_volumes,
-                            "network_interface_count": inst.network_interfaces().len(),
-                            "public_ip": inst.public_ip_address(),
-                        }),
-                    ));
+                    let mappings = inst.block_device_mappings();
+                    let instance_store_volume_count =
+                        mappings.iter().filter(|b| b.ebs().is_none()).count();
+                    out.resources.push(
+                        ctx.resource(
+                            arn,
+                            tags(inst.tags()),
+                            Body::Ec2Instance(body::Instance {
+                                instance_id: id.to_string(),
+                                instance_type: own(inst
+                                    .instance_type()
+                                    .map(|t| t.as_str())),
+                                architecture: own(inst
+                                    .architecture()
+                                    .map(|a| a.as_str())),
+                                platform: own(inst.platform_details()),
+                                state: own(state.map(|n| n.as_str())),
+                                image_id: own(inst.image_id()),
+                                subnet_id: own(inst.subnet_id()),
+                                vpc_id: own(inst.vpc_id()),
+                                boot_mode: own(inst
+                                    .boot_mode()
+                                    .map(|b| b.as_str())),
+                                current_boot_mode: own(inst
+                                    .current_instance_boot_mode()
+                                    .map(|b| b.as_str())),
+                                launch_time: inst
+                                    .launch_time()
+                                    .map(|t| t.to_string()),
+                                ebs_volume_count: mappings.len()
+                                    - instance_store_volume_count,
+                                instance_store_volume_count,
+                                network_interface_count: inst
+                                    .network_interfaces()
+                                    .len(),
+                                public_ip: own(inst.public_ip_address()),
+                            }),
+                        ),
+                    );
                 }
             }
         }
@@ -124,25 +138,16 @@ impl Collect for InstanceTypes {
         ctx: &RegionContext,
         prior: &Collected,
     ) -> Result<Collected, CollectError> {
-        let mut names = Vec::new();
-        for kind in [
-            ResourceKind::Ec2Instance,
-            ResourceKind::LaunchTemplate,
-            ResourceKind::LaunchConfiguration,
-        ] {
-            names.extend(prior.distinct_field(kind, "instance_type"));
-        }
-        for g in prior.of_kind(ResourceKind::AutoScalingGroup) {
-            if let Some(types) =
-                g.body.get("instance_types").and_then(|v| v.as_array())
-            {
-                names.extend(
-                    types.iter().filter_map(|t| t.as_str().map(str::to_string)),
-                );
+        let names = prior.distinct(|b| {
+            let mut types: Vec<&str> = Vec::new();
+            if let Some((Some(ty), _)) = b.launch_source() {
+                types.push(ty);
             }
-        }
-        names.sort();
-        names.dedup();
+            if let Body::AutoScalingGroup(g) = b {
+                types.extend(g.instance_types.iter().map(String::as_str));
+            }
+            types
+        });
         let mut out = Collected::default();
         if names.is_empty() {
             return Ok(out);
@@ -164,24 +169,39 @@ impl Collect for InstanceTypes {
                 let Some(name) = it.instance_type().map(|t| t.as_str()) else {
                     continue;
                 };
-                out.resources.push(ctx.resource(
-                    ctx.arn(ArnType::InstanceType, name),
-                    ResourceKind::InstanceType,
-                    Default::default(),
-                    serde_json::json!({
-                        "name": name,
-                        "vcpus": it.v_cpu_info().and_then(|v| v.default_v_cpus()),
-                        "memory_mib": it.memory_info().and_then(|m| m.size_in_mib()),
-                        "architectures": it.processor_info().map(|p| {
-                            p.supported_architectures().iter().map(|a| a.as_str()).collect::<Vec<_>>()
+                out.resources.push(
+                    ctx.resource(
+                        ctx.arn(ArnType::InstanceType, name),
+                        Default::default(),
+                        Body::InstanceType(body::InstanceType {
+                            name: name.to_string(),
+                            vcpus: it
+                                .v_cpu_info()
+                                .and_then(|v| v.default_v_cpus()),
+                            memory_mib: it
+                                .memory_info()
+                                .and_then(|m| m.size_in_mib()),
+                            architectures: it.processor_info().map(|p| {
+                                owned(
+                                    p.supported_architectures()
+                                        .iter()
+                                        .map(|a| a.as_str()),
+                                )
+                            }),
+                            bare_metal: it.bare_metal(),
+                            gpus: it.gpu_info().map_or(0, |g| g.gpus().len()),
+                            accelerators: it
+                                .inference_accelerator_info()
+                                .map_or(0, |g| g.accelerators().len()),
+                            instance_storage_gb: it
+                                .instance_storage_info()
+                                .and_then(|s| s.total_size_in_gb()),
+                            network_performance: own(it
+                                .network_info()
+                                .and_then(|n| n.network_performance())),
                         }),
-                        "bare_metal": it.bare_metal(),
-                        "gpus": it.gpu_info().map(|g| g.gpus().len()).unwrap_or(0),
-                        "accelerators": it.inference_accelerator_info().map(|g| g.accelerators().len()).unwrap_or(0),
-                        "instance_storage_gb": it.instance_storage_info().and_then(|s| s.total_size_in_gb()),
-                        "network_performance": it.network_info().and_then(|n| n.network_performance()),
-                    }),
-                ));
+                    ),
+                );
             }
         }
         Ok(out)
@@ -204,27 +224,29 @@ impl Collect for Volumes {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for vol in page.volumes() {
                 let Some(id) = vol.volume_id() else { continue };
-                let attached_to: Vec<&str> = vol
-                    .attachments()
-                    .iter()
-                    .filter_map(|a| a.instance_id())
-                    .collect();
-                out.resources.push(ctx.resource(
-                    ctx.arn(ArnType::Volume, id),
-                    ResourceKind::EbsVolume,
-                    tags(vol.tags()),
-                    serde_json::json!({
-                        "volume_id": id,
-                        "size_gib": vol.size(),
-                        "volume_type": vol.volume_type().map(|t| t.as_str()),
-                        "iops": vol.iops(),
-                        "throughput": vol.throughput(),
-                        "encrypted": vol.encrypted(),
-                        "kms_key_id": vol.kms_key_id(),
-                        "state": vol.state().map(|s| s.as_str()),
-                        "attached_to": attached_to,
-                    }),
-                ));
+                out.resources.push(
+                    ctx.resource(
+                        ctx.arn(ArnType::Volume, id),
+                        tags(vol.tags()),
+                        Body::EbsVolume(body::Volume {
+                            volume_id: id.to_string(),
+                            size_gib: vol.size(),
+                            volume_type: own(vol
+                                .volume_type()
+                                .map(|t| t.as_str())),
+                            iops: vol.iops(),
+                            throughput: vol.throughput(),
+                            encrypted: vol.encrypted(),
+                            kms_key_id: own(vol.kms_key_id()),
+                            state: own(vol.state().map(|s| s.as_str())),
+                            attached_to: owned(
+                                vol.attachments()
+                                    .iter()
+                                    .filter_map(|a| a.instance_id()),
+                            ),
+                        }),
+                    ),
+                );
             }
         }
         Ok(out)
@@ -244,16 +266,8 @@ impl Collect for Images {
         ctx: &RegionContext,
         prior: &Collected,
     ) -> Result<Collected, CollectError> {
-        let mut ids = Vec::new();
-        for kind in [
-            ResourceKind::Ec2Instance,
-            ResourceKind::LaunchTemplate,
-            ResourceKind::LaunchConfiguration,
-        ] {
-            ids.extend(prior.distinct_field(kind, "image_id"));
-        }
-        ids.sort();
-        ids.dedup();
+        let ids =
+            prior.distinct(|b| b.launch_source().and_then(|(_, image)| image));
         let mut out = Collected::default();
         if ids.is_empty() {
             return Ok(out);
@@ -269,26 +283,27 @@ impl Collect for Images {
                 .map_err(CollectError::new(Self::API))?;
             for img in page.images() {
                 let Some(id) = img.image_id() else { continue };
-                let encrypted_snapshot = img
-                    .block_device_mappings()
-                    .iter()
-                    .any(|b| b.ebs().and_then(|e| e.encrypted()) == Some(true));
                 out.resources.push(ctx.resource(
                     ctx.arn(ArnType::Image, id),
-                    ResourceKind::Ami,
                     tags(img.tags()),
-                    serde_json::json!({
-                        "image_id": id,
-                        "name": img.name(),
-                        "owner_id": img.owner_id(),
-                        "owner_alias": img.image_owner_alias(),
-                        "platform": img.platform_details(),
-                        "architecture": img.architecture().map(|a| a.as_str()),
-                        "boot_mode": img.boot_mode().map(|b| b.as_str()),
-                        "marketplace_product_codes": img.product_codes().len(),
-                        "encrypted_snapshot": encrypted_snapshot,
-                        "public": img.public(),
-                        "state": img.state().map(|s| s.as_str()),
+                    Body::Ami(body::Image {
+                        image_id: id.to_string(),
+                        name: own(img.name()),
+                        owner_id: own(img.owner_id()),
+                        owner_alias: own(img.image_owner_alias()),
+                        platform: own(img.platform_details()),
+                        architecture: own(
+                            img.architecture().map(|a| a.as_str()),
+                        ),
+                        boot_mode: own(img.boot_mode().map(|b| b.as_str())),
+                        marketplace_product_codes: img.product_codes().len(),
+                        encrypted_snapshot:
+                            img.block_device_mappings().iter().any(|b| {
+                                b.ebs().and_then(|e| e.encrypted())
+                                    == Some(true)
+                            }),
+                        public: img.public(),
+                        state: own(img.state().map(|s| s.as_str())),
                     }),
                 ));
             }
@@ -327,14 +342,13 @@ impl Collect for Addresses {
             }
             out.resources.push(ctx.resource(
                 arn,
-                ResourceKind::ElasticIp,
                 tags(a.tags()),
-                serde_json::json!({
-                    "allocation_id": id,
-                    "public_ip": a.public_ip(),
-                    "instance_id": a.instance_id(),
-                    "network_interface_id": a.network_interface_id(),
-                    "domain": a.domain().map(|d| d.as_str()),
+                Body::ElasticIp(body::ElasticIp {
+                    allocation_id: id.to_string(),
+                    public_ip: own(a.public_ip()),
+                    instance_id: own(a.instance_id()),
+                    network_interface_id: own(a.network_interface_id()),
+                    domain: own(a.domain().map(|d| d.as_str())),
                 }),
             ));
         }

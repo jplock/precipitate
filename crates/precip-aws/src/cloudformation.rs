@@ -2,13 +2,14 @@
 //! resource in a stack comes from the `aws:cloudformation:stack-id` tag
 //! CloudFormation puts on everything it creates.
 
-use precip_types::Arn;
 use precip_types::scan::{Edge, Resource, ResourceKind};
+use precip_types::{Arn, Body, body};
 use std::collections::HashMap;
 
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, Stage, next_page, tags,
+    Collect, CollectError, Collected, RegionContext, Stage, next_page, own,
+    tags,
 };
 
 pub struct Stacks;
@@ -29,13 +30,12 @@ impl Collect for Stacks {
                 let Some(id) = stack.stack_id() else { continue };
                 out.resources.push(ctx.resource(
                     Arn::from(id),
-                    ResourceKind::CloudFormationStack,
                     tags(stack.tags()),
-                    serde_json::json!({
-                        "name": stack.stack_name(),
-                        "parent_id": stack.parent_id(),
-                        "root_id": stack.root_id(),
-                        "status": stack.stack_status().map(|s| s.as_str()),
+                    Body::CloudFormationStack(body::Stack {
+                        name: own(stack.stack_name()),
+                        parent_id: own(stack.parent_id()),
+                        root_id: own(stack.root_id()),
+                        status: own(stack.stack_status().map(|s| s.as_str())),
                     }),
                 ));
             }
@@ -105,15 +105,14 @@ impl<'a> ByName<'a> {
             resources
                 .iter()
                 .filter_map(|r| {
-                    let name = if r.kind == ResourceKind::ElasticIp {
-                        r.body_str("public_ip")
+                    let (name, service) = if let Body::ElasticIp(e) = &r.body {
+                        (e.public_ip.as_deref()?, None)
+                    } else if let Body::ManagedService(m) = &r.body {
+                        (m.name.as_deref()?, Some(m.service.as_str()))
                     } else {
-                        r.name()
-                    }?;
-                    Some((
-                        (r.kind, r.body_str("service"), name),
-                        r.arn.as_str(),
-                    ))
+                        (r.name()?, None)
+                    };
+                    Some(((r.kind(), service, name), r.arn.as_str()))
                 })
                 .collect(),
         )
@@ -170,14 +169,35 @@ impl<'a> ByName<'a> {
 mod tests {
     use super::*;
 
-    fn managed(service: &str, name: &str, arn: &str) -> Resource {
+    fn managed(service: body::Service, name: &str, arn: &str) -> Resource {
         Resource {
             arn: arn.into(),
-            kind: ResourceKind::ManagedService,
             account_id: "123456789012".into(),
             region: "us-east-1".into(),
             tags: Default::default(),
-            body: serde_json::json!({ "service": service, "name": name }),
+            body: Body::ManagedService(body::Managed {
+                name: Some(name.into()),
+                service,
+            }),
+        }
+    }
+
+    fn rds_service() -> body::Service {
+        body::Service::Rds {
+            engine: None,
+            engine_version: None,
+            instance_class: None,
+            allocated_storage_gib: None,
+            multi_az: None,
+            vpc_id: None,
+        }
+    }
+
+    fn cache_service() -> body::Service {
+        body::Service::ElastiCache {
+            engine: None,
+            node_type: None,
+            nodes: None,
         }
     }
 
@@ -195,8 +215,8 @@ mod tests {
         let cache = "arn:aws:elasticache:us-east-1:123456789012:cluster:shared";
         let rds = "arn:aws:rds:us-east-1:123456789012:db:shared";
         let resources = vec![
-            managed("rds", "shared", rds),
-            managed("elasticache", "shared", cache),
+            managed(rds_service(), "shared", rds),
+            managed(cache_service(), "shared", cache),
         ];
         let by_name = ByName::new(&resources);
         assert_eq!(
@@ -213,7 +233,7 @@ mod tests {
             "id-based types build the ARN without a lookup"
         );
         assert_eq!(by_name.member_arn(&ctx, "AWS::S3::Bucket", "b"), None);
-        let only_rds = vec![managed("rds", "shared", rds)];
+        let only_rds = vec![managed(rds_service(), "shared", rds)];
         let by_name = ByName::new(&only_rds);
         assert_eq!(
             by_name.member_arn(

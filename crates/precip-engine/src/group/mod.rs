@@ -12,7 +12,7 @@ use precip_types::scan::{
     Direction, Edge, Relationship, Resource, ResourceKind,
 };
 use precip_types::{
-    AccountId, Arn, EnvName, GroupingConfig, GroupingSignal, PairKey,
+    AccountId, Arn, Body, EnvName, GroupingConfig, GroupingSignal, PairKey,
     WorkloadMember, WorkloadName,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -74,10 +74,11 @@ impl<'a> Index<'a> {
         let mut accounts = HashMap::new();
         let mut vpc_names = HashMap::new();
         for r in input.resources {
-            match r.kind {
-                ResourceKind::CloudFormationStack => {
-                    let root = r
-                        .body_str("root_id")
+            match &r.body {
+                Body::CloudFormationStack(stack) => {
+                    let root = stack
+                        .root_id
+                        .as_deref()
                         .and_then(|id| by_arn.get(id))
                         .copied()
                         .unwrap_or(r);
@@ -90,44 +91,46 @@ impl<'a> Index<'a> {
                         stack_root_name.insert(r.arn.as_str(), name);
                     }
                 }
-                ResourceKind::Account => {
+                Body::Account(account) => {
                     accounts.insert(
                         r.account_id.as_str(),
                         AccountNames {
-                            name: r.name(),
-                            ou: r.body_str("parent_name"),
+                            name: Some(account.name.as_str()),
+                            ou: account.parent_name.as_deref(),
                         },
                     );
                 }
-                ResourceKind::Vpc => {
-                    if let (Some(id), Some(name)) =
-                        (r.body_str("vpc_id"), r.tags.get("Name"))
-                    {
+                Body::Vpc(vpc) => {
+                    if let Some(name) = r.tags.get("Name") {
                         vpc_names.insert(
-                            (r.account_id.as_str(), r.region.as_str(), id),
+                            (
+                                r.account_id.as_str(),
+                                r.region.as_str(),
+                                vpc.vpc_id.as_str(),
+                            ),
                             name.as_str(),
                         );
                     }
                 }
-                ResourceKind::Ec2Instance
-                | ResourceKind::InstanceType
-                | ResourceKind::EbsVolume
-                | ResourceKind::Ami
-                | ResourceKind::Subnet
-                | ResourceKind::SecurityGroup
-                | ResourceKind::SecurityGroupRule
-                | ResourceKind::RouteTable
-                | ResourceKind::InternetGateway
-                | ResourceKind::NatGateway
-                | ResourceKind::VpcPeeringConnection
-                | ResourceKind::PrefixList
-                | ResourceKind::AutoScalingGroup
-                | ResourceKind::LaunchTemplate
-                | ResourceKind::LaunchConfiguration
-                | ResourceKind::ElasticIp
-                | ResourceKind::LoadBalancer
-                | ResourceKind::TargetGroup
-                | ResourceKind::ManagedService => {}
+                Body::Ec2Instance(_)
+                | Body::InstanceType(_)
+                | Body::EbsVolume(_)
+                | Body::Ami(_)
+                | Body::Subnet(_)
+                | Body::SecurityGroup(_)
+                | Body::SecurityGroupRule(_)
+                | Body::RouteTable(_)
+                | Body::InternetGateway(_)
+                | Body::NatGateway(_)
+                | Body::VpcPeeringConnection(_)
+                | Body::PrefixList(_)
+                | Body::AutoScalingGroup(_)
+                | Body::LaunchTemplate(_)
+                | Body::LaunchConfiguration(_)
+                | Body::ElasticIp(_)
+                | Body::LoadBalancer(_)
+                | Body::TargetGroup(_)
+                | Body::ManagedService(_) => {}
             }
         }
 
@@ -183,7 +186,8 @@ impl<'a> Index<'a> {
 
     /// The Name tag of the VPC an instance is in, else the VPC id.
     fn vpc_name(&self, r: &'a Resource) -> Option<&'a str> {
-        let id = r.body_str("vpc_id")?;
+        let Body::Ec2Instance(instance) = &r.body else { return None };
+        let id = instance.vpc_id.as_deref()?;
         Some(
             self.vpc_names
                 .get(&(r.account_id.as_str(), r.region.as_str(), id))
@@ -279,7 +283,7 @@ impl<'a> Grouper<'a> {
         &self,
         kind: ResourceKind,
     ) -> impl Iterator<Item = &'a Resource> + '_ {
-        self.input.resources.iter().filter(move |r| r.kind == kind)
+        self.input.resources.iter().filter(move |r| r.kind() == kind)
     }
 
     fn run(&self) -> Vec<WorkloadMember> {
@@ -345,7 +349,7 @@ impl<'a> Grouper<'a> {
                     index
                         .related(tg_arn, Edge::AttachedTo, Direction::Out)
                         .filter_map(|lb| index.get(lb))
-                        .filter(|lb| lb.kind == ResourceKind::LoadBalancer)
+                        .filter(|lb| lb.kind() == ResourceKind::LoadBalancer)
                         .filter_map(Resource::name)
                         .min()
                         .or_else(|| tg.name())
@@ -532,10 +536,10 @@ impl<'a> Grouper<'a> {
             members.iter().map(|m| (m.arn.as_str(), &m.pair)).collect();
         let mut inherited = Vec::new();
         for r in self.input.resources {
-            if !stage(r.kind) || placed.contains(&r.arn) {
+            if !stage(r.kind()) || placed.contains(&r.arn) {
                 continue;
             }
-            let Some(via) = r.kind.inherits_via() else { continue };
+            let Some(via) = r.kind().inherits_via() else { continue };
             let owners = self
                 .index
                 .related(r.arn.as_str(), via.edge, via.direction)
@@ -557,7 +561,7 @@ impl<'a> Grouper<'a> {
     fn place_by_stack(&self, placed: &HashSet<Arn>) -> Vec<WorkloadMember> {
         let mut out = Vec::new();
         for r in self.input.resources {
-            if r.kind.inherits_via().is_none() || placed.contains(&r.arn) {
+            if r.kind().inherits_via().is_none() || placed.contains(&r.arn) {
                 continue;
             }
             if let Some(root) = self.index.stack_of(r) {
