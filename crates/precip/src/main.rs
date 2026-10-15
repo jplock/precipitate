@@ -1,6 +1,7 @@
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand};
+use precip_db::{DispositionSource, Trigger};
 use precip_engine::schedule::gantt::Gantt;
 use precip_engine::schedule::{Weekdays, day_name};
 use precip_engine::sizing::profiles::BuiltinProfile;
@@ -519,7 +520,7 @@ fn parse_date(s: &str) -> anyhow::Result<jiff::civil::Date> {
 /// computation when `trigger` is given (the `show` command, a new day).
 async fn print_schedule(
     store: &precip_db::Store,
-    trigger: Option<&str>,
+    trigger: Option<Trigger>,
 ) -> anyhow::Result<()> {
     let rules = store.global_rules().await?;
     let latest = match trigger {
@@ -533,7 +534,7 @@ async fn print_schedule(
         Some((id, _, schedule)) => (id, schedule),
         None => {
             store
-                .compute_schedule(today(), trigger.unwrap_or("command"))
+                .compute_schedule(today(), trigger.unwrap_or(Trigger::Command))
                 .await?
         }
     };
@@ -618,7 +619,9 @@ async fn run_schedule(
     command: ScheduleCommand,
 ) -> anyhow::Result<()> {
     match command {
-        ScheduleCommand::Show => print_schedule(store, Some("command")).await?,
+        ScheduleCommand::Show => {
+            print_schedule(store, Some(Trigger::Command)).await?
+        }
         ScheduleCommand::Set {
             per_day,
             per_week,
@@ -879,7 +882,7 @@ async fn run_schedule(
         }
         ScheduleCommand::Gantt { width } => {
             let (_, schedule) =
-                store.compute_schedule(today(), "command").await?;
+                store.compute_schedule(today(), Trigger::Command).await?;
             let gantt = Gantt::new(&schedule, today(), width);
             for line in gantt.render(32) {
                 out!("{line}");
@@ -1077,7 +1080,7 @@ async fn main() -> anyhow::Result<()> {
                     &workload,
                     &environment,
                     disposition,
-                    "user",
+                    DispositionSource::User,
                     note.as_deref(),
                 )
                 .await
@@ -1413,8 +1416,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 (ExportWhat::Schedule, "csv" | "json" | "ics") => {
-                    let (_, schedule) =
-                        store.compute_schedule(today(), "export").await?;
+                    let (_, schedule) = store
+                        .compute_schedule(today(), Trigger::Export)
+                        .await?;
                     match format.as_str() {
                         "csv" => precip_db::export::schedule_csv(&schedule),
                         "json" => precip_db::export::schedule_json(&schedule)?,

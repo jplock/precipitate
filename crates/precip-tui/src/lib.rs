@@ -14,7 +14,7 @@ use crossterm::event::{
 };
 use precip_db::{
     DispositionChange, MemberDetail, Overview, ScanStats, ScanSummary, Store,
-    WorkloadSummary,
+    Trigger, WorkloadSummary,
 };
 use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_types::scan::TargetStatus;
@@ -1103,7 +1103,7 @@ impl App {
         if self.selected.selected().is_none() && !self.scans.is_empty() {
             self.selected.select(Some(0));
         }
-        self.recompute_schedule("open")?;
+        self.recompute_schedule(Trigger::Open)?;
         Ok(())
     }
 
@@ -1135,20 +1135,20 @@ impl App {
         let today = jiff::Zoned::now().date();
         if self.schedule.as_ref().is_some_and(|v| v.today != today) {
             self.note(format!("new day, {today}: schedule recomputed"));
-            self.recompute_schedule("open")?;
+            self.recompute_schedule(Trigger::Open)?;
         }
         Ok(())
     }
 
     /// Recompute the calendar from today and keep the selection.
-    fn recompute_schedule(&mut self, trigger: &str) -> Result<(), TuiError> {
+    fn recompute_schedule(&mut self, trigger: Trigger) -> Result<(), TuiError> {
         let Some(store) = &self.store else { return Ok(()) };
         let rt = tokio::runtime::Handle::current();
         let today = jiff::Zoned::now().date();
         let rules = rt.block_on(store.global_rules())?;
         // Every change already produced a version through the event log;
         // only opening the workspace (a new day) computes afresh.
-        let latest = if trigger == "open" {
+        let latest = if trigger == Trigger::Open {
             None
         } else {
             rt.block_on(store.latest_schedule())?
@@ -1236,7 +1236,7 @@ impl App {
                     "{workload} / {environment}: {what}{}",
                     date.map(|d| format!(" ({d})")).unwrap_or_default()
                 ));
-                self.recompute_schedule("status_change")?;
+                self.recompute_schedule(Trigger::StatusChange)?;
             }
             Err(precip_db::DbError::Invalid(msg)) => {
                 self.note(format!("{workload} / {environment}: {msg}"));
@@ -1614,7 +1614,7 @@ impl App {
         let rules = ed.rules.clone();
         tokio::runtime::Handle::current()
             .block_on(store.set_global_rules(&rules))?;
-        self.recompute_schedule("rule_change")
+        self.recompute_schedule(Trigger::RuleChange)
     }
 
     /// Left and right on a rules row: nudge a number or flip a switch.
@@ -1700,7 +1700,7 @@ impl App {
                         .block_on(store.remove_blackout(&b))?;
                 }
                 self.note(format!("removed the {} freeze", b.name));
-                return self.recompute_schedule("rule_change");
+                return self.recompute_schedule(Trigger::RuleChange);
             }
             RuleRow::Header(_)
             | RuleRow::PerDay
@@ -1729,7 +1729,7 @@ impl App {
                 self.note(format!(
                     "wave {number} removed; {moved} pair(s) back in wave 1"
                 ));
-                self.recompute_schedule("rule_change")
+                self.recompute_schedule(Trigger::RuleChange)
             }
             Err(precip_db::DbError::Invalid(msg)) => {
                 self.note(msg);
@@ -1786,7 +1786,7 @@ impl App {
                     "no migrations from {} to {} ({})",
                     b.start, b.end, b.name
                 ));
-                self.recompute_schedule("rule_change")
+                self.recompute_schedule(Trigger::RuleChange)
             }
             RuleRow::Holidays => {
                 let Ok(year) = f.get(0).parse::<i16>() else {
@@ -1816,7 +1816,7 @@ impl App {
                 ed.waves = rt.block_on(store.waves())?;
                 ed.rebuild_rows();
                 self.note(format!("wave {number} is now {name}"));
-                self.recompute_schedule("rule_change")
+                self.recompute_schedule(Trigger::RuleChange)
             }
             RuleRow::AddWave => {
                 let Ok(number) = f.get(0).parse::<u32>() else {
@@ -1844,7 +1844,7 @@ impl App {
                 ed.waves = rt.block_on(store.waves())?;
                 ed.rebuild_rows();
                 self.note(format!("wave {number} added"));
-                self.recompute_schedule("rule_change")
+                self.recompute_schedule(Trigger::RuleChange)
             }
             RuleRow::Header(_)
             | RuleRow::PerDay
@@ -1917,7 +1917,7 @@ impl App {
             p.duration.get(),
             p.weight.get(),
         ))?;
-        self.recompute_schedule("rule_change")
+        self.recompute_schedule(Trigger::RuleChange)
     }
 
     fn pair_adjust(&mut self, delta: i64) -> Result<(), TuiError> {
@@ -2015,7 +2015,7 @@ impl App {
                     dep.environment.as_str(),
                 ))?;
                 self.note(format!("{me} no longer waits for {dep}"));
-                return self.recompute_schedule("rule_change");
+                return self.recompute_schedule(Trigger::RuleChange);
             }
             PairRow::Freeze(i) => {
                 if !ed.confirming_delete {
@@ -2027,7 +2027,7 @@ impl App {
                 ed.rebuild_rows();
                 rt.block_on(store.remove_blackout(&b))?;
                 self.note(format!("removed the {} freeze", b.name));
-                return self.recompute_schedule("rule_change");
+                return self.recompute_schedule(Trigger::RuleChange);
             }
             PairRow::Header(_)
             | PairRow::Wave
@@ -2074,7 +2074,7 @@ impl App {
                     "{me}: no migration from {} to {} ({})",
                     b.start, b.end, b.name
                 ));
-                self.recompute_schedule("rule_change")
+                self.recompute_schedule(Trigger::RuleChange)
             }
             PairRow::Header(_)
             | PairRow::Wave
@@ -2106,7 +2106,7 @@ impl App {
             chosen.len(),
             p.year
         ));
-        self.recompute_schedule("rule_change")
+        self.recompute_schedule(Trigger::RuleChange)
     }
 
     fn apply_dependency(&mut self) -> Result<(), TuiError> {
@@ -2127,7 +2127,7 @@ impl App {
             chosen.environment.as_str(),
         ))?;
         self.note(format!("{me} now waits for {chosen}"));
-        self.recompute_schedule("rule_change")
+        self.recompute_schedule(Trigger::RuleChange)
     }
 
     fn open_weekday_picker_from(
@@ -2188,7 +2188,7 @@ impl App {
                 if let Some(ed) = self.rules_editor.as_mut() {
                     ed.rules.weekdays = rules.weekdays.clone();
                 }
-                self.recompute_schedule("rule_change")
+                self.recompute_schedule(Trigger::RuleChange)
             }
         }
     }
