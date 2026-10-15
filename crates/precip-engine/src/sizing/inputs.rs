@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-/// An instance's CPU architecture as AWS reports it.
+/// An instance's CPU architecture, as AWS reports it and the Azure
+/// scanner normalises it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum Architecture {
@@ -82,7 +83,8 @@ pub enum Platform {
 
 impl From<&str> for Platform {
     /// AWS platform details start with `Windows` for every Windows
-    /// variant, such as `Windows with SQL Server Standard`.
+    /// variant, such as `Windows with SQL Server Standard`; Azure reports
+    /// `Windows` or `Linux`.
     fn from(s: &str) -> Self {
         if s.starts_with("Windows") { Self::Windows } else { Self::LinuxOrUnix }
     }
@@ -301,7 +303,7 @@ pub fn sized_instances(
     // Volumes attached to each instance.
     let mut volumes: HashMap<&str, Vec<&body::Volume>> = HashMap::new();
     for rel in relationships.iter().filter(|r| r.edge == Edge::AttachedTo) {
-        if let Some(Body::EbsVolume(v)) =
+        if let Some(Body::Volume(v)) =
             by_arn.get(rel.from_arn.as_str()).map(|r| &r.body)
         {
             volumes.entry(rel.to_arn.as_str()).or_default().push(v);
@@ -310,7 +312,7 @@ pub fn sized_instances(
 
     let mut out = Vec::new();
     for r in resources {
-        let Body::Ec2Instance(inst) = &r.body else { continue };
+        let Body::Instance(inst) = &r.body else { continue };
         let Some(m) = placement.get(r.arn.as_str()) else { continue };
         let Some(disposition) =
             dispositions.get(&m.pair).copied().filter(|d| d.is_sized())
@@ -336,8 +338,17 @@ pub fn sized_instances(
         let disk_gib = sizes.iter().sum();
         let largest_volume_gib = sizes.iter().copied().max().unwrap_or(0);
         let volume_count = u32::try_from(vols.len()).unwrap_or(u32::MAX);
+        // Azure VMs do not record an architecture; their size does.
+        let only_type_arch =
+            ty.and_then(|t| t.architectures.as_deref()).and_then(|a| match a {
+                [one] => Some(one.as_str()),
+                [] | [_, _, ..] => None,
+            });
         let architecture = Architecture::from(
-            inst.architecture.as_deref().unwrap_or("unknown"),
+            inst.architecture
+                .as_deref()
+                .or(only_type_arch)
+                .unwrap_or("unknown"),
         );
 
         let Assessment { fit, findings } = FitInput {
@@ -346,13 +357,9 @@ pub fn sized_instances(
             memory_gib,
             volumes: volume_count,
             largest_volume_gib,
-            instance_store_volumes: inst.instance_store_volume_count,
+            instance_store_volumes: inst.local_disk_count,
             nics: inst.network_interface_count,
-            boot_mode: inst
-                .current_boot_mode
-                .as_deref()
-                .or(inst.boot_mode.as_deref())
-                .map(BootMode::from),
+            boot_mode: inst.boot_mode.as_deref().map(BootMode::from),
             platform: inst.platform.as_deref().map(Platform::from),
             bare_metal: ty.and_then(|t| t.bare_metal).unwrap_or(false),
             gpus: ty.map_or(0, |t| t.gpus),
@@ -628,6 +635,59 @@ mod tests {
             serde_json::to_value(Finding::TooManyNics { nics: 9, max: 8 })
                 .unwrap(),
             serde_json::json!({"finding": "too_many_nics", "nics": 9, "max": 8})
+        );
+    }
+
+    /// An Azure VM records no architecture; its size does. A size with
+    /// more than one architecture says nothing.
+    #[test]
+    fn an_instance_without_an_architecture_takes_its_types() {
+        use precip_types::scan::ResourceKind;
+        use precip_types::{EnvName, GroupingSignal, WorkloadName};
+        let res =
+            |arn: &str, kind: ResourceKind, body: serde_json::Value| Resource {
+                arn: arn.into(),
+                account_id: "s1".into(),
+                region: "eastus".into(),
+                tags: BTreeMap::new(),
+                body: Body::from_value(kind, body).unwrap(),
+            };
+        let pair = PairKey {
+            workload: WorkloadName::from("shop"),
+            environment: EnvName::from("prod"),
+        };
+        let sized = |arches: serde_json::Value| {
+            let resources = [
+                res(
+                    "vm",
+                    ResourceKind::Instance,
+                    serde_json::json!({"instance_id": "vm", "instance_type": "D4ps"}),
+                ),
+                res(
+                    "t",
+                    ResourceKind::InstanceType,
+                    serde_json::json!({
+                        "name": "D4ps", "vcpus": 4, "memory_mib": 16384, "architectures": arches,
+                    }),
+                ),
+            ];
+            let members = [WorkloadMember {
+                arn: "vm".into(),
+                pair: pair.clone(),
+                signal: GroupingSignal::Tag,
+            }];
+            let dispositions =
+                BTreeMap::from([(pair.clone(), Disposition::Rehost)]);
+            sized_instances(&resources, &[], &members, &dispositions, &gen1())
+                .remove(0)
+        };
+        assert_eq!(
+            sized(serde_json::json!(["arm64"])).architecture,
+            Architecture::Arm64
+        );
+        assert_eq!(
+            sized(serde_json::json!(["x86_64", "arm64"])).architecture,
+            Architecture::Other("unknown".into())
         );
     }
 }

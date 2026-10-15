@@ -15,6 +15,7 @@ use crate::collect::{
 pub(crate) struct Stacks;
 
 impl Collect for Stacks {
+    type Context = RegionContext;
     const API: &'static str = "cloudformation:DescribeStacks";
 
     async fn collect(
@@ -31,7 +32,7 @@ impl Collect for Stacks {
                 out.resources.push(ctx.resource(
                     Arn::from(id),
                     tags(stack.tags()),
-                    Body::CloudFormationStack(body::Stack {
+                    Body::DeploymentGroup(body::DeploymentGroup {
                         name: own(stack.stack_name()),
                         parent_id: own(stack.parent_id()),
                         root_id: own(stack.root_id()),
@@ -44,13 +45,14 @@ impl Collect for Stacks {
     }
 }
 
-/// Every physical resource in every stack, as `in_stack` edges. This is
+/// Every physical resource in every stack, as `in_deployment_group` edges. This is
 /// the authoritative stack membership: it covers resource types whose own
 /// list calls return no tags. Runs after the stacks and the resources
 /// themselves, so physical ids can be matched to collected ARNs.
 pub(crate) struct StackResources;
 
 impl Collect for StackResources {
+    type Context = RegionContext;
     const API: &'static str = "cloudformation:ListStackResources";
     const STAGE: Stage = Stage::Second;
 
@@ -61,7 +63,7 @@ impl Collect for StackResources {
     ) -> Result<Collected, CollectError> {
         let mut out = Collected::default();
         let stacks: Vec<&str> = prior
-            .of_kind(ResourceKind::CloudFormationStack)
+            .of_kind(ResourceKind::DeploymentGroup)
             .map(|s| s.arn.as_str())
             .collect();
         if stacks.is_empty() {
@@ -83,7 +85,11 @@ impl Collect for StackResources {
                         continue;
                     };
                     if let Some(arn) = by_name.member_arn(ctx, ty, id) {
-                        out.relate(arn, Edge::InStack, Arn::from(stack));
+                        out.relate(
+                            arn,
+                            Edge::InDeploymentGroup,
+                            Arn::from(stack),
+                        );
                     }
                 }
             }
@@ -105,10 +111,10 @@ impl<'a> ByName<'a> {
             resources
                 .iter()
                 .filter_map(|r| {
-                    let (name, service) = if let Body::ElasticIp(e) = &r.body {
+                    let (name, service) = if let Body::PublicIp(e) = &r.body {
                         (e.public_ip.as_deref()?, None)
                     } else if let Body::ManagedService(m) = &r.body {
-                        (m.name.as_deref()?, Some(m.service.as_str()))
+                        (m.name.as_deref()?, Some(m.service.product()))
                     } else {
                         (r.name()?, None)
                     };
@@ -141,7 +147,7 @@ impl<'a> ByName<'a> {
         match resource_type {
             // Physical id of an EIP is its address.
             "AWS::EC2::EIP" => {
-                self.get(ResourceKind::ElasticIp, None, physical_id)
+                self.get(ResourceKind::PublicIp, None, physical_id)
             }
             // Physical id is already an ARN.
             "AWS::ECS::Cluster"
@@ -153,7 +159,7 @@ impl<'a> ByName<'a> {
             }
             // Physical id is a name; the ARN carries an opaque id.
             "AWS::AutoScaling::AutoScalingGroup" => {
-                self.get(ResourceKind::AutoScalingGroup, None, physical_id)
+                self.get(ResourceKind::ScaleGroup, None, physical_id)
             }
             "AWS::ElastiCache::CacheCluster" => self.get(
                 ResourceKind::ManagedService,
@@ -184,18 +190,20 @@ mod tests {
     }
 
     fn rds_service() -> body::Service {
-        body::Service::Rds {
+        body::Service::Database {
+            product: "rds".into(),
             engine: None,
             engine_version: None,
             instance_class: None,
             allocated_storage_gib: None,
-            multi_az: None,
-            vpc_id: None,
+            high_availability: None,
+            network_id: None,
         }
     }
 
     fn cache_service() -> body::Service {
-        body::Service::ElastiCache {
+        body::Service::Cache {
+            product: "elasticache".into(),
             engine: None,
             node_type: None,
             nodes: None,

@@ -9,6 +9,7 @@ use crate::schema::{
 use crate::{DbError, Store};
 use jiff::civil::Date;
 use precip_engine::schedule::{PairState, Status};
+use precip_types::ResourceKind;
 use sea_query::{Alias, Expr, ExprTrait, Func, Order, Query};
 use sqlx::Row;
 
@@ -161,7 +162,7 @@ impl Store {
             // an instance that has been terminated and only lingers.
             .and_where(
                 Expr::col((ResourceVersions::Table, ResourceVersions::Kind))
-                    .ne("ec2_instance")
+                    .ne(ResourceKind::Instance.as_str())
                     .or(state.if_null("").ne("terminated")),
             )
             .group_by_col((WorkloadMembers::Table, WorkloadMembers::Workload))

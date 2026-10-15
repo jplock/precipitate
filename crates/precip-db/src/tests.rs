@@ -7,7 +7,9 @@ use precip_types::body::Instance;
 use precip_types::scan::{
     Edge, Relationship, Resource, ResourceKind, ScanTarget, TargetStatus,
 };
-use precip_types::{Arn, Disposition, GroupingConfig, Scan, WorkloadMember};
+use precip_types::{
+    Arn, Disposition, GroupingConfig, Provider, Scan, WorkloadMember,
+};
 use sea_query::{Expr, ExprTrait, Query};
 use std::collections::BTreeMap;
 
@@ -34,7 +36,7 @@ fn instance(arn: &str, instance_type: &str) -> Resource {
         account_id: "123456789012".into(),
         region: "us-east-1".into(),
         tags: BTreeMap::from([("Name".into(), "web".into())]),
-        body: precip_types::Body::Ec2Instance(Instance {
+        body: precip_types::Body::Instance(Instance {
             instance_type: Some(instance_type.into()),
             ..Default::default()
         }),
@@ -46,7 +48,8 @@ fn scan(id: &str, day: u8, resources: Vec<Resource>) -> Scan {
         id: id.into(),
         started: format!("2026-10-{day:02}T00:00:00Z").parse().unwrap(),
         finished: None,
-        caller_arn: "arn:aws:iam::123456789012:role/precip".into(),
+        provider: Provider::Aws,
+        caller: "arn:aws:iam::123456789012:role/precip".into(),
         targets: vec![ScanTarget {
             account_id: "123456789012".into(),
             region: "us-east-1".into(),
@@ -166,9 +169,9 @@ fn res(
 fn inst(id: &str, tags: &[(&str, &str)]) -> Resource {
     res(
         &format!("arn:aws:ec2:us-east-1:{ACCT}:instance/{id}"),
-        ResourceKind::Ec2Instance,
+        ResourceKind::Instance,
         tags,
-        serde_json::json!({ "instance_type": "t3.micro", "vpc_id": "vpc-1" }),
+        serde_json::json!({ "instance_type": "t3.micro", "network_id": "vpc-1" }),
     )
 }
 
@@ -239,7 +242,7 @@ async fn pair_members_lists_each_resource_with_kind_name_and_signal() {
             inst("i-1", &[("app", "billing-prod"), ("Name", "web-1")]),
             res(
                 V1,
-                ResourceKind::EbsVolume,
+                ResourceKind::Volume,
                 &[],
                 serde_json::json!({ "size_gib": 8 }),
             ),
@@ -253,8 +256,8 @@ async fn pair_members_lists_each_resource_with_kind_name_and_signal() {
     assert_eq!(
         summary,
         vec![
-            ("ebs_volume".into(), "vol-1".into(), "attached".into()),
-            ("ec2_instance".into(), "web-1".into(), "tag".into()),
+            ("instance".into(), "web-1".into(), "tag".into()),
+            ("volume".into(), "vol-1".into(), "attached".into()),
         ]
     );
     assert!(
@@ -470,7 +473,7 @@ async fn verification_flags_migrated_pairs_still_in_aws() {
     // The next scan no longer sees the instance: nothing to flag. A
     // terminated instance does not count either.
     let mut gone = inst("i-2", &[("app", "shop-dev")]);
-    if let precip_types::Body::Ec2Instance(i) = &mut gone.body {
+    if let precip_types::Body::Instance(i) = &mut gone.body {
         i.state = Some("terminated".into());
     }
     let s2 = fixture("s2", vec![gone], vec![]);
@@ -1018,14 +1021,14 @@ async fn merging_a_workload_applies_on_regroup() {
         vec![
             res(
                 asg,
-                ResourceKind::AutoScalingGroup,
+                ResourceKind::ScaleGroup,
                 &[],
                 serde_json::json!({ "name": "vouch-us-prod" }),
             ),
             inst("i-1", &[]),
             inst("i-2", &[("Service", "vouch"), ("env", "prod")]),
         ],
-        vec![rel(I1, Edge::MemberOfAsg, asg)],
+        vec![rel(I1, Edge::MemberOfScaleGroup, asg)],
     ))
     .await;
     assert_eq!(find(&m, I1).pair.workload, "vouch-us");
@@ -1165,4 +1168,106 @@ async fn recording_the_same_scan_id_twice_is_rejected() {
     store.record_scan(&s).await.expect("first");
     let err = store.record_scan(&s).await.unwrap_err();
     assert!(matches!(err, DbError::Sqlx(_)));
+}
+
+const AZ_VM: &str = "/subscriptions/00000000-0000-0000-0000-000000000001/resourcegroups/shop/providers/microsoft.compute/virtualmachines/web-1";
+const AZ_DISK: &str = "/subscriptions/00000000-0000-0000-0000-000000000001/resourcegroups/shop/providers/microsoft.compute/disks/web-1-os";
+
+fn azure_scan(id: &str, day: u8, resources: Vec<Resource>) -> Scan {
+    Scan {
+        provider: Provider::Azure,
+        caller: "11111111-1111-1111-1111-111111111111".into(),
+        relationships: vec![Relationship {
+            from_arn: AZ_DISK.into(),
+            edge: Edge::AttachedTo,
+            to_arn: AZ_VM.into(),
+        }],
+        ..scan(id, day, resources)
+    }
+}
+
+#[tokio::test]
+async fn a_scan_of_one_provider_keeps_the_other_providers_estate() {
+    let store = memory_store().await;
+    store
+        .record_scan(&scan("s1", 1, vec![instance(I1, "m6i.large")]))
+        .await
+        .unwrap();
+    let s2 = store
+        .record_scan(&azure_scan(
+            "s2",
+            2,
+            vec![instance(AZ_VM, "Standard_D2s_v5")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(s2, ScanStats { seq: 2, added: 1, ..Default::default() });
+    assert_eq!(store.resource_count(2).await.unwrap(), 2, "both estates");
+    let history = store.history(I1).await.unwrap();
+    assert_eq!(history.len(), 1, "the AWS row is extended, not copied");
+    assert_eq!((history[0].1, history[0].2), (1, 2));
+    let d = store.diff_scans(1, 2).await.unwrap();
+    assert_eq!((d.added, d.removed), (vec![AZ_VM.to_string()], vec![]));
+    let rels = store.live_relationships(2).await.unwrap();
+    assert_eq!(rels.len(), 2, "relationships of both providers are live");
+}
+
+#[tokio::test]
+async fn a_resource_leaves_only_when_its_own_provider_no_longer_sees_it() {
+    let store = memory_store().await;
+    store
+        .record_scan(&scan(
+            "s1",
+            1,
+            vec![instance(I1, "m6i.large"), instance(I2, "t3.micro")],
+        ))
+        .await
+        .unwrap();
+    store
+        .record_scan(&azure_scan(
+            "s2",
+            2,
+            vec![instance(AZ_VM, "Standard_D2s_v5")],
+        ))
+        .await
+        .unwrap();
+    let s3 = store
+        .record_scan(&azure_scan(
+            "s3",
+            3,
+            vec![instance(AZ_VM, "Standard_D2s_v5")],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(s3, ScanStats { seq: 3, unchanged: 1, ..Default::default() });
+    assert_eq!(store.resource_count(3).await.unwrap(), 3);
+
+    let s4 = store
+        .record_scan(&scan("s4", 4, vec![instance(I1, "m6i.large")]))
+        .await
+        .unwrap();
+    assert_eq!(s4, ScanStats { seq: 4, unchanged: 1, ..Default::default() });
+    let d = store.diff_scans(3, 4).await.unwrap();
+    assert_eq!(d.removed, vec![I2.to_string()], "only the AWS host left");
+    assert_eq!(store.resource_count(4).await.unwrap(), 2);
+    let scans = store.list_scans().await.unwrap();
+    assert_eq!(
+        scans.iter().map(|s| s.provider).collect::<Vec<_>>(),
+        [Provider::Aws, Provider::Azure, Provider::Azure, Provider::Aws]
+    );
+}
+
+#[tokio::test]
+async fn scan_selections_are_saved_per_provider() {
+    let store = memory_store().await;
+    store.save_scan_options(Provider::Aws, r#"{"a":1}"#).await.unwrap();
+    store.save_scan_options(Provider::Azure, r#"{"z":1}"#).await.unwrap();
+    assert_eq!(
+        store.saved_scan_options(Provider::Aws).await.unwrap().as_deref(),
+        Some(r#"{"a":1}"#)
+    );
+    assert_eq!(
+        store.saved_scan_options(Provider::Azure).await.unwrap().as_deref(),
+        Some(r#"{"z":1}"#)
+    );
 }

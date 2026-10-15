@@ -1,4 +1,4 @@
-//! A scan is one read-only pass over a set of AWS accounts and regions.
+//! A scan is one read-only pass over a set of cloud accounts and regions.
 
 use crate::body::Body;
 use crate::{AccountId, Arn, Region};
@@ -6,15 +6,25 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// One scan of an AWS estate. Scans are appended to the store and never
-/// overwritten.
+crate::named_enum! {
+/// The cloud a scan read.
+pub enum Provider {
+    Aws = "aws",
+    Azure = "azure",
+}
+}
+
+/// One scan of one provider's estate. Scans are appended to the store and
+/// never overwritten.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scan {
     pub id: String,
+    pub provider: Provider,
     pub started: Timestamp,
     pub finished: Option<Timestamp>,
-    /// ARN of the identity the scan ran as.
-    pub caller_arn: Arn,
+    /// The identity the scan ran as: an AWS principal ARN, or an Azure
+    /// principal's object id.
+    pub caller: String,
     pub targets: Vec<ScanTarget>,
     pub resources: Vec<Resource>,
     pub relationships: Vec<Relationship>,
@@ -32,7 +42,8 @@ pub struct ScanTarget {
 #[serde(rename_all = "snake_case", tag = "status", content = "error")]
 pub enum TargetStatus {
     Scanned,
-    /// Skipped because Resource Explorer reported nothing in the region.
+    /// Skipped because the provider's resource index reported nothing in
+    /// the region.
     Empty,
     Partial(String),
     Failed(String),
@@ -60,36 +71,37 @@ impl TargetStatus {
 
 crate::named_enum! {
 pub enum ResourceKind {
-    /// An AWS account in the Organization, with its OU. Region is `global`.
+    /// An AWS account or Azure subscription, with its OU or management
+    /// group. Region is `global`.
     Account = "account",
-    Ec2Instance = "ec2_instance",
-    /// vCPU and memory for an instance type seen in the region. Synthetic
-    /// ARN `arn:<partition>:ec2:<region>::instance-type/<name>`.
+    Instance = "instance",
+    /// vCPU and memory for a machine size seen in the region, under a
+    /// synthetic id the scanner makes up.
     InstanceType = "instance_type",
-    EbsVolume = "ebs_volume",
-    Ami = "ami",
-    Vpc = "vpc",
+    Volume = "volume",
+    Image = "image",
+    Network = "network",
     Subnet = "subnet",
     SecurityGroup = "security_group",
     SecurityGroupRule = "security_group_rule",
     RouteTable = "route_table",
     InternetGateway = "internet_gateway",
     NatGateway = "nat_gateway",
-    VpcPeeringConnection = "vpc_peering_connection",
+    PeeringConnection = "peering_connection",
     /// A managed prefix list with its entries, so security group rules that
     /// reference one can be expanded.
     PrefixList = "prefix_list",
-    AutoScalingGroup = "auto_scaling_group",
-    /// A launch template version, carrying the instance type an ASG
+    ScaleGroup = "scale_group",
+    /// An AWS launch template version, carrying the instance type an ASG
     /// launches when it has no mixed-instance overrides.
     LaunchTemplate = "launch_template",
-    /// A launch configuration, the pre-template way an ASG names its
+    /// An AWS launch configuration, the pre-template way an ASG names its
     /// instance type. Still common in older estates.
     LaunchConfiguration = "launch_configuration",
-    ElasticIp = "elastic_ip",
+    PublicIp = "public_ip",
     LoadBalancer = "load_balancer",
     TargetGroup = "target_group",
-    CloudFormationStack = "cloud_formation_stack",
+    DeploymentGroup = "deployment_group",
     /// A resource of a managed service with no Oxide equivalent. The
     /// service name is in `body.service`. Counted, never sized.
     ManagedService = "managed_service",
@@ -117,28 +129,26 @@ impl ResourceKind {
     /// own. Load balancers follow target groups, which follow instances.
     pub fn inherits_via(self) -> Option<Inheritance> {
         let (edge, direction) = match self {
-            Self::EbsVolume | Self::ElasticIp => {
-                (Edge::AttachedTo, Direction::Out)
-            }
-            Self::AutoScalingGroup => (Edge::MemberOfAsg, Direction::In),
+            Self::Volume | Self::PublicIp => (Edge::AttachedTo, Direction::Out),
+            Self::ScaleGroup => (Edge::MemberOfScaleGroup, Direction::In),
             Self::TargetGroup => (Edge::TargetOf, Direction::In),
             Self::SecurityGroup => (Edge::HasSecurityGroup, Direction::In),
             Self::LoadBalancer => (Edge::AttachedTo, Direction::In),
             Self::Account
-            | Self::Ec2Instance
+            | Self::Instance
             | Self::InstanceType
-            | Self::Ami
-            | Self::Vpc
+            | Self::Image
+            | Self::Network
             | Self::Subnet
             | Self::SecurityGroupRule
             | Self::RouteTable
             | Self::InternetGateway
             | Self::NatGateway
-            | Self::VpcPeeringConnection
+            | Self::PeeringConnection
             | Self::PrefixList
             | Self::LaunchTemplate
             | Self::LaunchConfiguration
-            | Self::CloudFormationStack
+            | Self::DeploymentGroup
             | Self::ManagedService => return None,
         };
         Some(Inheritance { edge, direction })
@@ -180,8 +190,8 @@ impl Resource {
 crate::named_enum! {
 pub enum Edge {
     AttachedTo = "attached_to",
-    MemberOfAsg = "member_of_asg",
-    InStack = "in_stack",
+    MemberOfScaleGroup = "member_of_scale_group",
+    InDeploymentGroup = "in_deployment_group",
     TargetOf = "target_of",
     InSubnet = "in_subnet",
     HasSecurityGroup = "has_security_group",
@@ -218,7 +228,7 @@ mod tests {
 
     #[test]
     fn tag_lookup_takes_the_first_present_key() {
-        let r = resource(Body::Vpc(body::Vpc::default()));
+        let r = resource(Body::Network(body::Network::default()));
         assert_eq!(r.first_tag(&["Missing", "App"]), Some("shop"));
         assert_eq!(
             r.first_tag(&["Blank", "App"]),
@@ -229,26 +239,33 @@ mod tests {
 
     #[test]
     fn kind_and_name_come_from_the_body() {
-        let r = resource(Body::AutoScalingGroup(body::AutoScalingGroup {
+        let r = resource(Body::ScaleGroup(body::ScaleGroup {
             name: Some("web".into()),
             ..Default::default()
         }));
-        assert_eq!(r.kind(), ResourceKind::AutoScalingGroup);
+        assert_eq!(r.kind(), ResourceKind::ScaleGroup);
         assert_eq!(r.name(), Some("web"));
-        assert_eq!(resource(Body::Vpc(body::Vpc::default())).name(), None);
+        assert_eq!(
+            resource(Body::Network(body::Network::default())).name(),
+            None
+        );
     }
 
     #[test]
     fn resources_serialize_with_kind_and_body_side_by_side() {
         let r = resource(Body::ManagedService(body::Managed {
             name: Some("orders".into()),
-            service: body::Service::DynamoDb,
+            service: body::Service::KeyValue { product: "dynamodb".into() },
         }));
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["kind"], "managed_service");
         assert_eq!(
             v["body"],
-            serde_json::json!({"name": "orders", "service": "dynamodb"})
+            serde_json::json!({
+                "name": "orders",
+                "service": "key_value",
+                "product": "dynamodb",
+            })
         );
         let back: Resource = serde_json::from_value(v).unwrap();
         assert_eq!(back, r);
@@ -258,8 +275,8 @@ mod tests {
     fn stored_bodies_round_trip_and_tolerate_missing_fields() {
         let stored =
             serde_json::json!({"instance_id": "i-1", "state": "running"});
-        let b = Body::from_value(ResourceKind::Ec2Instance, stored).unwrap();
-        let Body::Ec2Instance(i) = &b else { panic!("wrong kind") };
+        let b = Body::from_value(ResourceKind::Instance, stored).unwrap();
+        let Body::Instance(i) = &b else { panic!("wrong kind") };
         assert_eq!(i.state.as_deref(), Some("running"));
         assert_eq!(i.network_interface_count, 0, "missing fields default");
         assert_eq!(b.to_value().unwrap()["instance_id"], "i-1");
@@ -273,16 +290,15 @@ mod tests {
         );
     }
 
-    /// Stored bodies and content hashes were written from JSON literals
-    /// before bodies were typed; a typed body must store the same object
-    /// or every resource would get a new version on the next scan.
+    /// The store's `json_extract` queries and the content hash read these
+    /// keys; a renamed field changes both.
     #[test]
-    fn typed_bodies_store_the_same_json_as_before() {
-        let instance = Body::Ec2Instance(body::Instance {
+    fn bodies_store_flat_objects_with_their_field_names() {
+        let instance = Body::Instance(body::Instance {
             instance_id: "i-1".into(),
             instance_type: Some("m5.large".into()),
-            vpc_id: Some("vpc-1".into()),
-            ebs_volume_count: 2,
+            network_id: Some("vpc-1".into()),
+            volume_count: 2,
             ..Default::default()
         });
         assert_eq!(
@@ -295,12 +311,11 @@ mod tests {
                 "state": null,
                 "image_id": null,
                 "subnet_id": null,
-                "vpc_id": "vpc-1",
+                "network_id": "vpc-1",
                 "boot_mode": null,
-                "current_boot_mode": null,
                 "launch_time": null,
-                "ebs_volume_count": 2,
-                "instance_store_volume_count": 0,
+                "volume_count": 2,
+                "local_disk_count": 0,
                 "network_interface_count": 0,
                 "public_ip": null,
             })
@@ -316,33 +331,35 @@ mod tests {
                 "name": "web",
                 "type": "application",
                 "scheme": null,
-                "vpc_id": null,
+                "network_id": null,
                 "dns_name": null,
                 "security_groups": [],
             })
         );
         let rds = Body::ManagedService(body::Managed {
             name: Some("orders".into()),
-            service: body::Service::Rds {
+            service: body::Service::Database {
+                product: "rds".into(),
                 engine: Some("postgres".into()),
                 engine_version: None,
                 instance_class: None,
                 allocated_storage_gib: Some(100),
-                multi_az: Some(false),
-                vpc_id: None,
+                high_availability: Some(false),
+                network_id: None,
             },
         });
         assert_eq!(
             rds.to_value().unwrap(),
             serde_json::json!({
-                "service": "rds",
+                "service": "database",
+                "product": "rds",
                 "name": "orders",
                 "engine": "postgres",
                 "engine_version": null,
                 "instance_class": null,
                 "allocated_storage_gib": 100,
-                "multi_az": false,
-                "vpc_id": null,
+                "high_availability": false,
+                "network_id": null,
             })
         );
     }
@@ -351,7 +368,7 @@ mod tests {
     fn every_kind_has_a_body_with_the_same_name() {
         for kind in ResourceKind::ALL {
             let value = if *kind == ResourceKind::ManagedService {
-                serde_json::json!({"service": "eks"})
+                serde_json::json!({"service": "kubernetes", "product": "eks"})
             } else {
                 serde_json::json!({})
             };
@@ -365,14 +382,14 @@ mod tests {
         let via =
             |k: ResourceKind| k.inherits_via().map(|i| (i.edge, i.direction));
         assert_eq!(
-            via(ResourceKind::EbsVolume),
+            via(ResourceKind::Volume),
             Some((Edge::AttachedTo, Direction::Out))
         );
         assert_eq!(
             via(ResourceKind::LoadBalancer),
             Some((Edge::AttachedTo, Direction::In))
         );
-        assert_eq!(via(ResourceKind::Ec2Instance), None);
+        assert_eq!(via(ResourceKind::Instance), None);
         assert_eq!(via(ResourceKind::ManagedService), None);
         let inheriting = ResourceKind::ALL
             .iter()

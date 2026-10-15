@@ -3,6 +3,10 @@
 -- carries the range of scans it was observed in. An unchanged resource costs
 -- one update of last_seen_seq per scan.
 --
+-- A scan reads one provider. Recording it carries every live row of the
+-- other providers forward to the new scan, so presence at a scan is always
+-- the whole estate.
+--
 -- The per-scan copies this replaces hold no production data yet and cannot
 -- be converted in SQL (the content hash is computed in Rust), so they are
 -- dropped.
@@ -22,6 +26,7 @@ DROP TABLE resources;
 CREATE TABLE resource_versions (
     arn             TEXT NOT NULL,
     version         INTEGER NOT NULL,   -- 1, 2, 3 ... per ARN
+    provider        TEXT NOT NULL,      -- scans.provider
     kind            TEXT NOT NULL,
     account_id      TEXT NOT NULL,
     region          TEXT NOT NULL,
@@ -41,6 +46,7 @@ CREATE TABLE relationship_versions (
     from_arn        TEXT NOT NULL,
     edge            TEXT NOT NULL,
     to_arn          TEXT NOT NULL,
+    provider        TEXT NOT NULL,      -- scans.provider
     first_seen_seq  INTEGER NOT NULL,
     last_seen_seq   INTEGER NOT NULL,
     PRIMARY KEY (from_arn, edge, to_arn, first_seen_seq)

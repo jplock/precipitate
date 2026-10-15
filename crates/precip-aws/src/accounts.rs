@@ -51,7 +51,7 @@ pub(crate) async fn is_management_account(
             .is_some_and(|id| account_id == id),
         Err(e) => {
             tracing::debug!(
-                error = %crate::error_chain(&e),
+                error = %precip_collect::error_chain(&e),
                 "organizations:DescribeOrganization failed; scanning as a single account"
             );
             false
@@ -83,7 +83,7 @@ impl MemberAccount {
                 status: self.status.clone(),
                 parent_id: self.parent_id.clone(),
                 parent_name: self.parent_name.clone(),
-                partition: partition.to_string(),
+                cloud: partition.to_string(),
             }),
         }
     }
@@ -140,7 +140,7 @@ pub(crate) async fn list_accounts(
                 Err(e) => {
                     tracing::warn!(
                         account = %id,
-                        error = %crate::error_chain(&e),
+                        error = %precip_collect::error_chain(&e),
                         "organizations:ListParents failed; parent left blank"
                     );
                     None
@@ -160,7 +160,7 @@ pub(crate) async fn list_accounts(
                         Err(e) => {
                             tracing::warn!(
                                 ou = %pid,
-                                error = %crate::error_chain(&e),
+                                error = %precip_collect::error_chain(&e),
                                 "organizations:DescribeOrganizationalUnit failed; OU name left blank"
                             );
                             None

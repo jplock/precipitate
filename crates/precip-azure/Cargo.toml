@@ -1,0 +1,30 @@
+[package]
+name = "precip-azure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Read-only Azure discovery for precip"
+
+[dependencies]
+# Default features select reqwest with rustls on aws-lc-rs, the same TLS
+# stack the AWS SDK uses. `client_certificate` pulls in openssl; leave it off.
+azure_core = { workspace = true, features = ["reqwest", "reqwest_gzip", "reqwest_rustls", "tokio"] }
+azure_identity = { workspace = true, features = ["tokio"] }
+jiff = { workspace = true, features = ["std"] }
+precip-collect.workspace = true
+precip-types.workspace = true
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+uuid = { workspace = true, features = ["std", "v7"] }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

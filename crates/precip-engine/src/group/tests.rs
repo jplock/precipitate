@@ -29,9 +29,9 @@ fn res(
 fn inst(id: &str, tags: &[(&str, &str)]) -> Resource {
     res(
         &format!("arn:aws:ec2:us-east-1:{ACCT}:instance/{id}"),
-        ResourceKind::Ec2Instance,
+        ResourceKind::Instance,
         tags,
-        serde_json::json!({ "instance_type": "t3.micro", "vpc_id": "vpc-1" }),
+        serde_json::json!({ "instance_type": "t3.micro", "network_id": "vpc-1" }),
     )
 }
 
@@ -100,13 +100,13 @@ fn nested_stack_resolves_to_root_and_strips_environment() {
         &[
             res(
                 root,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "billing-prod", "root_id": null }),
             ),
             res(
                 child,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "billing-prod-db", "root_id": root }),
             ),
@@ -116,7 +116,7 @@ fn nested_stack_resolves_to_root_and_strips_environment() {
     );
     assert_eq!(
         wl(&m, I1),
-        ("billing".into(), "prod".into(), GroupingSignal::CloudFormationStack)
+        ("billing".into(), "prod".into(), GroupingSignal::DeploymentGroup)
     );
 }
 
@@ -127,18 +127,21 @@ fn asg_members_and_the_group_itself_share_a_workload() {
         &[
             res(
                 asg,
-                ResourceKind::AutoScalingGroup,
+                ResourceKind::ScaleGroup,
                 &[],
                 serde_json::json!({ "name": "web-staging" }),
             ),
             inst("i-1", &[]),
             inst("i-2", &[]),
         ],
-        &[rel(I1, Edge::MemberOfAsg, asg), rel(I2, Edge::MemberOfAsg, asg)],
+        &[
+            rel(I1, Edge::MemberOfScaleGroup, asg),
+            rel(I2, Edge::MemberOfScaleGroup, asg),
+        ],
     );
     assert_eq!(
         wl(&m, I1),
-        ("web".into(), "staging".into(), GroupingSignal::AutoScalingGroup)
+        ("web".into(), "staging".into(), GroupingSignal::ScaleGroup)
     );
     assert_eq!(wl(&m, I2).0, "web");
     assert_eq!(
@@ -155,23 +158,23 @@ fn asg_created_by_a_stack_groups_under_the_stack() {
         &[
             res(
                 stack,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "api", "root_id": null }),
             ),
             res(
                 asg,
-                ResourceKind::AutoScalingGroup,
+                ResourceKind::ScaleGroup,
                 &[(STACK_ID_TAG, stack)],
                 serde_json::json!({ "name": "api-asg" }),
             ),
             inst("i-1", &[("Environment", "Production")]),
         ],
-        &[rel(I1, Edge::MemberOfAsg, asg)],
+        &[rel(I1, Edge::MemberOfScaleGroup, asg)],
     );
     assert_eq!(
         wl(&m, I1),
-        ("api".into(), "prod".into(), GroupingSignal::CloudFormationStack)
+        ("api".into(), "prod".into(), GroupingSignal::DeploymentGroup)
     );
 }
 
@@ -220,7 +223,7 @@ fn volumes_elastic_ips_and_single_use_security_groups_follow_their_instance() {
             inst("i-2", &[("app", "batch"), ("env", "prod")]),
             res(
                 V1,
-                ResourceKind::EbsVolume,
+                ResourceKind::Volume,
                 &[],
                 serde_json::json!({ "size_gib": 8 }),
             ),
@@ -231,7 +234,7 @@ fn volumes_elastic_ips_and_single_use_security_groups_follow_their_instance() {
                 &[],
                 serde_json::json!({}),
             ),
-            res(eip, ResourceKind::ElasticIp, &[], serde_json::json!({})),
+            res(eip, ResourceKind::PublicIp, &[], serde_json::json!({})),
         ],
         &[
             rel(V1, Edge::AttachedTo, I1),
@@ -314,7 +317,7 @@ fn vpc_then_unassigned_are_the_last_resorts() {
     let vpc = "arn:aws:ec2:us-east-1:123456789012:vpc/vpc-1";
     let bare = res(
         I2,
-        ResourceKind::Ec2Instance,
+        ResourceKind::Instance,
         &[],
         serde_json::json!({ "instance_type": "t3.micro" }),
     );
@@ -322,9 +325,9 @@ fn vpc_then_unassigned_are_the_last_resorts() {
         &[
             res(
                 vpc,
-                ResourceKind::Vpc,
+                ResourceKind::Network,
                 &[("Name", "Core Network")],
-                serde_json::json!({ "vpc_id": "vpc-1" }),
+                serde_json::json!({ "network_id": "vpc-1" }),
             ),
             inst("i-1", &[]),
             bare,
@@ -333,7 +336,7 @@ fn vpc_then_unassigned_are_the_last_resorts() {
     );
     assert_eq!(
         (wl(&m, I1).0, wl(&m, I1).2),
-        ("core".into(), GroupingSignal::Vpc)
+        ("core".into(), GroupingSignal::Network)
     );
     assert_eq!(
         (wl(&m, I2).0, wl(&m, I2).2),
@@ -353,7 +356,7 @@ fn managed_services_group_by_stack_tag_or_name_prefix() {
         &[
             res(
                 stack,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "inbox-prod", "root_id": null }),
             ),
@@ -361,32 +364,32 @@ fn managed_services_group_by_stack_tag_or_name_prefix() {
                 tagged,
                 ResourceKind::ManagedService,
                 &[(STACK_ID_TAG, stack)],
-                serde_json::json!({ "service": "dynamodb", "name": "inbox-prod-rMailTable" }),
+                serde_json::json!({ "service": "key_value", "product": "dynamodb", "name": "inbox-prod-rMailTable" }),
             ),
             res(
                 prefixed,
                 ResourceKind::ManagedService,
                 &[],
-                serde_json::json!({ "service": "lambda", "name": "inbox-prod-rWebhookFunction-Goztl7VNr7oo" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "inbox-prod-rWebhookFunction-Goztl7VNr7oo" }),
             ),
             res(
                 by_tag,
                 ResourceKind::ManagedService,
                 &[("Service", "Vouch")],
-                serde_json::json!({ "service": "lambda", "name": "cert-renewal" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "cert-renewal" }),
             ),
             res(
                 lone,
                 ResourceKind::ManagedService,
                 &[],
-                serde_json::json!({ "service": "lambda", "name": "ami-cleanup" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "ami-cleanup" }),
             ),
         ],
         &[],
     );
     assert_eq!(
         wl(&m, tagged),
-        ("inbox".into(), "prod".into(), GroupingSignal::CloudFormationStack)
+        ("inbox".into(), "prod".into(), GroupingSignal::DeploymentGroup)
     );
     assert_eq!(
         wl(&m, prefixed),
@@ -429,14 +432,14 @@ fn aliases_merge_workloads_after_placement() {
         &[
             res(
                 asg,
-                ResourceKind::AutoScalingGroup,
+                ResourceKind::ScaleGroup,
                 &[],
                 serde_json::json!({ "name": "vouch-us-prod" }),
             ),
             inst("i-1", &[]),
             inst("i-2", &[("Service", "vouch"), ("env", "prod")]),
         ],
-        &[rel(I1, Edge::MemberOfAsg, asg)],
+        &[rel(I1, Edge::MemberOfScaleGroup, asg)],
         &BTreeMap::new(),
         &aliases,
     );
@@ -456,7 +459,7 @@ fn managed_services_without_a_stack_share_a_root_across_environments() {
             &format!("arn:aws:lambda:us-east-1:123456789012:function/{name}"),
             ResourceKind::ManagedService,
             &[],
-            serde_json::json!({ "service": "lambda", "name": name }),
+            serde_json::json!({ "service": "functions", "product": "lambda", "name": name }),
         )
     };
     let t = |name: &str| {
@@ -464,7 +467,7 @@ fn managed_services_without_a_stack_share_a_root_across_environments() {
             &format!("arn:aws:dynamodb:us-east-1:123456789012:table/{name}"),
             ResourceKind::ManagedService,
             &[],
-            serde_json::json!({ "service": "dynamodb", "name": name }),
+            serde_json::json!({ "service": "key_value", "product": "dynamodb", "name": name }),
         )
     };
     // The account is named for prod; resources whose own names say dev
@@ -525,7 +528,7 @@ fn list_stack_resources_edge_places_untagged_resources() {
         &[
             res(
                 stack,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "vouch-prod", "root_id": null }),
             ),
@@ -533,19 +536,22 @@ fn list_stack_resources_edge_places_untagged_resources() {
                 func,
                 ResourceKind::ManagedService,
                 &[],
-                serde_json::json!({ "service": "lambda", "name": "cert-renewal" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "cert-renewal" }),
             ),
             res(sg, ResourceKind::SecurityGroup, &[], serde_json::json!({})),
         ],
-        &[rel(func, Edge::InStack, stack), rel(sg, Edge::InStack, stack)],
+        &[
+            rel(func, Edge::InDeploymentGroup, stack),
+            rel(sg, Edge::InDeploymentGroup, stack),
+        ],
     );
     assert_eq!(
         wl(&m, func),
-        ("vouch".into(), "prod".into(), GroupingSignal::CloudFormationStack)
+        ("vouch".into(), "prod".into(), GroupingSignal::DeploymentGroup)
     );
     assert_eq!(
         wl(&m, sg),
-        ("vouch".into(), "prod".into(), GroupingSignal::CloudFormationStack)
+        ("vouch".into(), "prod".into(), GroupingSignal::DeploymentGroup)
     );
 }
 
@@ -559,7 +565,7 @@ fn a_known_workload_inside_a_name_is_the_last_resort_before_unassigned() {
                 func,
                 ResourceKind::ManagedService,
                 &[],
-                serde_json::json!({ "service": "lambda", "name": "cert-renewal-us-vouch-sh" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "cert-renewal-us-vouch-sh" }),
             ),
         ],
         &[],
@@ -578,7 +584,7 @@ fn platform_stacks_collapse_into_one_workload() {
         &[
             res(
                 stack,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "StackSet-AWS-QuickSetup-SSM-LA-tyi62-39cf", "root_id": null }),
             ),
@@ -586,14 +592,14 @@ fn platform_stacks_collapse_into_one_workload() {
                 func,
                 ResourceKind::ManagedService,
                 &[],
-                serde_json::json!({ "service": "lambda", "name": "aws-quicksetup-lifecycle-LA-tyi62" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "aws-quicksetup-lifecycle-LA-tyi62" }),
             ),
         ],
-        &[rel(func, Edge::InStack, stack)],
+        &[rel(func, Edge::InDeploymentGroup, stack)],
     );
     assert_eq!(
         (wl(&m, func).0, wl(&m, func).2),
-        ("aws-platform".into(), GroupingSignal::CloudFormationStack)
+        ("cloud-platform".into(), GroupingSignal::DeploymentGroup)
     );
 }
 
@@ -604,7 +610,7 @@ fn terraform_managed_siblings_share_a_root() {
             &format!("arn:aws:lambda:us-east-1:123456789012:function/{name}"),
             ResourceKind::ManagedService,
             &[],
-            serde_json::json!({ "service": "lambda", "name": name }),
+            serde_json::json!({ "service": "functions", "product": "lambda", "name": name }),
         )
     };
     let m = run(
@@ -629,20 +635,23 @@ fn layer_stacks_of_one_workload_group_together() {
         &[
             res(
                 app,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "playdate-app-prod", "root_id": null }),
             ),
             res(
                 vpc,
-                ResourceKind::CloudFormationStack,
+                ResourceKind::DeploymentGroup,
                 &[],
                 serde_json::json!({ "name": "playdate-vpc-prod", "root_id": null }),
             ),
             inst("i-1", &[]),
             res(sg, ResourceKind::SecurityGroup, &[], serde_json::json!({})),
         ],
-        &[rel(I1, Edge::InStack, app), rel(sg, Edge::InStack, vpc)],
+        &[
+            rel(I1, Edge::InDeploymentGroup, app),
+            rel(sg, Edge::InDeploymentGroup, vpc),
+        ],
     );
     assert_eq!(
         (wl(&m, I1).0, wl(&m, I1).1),
@@ -664,7 +673,7 @@ fn an_account_with_one_workload_claims_its_orphans() {
                 func,
                 ResourceKind::ManagedService,
                 &[],
-                serde_json::json!({ "service": "lambda", "name": "ami-cleanup" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "ami-cleanup" }),
             ),
         ],
         &[],
@@ -686,7 +695,7 @@ fn an_account_with_two_workloads_leaves_orphans_alone() {
                 func,
                 ResourceKind::ManagedService,
                 &[],
-                serde_json::json!({ "service": "lambda", "name": "ami-cleanup" }),
+                serde_json::json!({ "service": "functions", "product": "lambda", "name": "ami-cleanup" }),
             ),
         ],
         &[],
@@ -700,4 +709,146 @@ fn unanimous_needs_at_least_one_and_full_agreement() {
     assert_eq!(unanimous([3]), Some(3));
     assert_eq!(unanimous([3, 3, 3]), Some(3));
     assert_eq!(unanimous([3, 4, 3]), None);
+}
+
+mod azure {
+    use super::*;
+
+    const RG: &str = "/subscriptions/s1/resourcegroups";
+
+    fn az(id: &str, kind: ResourceKind, body: serde_json::Value) -> Resource {
+        Resource {
+            account_id: "s1".into(),
+            region: "eastus".into(),
+            ..res(id, kind, &[], body)
+        }
+    }
+
+    fn group(name: &str, root: Option<&str>) -> Resource {
+        az(
+            &format!("{RG}/{}", name.to_lowercase()),
+            ResourceKind::DeploymentGroup,
+            serde_json::json!({ "name": name, "root_id": root }),
+        )
+    }
+
+    fn vm(group: &str, name: &str) -> Resource {
+        az(
+            &format!(
+                "{RG}/{group}/providers/microsoft.compute/virtualmachines/{name}"
+            ),
+            ResourceKind::Instance,
+            serde_json::json!({ "instance_id": name }),
+        )
+    }
+
+    fn member_of(r: &Resource, group: &str) -> Relationship {
+        rel(r.arn.as_str(), Edge::InDeploymentGroup, &format!("{RG}/{group}"))
+    }
+
+    #[test]
+    fn a_vm_takes_its_resource_groups_name_and_environment() {
+        let web = vm("shop-prod", "web-1");
+        let resources = [group("shop-prod", None), web.clone()];
+        let m = run(&resources, &[member_of(&web, "shop-prod")]);
+        assert_eq!(
+            wl(&m, web.arn.as_str()),
+            ("shop".into(), "prod".into(), GroupingSignal::DeploymentGroup)
+        );
+    }
+
+    #[test]
+    fn aks_node_groups_join_their_cluster_and_tooling_groups_the_platform() {
+        let aks = format!(
+            "{RG}/shop/providers/microsoft.containerservice/managedclusters/orders-aks"
+        );
+        let node = vm("mc_shop_orders-aks_eastus", "aks-nodepool1-0");
+        let watcher = az(
+            &format!(
+                "{RG}/networkwatcherrg/providers/microsoft.network/networkwatchers/nw"
+            ),
+            ResourceKind::Instance,
+            serde_json::json!({}),
+        );
+        let resources = [
+            az(
+                &aks,
+                ResourceKind::ManagedService,
+                serde_json::json!({
+                    "service": "kubernetes", "product": "aks", "name": "orders-aks",
+                }),
+            ),
+            group("MC_shop_orders-aks_eastus", Some(&aks)),
+            group("NetworkWatcherRG", None),
+            node.clone(),
+            watcher.clone(),
+        ];
+        let m = run(
+            &resources,
+            &[
+                member_of(&node, "mc_shop_orders-aks_eastus"),
+                member_of(&watcher, "networkwatcherrg"),
+            ],
+        );
+        assert_eq!(wl(&m, node.arn.as_str()).0, "orders-aks");
+        assert_eq!(wl(&m, watcher.arn.as_str()).0, "cloud-platform");
+    }
+
+    #[test]
+    fn without_a_group_a_vm_takes_its_networks_own_name() {
+        let net = format!(
+            "{RG}/net/providers/microsoft.network/virtualnetworks/billing-vnet"
+        );
+        let lone = az(
+            &format!("{RG}/x/providers/microsoft.compute/virtualmachines/lone"),
+            ResourceKind::Instance,
+            serde_json::json!({ "network_id": net }),
+        );
+        let resources = [
+            az(
+                &net,
+                ResourceKind::Network,
+                serde_json::json!({ "network_id": net, "name": "billing-vnet" }),
+            ),
+            lone.clone(),
+        ];
+        let m = run(&resources, &[]);
+        let (workload, _, signal) = wl(&m, lone.arn.as_str());
+        assert_eq!(
+            (workload.as_str(), signal),
+            ("billing", GroupingSignal::Network)
+        );
+    }
+}
+
+#[test]
+fn azure_naming_prefixes_and_suffixes_are_not_the_workload() {
+    for name in ["rg-shop-prod", "shop-prod-rg", "shop-rg-prod"] {
+        let g = Resource {
+            account_id: "s1".into(),
+            ..res(
+                &format!("/subscriptions/s1/resourcegroups/{name}"),
+                ResourceKind::DeploymentGroup,
+                &[],
+                serde_json::json!({ "name": name }),
+            )
+        };
+        let vm = Resource {
+            account_id: "s1".into(),
+            ..res(
+                &format!(
+                    "/subscriptions/s1/resourcegroups/{name}/providers/microsoft.compute/virtualmachines/web"
+                ),
+                ResourceKind::Instance,
+                &[],
+                serde_json::json!({}),
+            )
+        };
+        let m = run(
+            &[g.clone(), vm.clone()],
+            &[rel(vm.arn.as_str(), Edge::InDeploymentGroup, g.arn.as_str())],
+        );
+        let (w, e, _) = wl(&m, vm.arn.as_str());
+        assert_eq!((w.as_str(), e.as_str()), ("shop", "prod"), "{name}");
+    }
 }

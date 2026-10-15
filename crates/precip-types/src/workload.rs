@@ -14,9 +14,10 @@ pub enum GroupingSignal {
     Override = "override",
     /// The `precip:workload` tag.
     OverrideTag = "override_tag",
-    /// CloudFormation root stack.
-    CloudFormationStack = "cloud_formation_stack",
-    AutoScalingGroup = "auto_scaling_group",
+    /// The root CloudFormation stack, or the Azure resource group.
+    DeploymentGroup = "deployment_group",
+    /// An Auto Scaling group or VM scale set.
+    ScaleGroup = "scale_group",
     LoadBalancer = "load_balancer",
     /// A conventional tag such as `Application` or `Service`.
     Tag = "tag",
@@ -28,7 +29,8 @@ pub enum GroupingSignal {
     NameContains = "name_contains",
     /// The resource's account hosts exactly one workload, which it joins.
     AccountOnly = "account_only",
-    Vpc = "vpc",
+    /// The VPC or virtual network, by its `Name` tag or id.
+    Network = "network",
     Unassigned = "unassigned",
     /// Inherited through a relationship to a placed resource.
     Attached = "attached",
@@ -43,12 +45,12 @@ impl GroupingSignal {
             Self::NamePrefix | Self::NameContains => true,
             Self::Override
             | Self::OverrideTag
-            | Self::CloudFormationStack
-            | Self::AutoScalingGroup
+            | Self::DeploymentGroup
+            | Self::ScaleGroup
             | Self::LoadBalancer
             | Self::Tag
             | Self::AccountOnly
-            | Self::Vpc
+            | Self::Network
             | Self::Unassigned
             | Self::Attached => false,
         }
@@ -77,15 +79,21 @@ pub struct GroupingConfig {
     pub environment_tokens: BTreeMap<String, EnvName>,
     /// Environment used when nothing identifies one.
     pub default_environment: EnvName,
-    /// Stack name prefixes that belong to AWS tooling rather than the
-    /// customer (Control Tower, StackSets, SAM's bootstrap). Resources in
-    /// them are grouped under `platform_workload`.
-    pub platform_stack_prefixes: Vec<String>,
+    /// Deployment group name prefixes that belong to cloud tooling rather
+    /// than the customer: AWS Control Tower, StackSets and SAM's bootstrap
+    /// stacks; Azure's Network Watcher, monitoring and Cloud Shell
+    /// resource groups. Resources in them are grouped under
+    /// `platform_workload`.
+    pub platform_group_prefixes: Vec<String>,
     pub platform_workload: WorkloadName,
     /// Trailing name segments that name a layer of a workload rather than
     /// the workload itself: `shop-vpc`, `shop-app` and `shop-db` are all
     /// `shop`. One trailing token is stripped when something remains.
     pub layer_tokens: Vec<String>,
+    /// Leading name segments that name the kind of resource rather than
+    /// the workload, as Azure's naming convention puts them: `rg-shop` is
+    /// `shop`.
+    pub kind_prefixes: Vec<String>,
 }
 
 impl Default for GroupingConfig {
@@ -135,22 +143,29 @@ impl Default for GroupingConfig {
                 .map(|(k, v)| (k.to_string(), EnvName::from(v)))
                 .collect(),
             default_environment: EnvName::from("default"),
-            platform_stack_prefixes: [
+            platform_group_prefixes: [
                 "StackSet-",
                 "AWSControlTower",
                 "aws-sam-cli-managed",
                 "aws-quicksetup",
+                "NetworkWatcherRG",
+                "DefaultResourceGroup-",
+                "AzureBackupRG",
+                "cloud-shell-storage-",
+                "MC_",
             ]
             .map(str::to_string)
             .to_vec(),
-            platform_workload: WorkloadName::from("aws-platform"),
+            platform_workload: WorkloadName::from("cloud-platform"),
             layer_tokens: [
-                "vpc", "network", "net", "app", "api", "web", "ui", "db",
-                "database", "data", "infra", "iam", "dns", "cdn", "storage",
-                "queue", "cache", "worker", "batch", "cluster", "stack",
+                "vpc", "vnet", "network", "net", "rg", "app", "api", "web",
+                "ui", "db", "database", "data", "infra", "iam", "dns", "cdn",
+                "storage", "queue", "cache", "worker", "batch", "cluster",
+                "stack",
             ]
             .map(str::to_string)
             .to_vec(),
+            kind_prefixes: vec!["rg".to_string()],
         }
     }
 }

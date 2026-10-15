@@ -106,6 +106,19 @@ impl Slug {
         }
     }
 
+    /// Remove one leading token that names a kind of resource (`rg-` in
+    /// Azure's naming convention) when a name remains.
+    pub fn without_kind_prefix(self, prefixes: &[String]) -> Self {
+        match self.0.split_once('-') {
+            Some((head, tail))
+                if !tail.is_empty() && prefixes.iter().any(|p| p == head) =>
+            {
+                Self(tail.to_string())
+            }
+            _ => self,
+        }
+    }
+
     /// The longest known name this one equals or starts with.
     pub fn longest_prefix<'a>(&self, known: &'a [Self]) -> Option<&'a Self> {
         known
@@ -396,5 +409,14 @@ mod tests {
         assert_eq!(strip("fairfieldct-inbox"), "fairfieldct-inbox");
         assert_eq!(strip("vpc"), "vpc", "a bare layer word is a name");
         assert_eq!(strip("shop-app-db"), "shop-app", "only one token");
+    }
+
+    #[test]
+    fn kind_prefixes_fold_into_the_workload_name() {
+        let prefixes = precip_types::GroupingConfig::default().kind_prefixes;
+        let strip = |n: &str| s(n).without_kind_prefix(&prefixes).to_string();
+        assert_eq!(strip("rg-shop"), "shop");
+        assert_eq!(strip("rg"), "rg", "a bare prefix is a name");
+        assert_eq!(strip("web-shop"), "web-shop", "layers are not prefixes");
     }
 }

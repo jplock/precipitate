@@ -1,7 +1,7 @@
 # precip
 
-precip scans Amazon Web Services (AWS) accounts, groups the resources it finds into
-workloads, sizes the Oxide sleds and racks those workloads need, and
+precip scans Amazon Web Services (AWS) accounts and Microsoft Azure
+subscriptions, groups the resources it finds into workloads, sizes the Oxide sleds and racks those workloads need, and
 schedules each migration on a calendar. It ships as one static binary. The
 binary has a terminal user interface (TUI) and a command line. Both read
 and write the same SQLite file, so every action in one is available in the
@@ -28,9 +28,9 @@ make hooks          # install the prek git hooks
 
 The TUI opens with a workspace picker. A workspace holds one company's
 assessment in one SQLite file under `$XDG_DATA_HOME/precip/workspaces/`
-(`~/.local/share/precip/workspaces/` by default). precip finds AWS
-credentials the same way the AWS command line does. `--profile` selects a
-named profile.
+(`~/.local/share/precip/workspaces/` by default). One workspace can hold
+both an AWS and an Azure estate. `--cloud aws` or `--cloud azure` picks
+which one a scan reads; the AWS and Azure selection flags imply it.
 
 ```
 precip --profile mgmt                         # open the TUI
@@ -40,13 +40,30 @@ precip --workspace acme size                  # count sleds and racks
 precip --workspace acme schedule show         # show the migration calendar
 precip --workspace acme export schedule --out plan.ics
 precip --help                                 # list every command
+precip --cloud azure --workspace acme scan    # scan Azure without the TUI
+precip --workspace acme scan --tenant <id> --management-group prod
 ```
 
 From an AWS Organizations management account, precip scans every active
 member account. In each account it assumes `OrganizationAccountAccessRole`,
 then `AWSControlTowerExecution` if the first role fails. The read-only
 Identity and Access Management (IAM) policy precip needs is in
-`iam/precip-scan-policy.json`.
+`iam/precip-scan-policy.json`. precip finds AWS credentials the same way
+the AWS command line does. `--profile` selects a named profile. The
+profile or `AWS_REGION` must name a region; a GovCloud region such as
+`us-gov-west-1` scans the GovCloud partition.
+
+In Azure, precip scans every subscription the sign-in can read, or those
+named with `--subscription`, `--exclude-subscription`, `--tenant` and
+`--management-group`. It signs in with a service principal secret when
+`AZURE_CLIENT_SECRET`, `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` are set,
+with workload identity when `AZURE_FEDERATED_TOKEN_FILE` is set, and
+otherwise with the Azure CLI (`az login`) or Azure Developer CLI. The
+built-in Reader role at the tenant root management group is enough; a
+custom role with only the actions precip uses is in
+`iam/azure-precip-reader.json`. `--azure-cloud AzureUSGovernment` scans
+Azure Government; with the Azure CLI, run
+`az cloud set --name AzureUSGovernment` first.
 
 ## What precip does
 
@@ -65,22 +82,36 @@ at a time. It collects:
   EFS.
 
 When AWS Resource Explorer is enabled, precip skips regions with no
-workload resources. precip keeps every scan
-and versions each resource by its content, so it can list what changed
-between two scans. Each scan saves its account selection, and a later
-`precip scan` with no flags repeats it.
+workload resources.
+
+In Azure, precip runs Azure Resource Graph queries over up to 1,000
+subscriptions at a time, covering every region in one pass, and reads VM
+sizes from the Resource SKUs API. It collects virtual machines and scale
+sets, managed disks, images, virtual networks, subnets, network security
+groups and their rules, route tables, NAT gateways, peerings, IP groups,
+load balancers, application gateways and their backend pools, resource
+groups, and 11 managed services: SQL Database, SQL Managed Instance,
+PostgreSQL and MySQL flexible servers, AKS, Container Apps, Container
+Instances, App Service and Functions, Cache for Redis, Cosmos DB and
+NetApp Files.
+
+precip keeps every scan and versions each resource by its content, so it
+can list what changed between two scans. A scan of one cloud leaves the
+other cloud's resources as they were. Each scan saves its selection, and a
+later `precip scan` with no flags repeats the saved selection of every
+cloud.
 
 **Group.** precip assigns each resource to a workload and an environment,
 such as `shop` and `prod`. It takes the first signal that matches:
 
 1. a manual override;
-2. the CloudFormation stack;
-3. the auto scaling group;
+2. the CloudFormation stack or Azure resource group;
+3. the auto scaling group or VM scale set;
 4. the load balancer;
 5. tags;
 6. the resource name;
 7. the account;
-8. the VPC.
+8. the VPC or virtual network.
 
 A user can merge two workload names that describe the same workload. Each
 workload and environment pair gets one of the 7 AWS migration strategies:
@@ -126,7 +157,7 @@ a date, precip never moves it. An agreed date ends in one of 4 ways:
 
 precip
 refuses an agreed date for a pair whose dependency has not migrated. After
-each scan, precip lists any migrated pair that still has resources in AWS.
+each scan, precip lists any migrated pair that still has resources in the cloud.
 
 The schedule reports:
 
@@ -153,11 +184,13 @@ are confirmed events and proposed dates are tentative.
 ```
 crates/precip         the binary: command line and TUI entry point
 crates/precip-tui     the TUI (ratatui)
-crates/precip-aws     the scanner
+crates/precip-aws     the AWS scanner
+crates/precip-azure   the Azure scanner
+crates/precip-collect the collector runner both scanners share
 crates/precip-db      the SQLite workspace: scans, plan events, projections, export
 crates/precip-engine  pure functions: grouping, sizing, scheduling, Gantt layout
 crates/precip-types   shared types
-iam/                  the IAM policy for scanning
+iam/                  the AWS IAM policy and Azure role for scanning
 docs/rfd/             the design document
 ```
 

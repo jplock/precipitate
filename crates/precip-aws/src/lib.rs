@@ -16,11 +16,16 @@ mod vpc;
 use aws_config::{BehaviorVersion, SdkConfig};
 use precip_types::scan::{Relationship, Resource, ScanTarget, TargetStatus};
 use precip_types::{AccountId, Region};
-use precip_types::{Scan, ScanEvent};
-use tracing::Instrument;
+use precip_types::{Provider, Scan, ScanEvent};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
+    /// The partition (commercial, GovCloud, China) follows from the
+    /// region, so precip does not guess one.
+    #[error(
+        "no AWS region configured; set one in the profile or AWS_REGION, such as us-east-1 or us-gov-west-1"
+    )]
+    NoRegion,
     #[error("calling sts:GetCallerIdentity")]
     CallerIdentity(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("listing regions")]
@@ -76,28 +81,8 @@ impl Default for Options {
     }
 }
 
-/// The error and every source below it, joined, so a stored failure says
-/// why (throttled, access denied, timeout) and not only which API.
-fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
-    let mut parts = vec![e.to_string()];
-    let mut cur = e.source();
-    while let Some(s) = cur {
-        parts.push(s.to_string());
-        cur = s.source();
-    }
-    parts.dedup();
-    parts.join(": ")
-}
-
-/// Receives progress events. Dropped receivers are ignored, so a headless
-/// scan can pass `None`.
-pub type ProgressSender = tokio::sync::mpsc::UnboundedSender<ScanEvent>;
-
-fn emit(progress: &Option<ProgressSender>, event: ScanEvent) {
-    if let Some(tx) = progress {
-        let _ = tx.send(event);
-    }
-}
+use precip_collect::ProgressSender;
+use precip_collect::emit;
 
 /// Loads the default AWS credential chain, the same one the AWS CLI uses.
 pub async fn load_config(profile: Option<&str>) -> SdkConfig {
@@ -121,12 +106,16 @@ pub async fn scan_estate(
     opts: &Options,
     progress: Option<ProgressSender>,
 ) -> Result<Scan, ScanError> {
+    if config.region().is_none() {
+        return Err(ScanError::NoRegion);
+    }
     let identity = accounts::caller_identity(config).await?;
     let mut scan = Scan {
         id: uuid::Uuid::now_v7().to_string(),
+        provider: Provider::Aws,
         started: jiff::Timestamp::now(),
         finished: None,
-        caller_arn: identity.arn.clone(),
+        caller: identity.arn.to_string(),
         targets: Vec::new(),
         resources: Vec::new(),
         relationships: Vec::new(),
@@ -477,36 +466,7 @@ async fn scan_region(
         identity,
         region: region.clone(),
     });
-    let collectors = collect::all();
-    let total = collectors.len();
-    let (second, first): (Vec<_>, Vec<_>) = collectors
-        .into_iter()
-        .partition(|c| c.stage() == collect::Stage::Second);
-
-    let mut failures: Vec<String> = Vec::new();
-    let empty = std::sync::Arc::new(collect::Collected::default());
-    let mut so_far = run_stage(first, &ctx, &empty, &mut failures).await;
-
-    // Second-stage collectors may depend on each other (instance types
-    // come from launch templates), so they run one at a time in order,
-    // each reading everything collected before it.
-    for c in second {
-        match c.collect(&ctx, &so_far).await {
-            Ok(got) => {
-                log_collected(c.name(), &got);
-                so_far.absorb(got);
-            }
-            Err(e) => record_failure(&mut failures, c.name(), &e),
-        }
-    }
-
-    let status = if failures.is_empty() {
-        TargetStatus::Scanned
-    } else if failures.len() == total {
-        TargetStatus::Failed(failures.join(", "))
-    } else {
-        TargetStatus::Partial(failures.join(", "))
-    };
+    let (so_far, status) = precip_collect::run(collect::all(), ctx).await;
     RegionOutcome {
         region,
         status,
@@ -515,138 +475,21 @@ async fn scan_region(
     }
 }
 
-/// Run a set of collectors concurrently and merge their output in a fixed
-/// order so results are deterministic.
-async fn run_stage(
-    collectors: Vec<std::sync::Arc<dyn collect::Collector>>,
-    ctx: &std::sync::Arc<collect::RegionContext>,
-    prior: &std::sync::Arc<collect::Collected>,
-    failures: &mut Vec<String>,
-) -> collect::Collected {
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut names = std::collections::HashMap::new();
-    for (i, c) in collectors.into_iter().enumerate() {
-        let ctx = ctx.clone();
-        let prior = prior.clone();
-        let span = tracing::Span::current();
-        let name = c.name();
-        let handle = tasks.spawn(
-            async move {
-                let result = c.collect(&ctx, &prior).await;
-                (i, c.name(), result)
-            }
-            .instrument(span),
-        );
-        names.insert(handle.id(), name);
-    }
-    let mut results = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(r) => results.push(r),
-            Err(e) => {
-                let name = names.get(&e.id()).copied().unwrap_or("collector");
-                tracing::error!(api = name, error = %e, "collector task panicked");
-                failures.push(format!("{name}: collector panicked: {e}"));
-            }
-        }
-    }
-    results.sort_by_key(|(i, _, _)| *i);
-
-    let mut out = collect::Collected::default();
-    for (_, name, result) in results {
-        match result {
-            Ok(got) => {
-                log_collected(name, &got);
-                out.absorb(got);
-            }
-            Err(e) => record_failure(failures, name, &e),
-        }
-    }
-    out
-}
-
-/// Log what one collector brought back.
-fn log_collected(api: &'static str, got: &collect::Collected) {
-    tracing::info!(
-        api,
-        resources = got.resources.len(),
-        relationships = got.relationships.len(),
-        tag_updates = got.tag_updates.len(),
-        "collected"
-    );
-}
-
-/// Note a failed collector for the region's report.
-fn record_failure(
-    failures: &mut Vec<String>,
-    name: &'static str,
-    e: &collect::CollectError,
-) {
-    tracing::warn!(api = name, error = %e.source, "collector failed");
-    failures.push(format!("{}: {}", e.api, error_chain(&*e.source)));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use collect::{Collect, CollectError, Collected, RegionContext};
-
-    struct Panics;
-
-    impl Collect for Panics {
-        const API: &'static str = "test:Panics";
-
-        async fn collect(
-            &self,
-            _ctx: &RegionContext,
-            _prior: &Collected,
-        ) -> Result<Collected, CollectError> {
-            panic!("collector bug")
-        }
-    }
-
-    struct Works;
-
-    impl Collect for Works {
-        const API: &'static str = "test:Works";
-
-        async fn collect(
-            &self,
-            ctx: &RegionContext,
-            _prior: &Collected,
-        ) -> Result<Collected, CollectError> {
-            let mut out = Collected::default();
-            out.resources.push(ctx.resource(
-                ctx.arn(arn::ArnType::Instance, "i-1"),
-                Default::default(),
-                precip_types::Body::Ec2Instance(Default::default()),
-            ));
-            Ok(out)
-        }
-    }
 
     #[test]
-    fn a_panicking_collector_is_recorded_as_a_failure() {
+    fn a_config_without_a_region_is_refused_before_any_call() {
         let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let ctx = std::sync::Arc::new(RegionContext {
-            config: SdkConfig::builder().build(),
-            identity: accounts::CallerIdentity {
-                account_id: "123456789012".into(),
-                arn: "arn:aws:iam::123456789012:user/x".into(),
-                partition: "aws".into(),
-            },
-            region: "us-east-1".into(),
-        });
-        let prior = std::sync::Arc::new(Collected::default());
-        let mut failures = Vec::new();
-        let got = rt.block_on(run_stage(
-            vec![std::sync::Arc::new(Panics), std::sync::Arc::new(Works)],
-            &ctx,
-            &prior,
-            &mut failures,
-        ));
-        assert_eq!(got.resources.len(), 1);
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].starts_with("test:Panics: collector panicked"));
+        let err = rt
+            .block_on(scan_estate(
+                &SdkConfig::builder().build(),
+                &Options::default(),
+                None,
+            ))
+            .unwrap_err();
+        assert!(matches!(err, ScanError::NoRegion));
+        assert!(err.to_string().contains("us-gov-west-1"));
     }
 }

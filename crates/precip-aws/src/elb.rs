@@ -13,6 +13,7 @@ use crate::collect::{
 pub(crate) struct LoadBalancers;
 
 impl Collect for LoadBalancers {
+    type Context = RegionContext;
     const API: &'static str = "elasticloadbalancing:DescribeLoadBalancers";
 
     async fn collect(
@@ -34,7 +35,7 @@ impl Collect for LoadBalancers {
                         name: own(lb.load_balancer_name()),
                         lb_type: own(lb.r#type().map(|t| t.as_str())),
                         scheme: own(lb.scheme().map(|s| s.as_str())),
-                        vpc_id: own(lb.vpc_id()),
+                        network_id: own(lb.vpc_id()),
                         dns_name: own(lb.dns_name()),
                         security_groups: owned(
                             lb.security_groups().iter().map(String::as_str),
@@ -52,6 +53,7 @@ impl Collect for LoadBalancers {
 pub(crate) struct TargetGroups;
 
 impl Collect for TargetGroups {
+    type Context = RegionContext;
     const API: &'static str = "elasticloadbalancing:DescribeTargetGroups";
 
     async fn collect(
@@ -102,8 +104,8 @@ impl Collect for TargetGroups {
                         target_type: own(tg.target_type().map(|t| t.as_str())),
                         protocol: own(tg.protocol().map(|p| p.as_str())),
                         port: tg.port(),
-                        vpc_id: own(tg.vpc_id()),
-                        load_balancer_arns: owned(
+                        network_id: own(tg.vpc_id()),
+                        load_balancers: owned(
                             tg.load_balancer_arns().iter().map(String::as_str),
                         ),
                         instance_targets: targets,

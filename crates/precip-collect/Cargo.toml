@@ -1,0 +1,20 @@
+[package]
+name = "precip-collect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The collector runner shared by precip's cloud scanners"
+
+[dependencies]
+precip-types.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

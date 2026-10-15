@@ -6,8 +6,16 @@ use crate::query::Bound;
 use crate::schema::Settings;
 use crate::{DbError, Store};
 use precip_engine::schedule::GlobalRules;
+use precip_types::Provider;
 use sea_query::{Expr, ExprTrait, OnConflict, Query};
 use sqlx::{Row, SqliteConnection};
+
+fn scan_options(provider: Provider) -> Setting {
+    match provider {
+        Provider::Aws => Setting::AwsScanOptions,
+        Provider::Azure => Setting::AzureScanOptions,
+    }
+}
 
 impl Store {
     pub(crate) async fn setting(
@@ -52,15 +60,23 @@ impl Store {
         Ok(())
     }
 
-    /// The scan selection last used, as JSON of the scanner's options,
-    /// so a headless rescan repeats what was chosen in the interface.
-    pub async fn saved_scan_options(&self) -> Result<Option<String>, DbError> {
-        self.setting(Setting::ScanOptions).await
+    /// The scan selection last used for `provider`, as JSON of that
+    /// scanner's options, so a headless rescan repeats what was chosen in
+    /// the interface.
+    pub async fn saved_scan_options(
+        &self,
+        provider: Provider,
+    ) -> Result<Option<String>, DbError> {
+        self.setting(scan_options(provider)).await
     }
 
-    pub async fn save_scan_options(&self, json: &str) -> Result<(), DbError> {
+    pub async fn save_scan_options(
+        &self,
+        provider: Provider,
+        json: &str,
+    ) -> Result<(), DbError> {
         let mut conn = self.pool.acquire().await?;
-        Self::set_setting(&mut conn, Setting::ScanOptions, json).await
+        Self::set_setting(&mut conn, scan_options(provider), json).await
     }
 
     /// The sizing profile the workspace sizes with.

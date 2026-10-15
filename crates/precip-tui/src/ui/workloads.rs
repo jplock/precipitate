@@ -222,14 +222,9 @@ pub(crate) fn kind_label(kind: &str, service: Option<&str>) -> String {
             "elasticache cluster".into()
         }
         ("managed_service", Some("efs")) => "efs file system".into(),
-        ("managed_service", Some(other)) => other.to_string(),
-        ("ec2_instance", _) => "ec2 instance".into(),
-        ("ebs_volume", _) => "ebs volume".into(),
-        ("ami", _) => "ami".into(),
-        ("vpc", _) => "vpc".into(),
-        ("elastic_ip", _) => "elastic ip".into(),
-        ("auto_scaling_group", _) => "auto scaling group".into(),
-        ("cloud_formation_stack", _) => "cloudformation stack".into(),
+        ("managed_service", Some("aks")) => "aks cluster".into(),
+        ("managed_service", Some("netapp_files")) => "netapp volume".into(),
+        ("managed_service", Some(other)) => other.replace('_', " "),
         (other, _) => other.replace('_', " "),
     }
 }

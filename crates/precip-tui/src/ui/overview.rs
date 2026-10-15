@@ -18,7 +18,7 @@ pub(crate) fn draw_overview(app: &App, frame: &mut Frame, area: Rect) {
                     Span::raw(" to scan the estate the current credentials can reach."),
                 ]),
                 Line::from(Span::styled(
-                    "  In an Organization management account that is every active member account.",
+                    "  From an AWS Organization management account, every active member account; in Azure, every readable subscription.",
                     dim(),
                 )),
             ])
@@ -38,18 +38,18 @@ pub(crate) fn draw_overview(app: &App, frame: &mut Frame, area: Rect) {
         ("Accounts", o.accounts.to_string(), format!("{} regions", o.regions)),
         (
             "Instances",
-            count("ec2_instance").to_string(),
-            format!("{} ASGs", count("auto_scaling_group")),
+            count("instance").to_string(),
+            format!("{} scale groups", count("scale_group")),
         ),
         (
             "Volumes",
-            count("ebs_volume").to_string(),
-            format!("{} images", count("ami")),
+            count("volume").to_string(),
+            format!("{} images", count("image")),
         ),
         (
             "Networking",
-            count("vpc").to_string(),
-            format!("VPCs, {} security groups", count("security_group")),
+            count("network").to_string(),
+            format!("networks, {} security groups", count("security_group")),
         ),
         ("Managed", managed.to_string(), "no Oxide equivalent".to_string()),
     ];
@@ -85,7 +85,8 @@ pub(crate) fn draw_scans(app: &mut App, frame: &mut Frame, area: Rect) {
                 Span::styled(format!("#{:<4}", s.seq), accent()),
                 Span::raw(s.started.strftime("%Y-%m-%d %H:%M UTC").to_string()),
                 Span::styled(format!("  {duration:>8}  "), dim()),
-                Span::styled(s.caller_arn.clone(), dim()),
+                Span::styled(format!("{:<6}", s.provider), accent()),
+                Span::styled(s.caller.clone(), dim()),
             ]))
         })
         .collect();
@@ -235,7 +236,9 @@ pub(crate) fn draw_picker(app: &mut App, frame: &mut Frame) {
     );
 
     let mut lines = vec![
-        Line::from("A workspace is one AWS estate under assessment:"),
+        Line::from(
+            "A workspace is one company's cloud estate under assessment:",
+        ),
         Line::from("its scans over time and the migration plan."),
         Line::from(""),
         Line::from(vec![

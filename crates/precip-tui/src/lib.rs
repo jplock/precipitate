@@ -64,13 +64,14 @@ pub struct ScanHandle {
 }
 
 /// Starts a scan into the given store. Built by the binary so this crate
-/// does not depend on the AWS crates.
+/// does not depend on the cloud scanner crates.
 pub type Launcher = Box<dyn FnMut(Store) -> ScanHandle + Send>;
 
 /// What the header shows about where we are.
 #[derive(Debug, Clone, Default)]
 pub struct Context {
-    pub profile: Option<String>,
+    /// What a scan reads, such as `aws profile mgmt` or `azure sign-in`.
+    pub target: String,
     pub workspace: String,
 }
 

@@ -13,7 +13,8 @@ pub enum ScanEvent {
         account_id: AccountId,
         name: Option<String>,
     },
-    /// Regions chosen for one account after the Resource Explorer check.
+    /// Regions chosen for one account after checking the provider's
+    /// resource index.
     RegionsPlanned {
         account_id: AccountId,
         regions: usize,

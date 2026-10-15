@@ -13,6 +13,7 @@ use crate::collect::{
 pub(crate) struct Groups;
 
 impl Collect for Groups {
+    type Context = RegionContext;
     const API: &'static str = "autoscaling:DescribeAutoScalingGroups";
 
     async fn collect(
@@ -49,7 +50,7 @@ impl Collect for Groups {
                     if let Some(id) = inst.instance_id() {
                         out.relate(
                             ctx.arn(ArnType::Instance, id),
-                            Edge::MemberOfAsg,
+                            Edge::MemberOfScaleGroup,
                             Arn::from(arn),
                         );
                     }
@@ -59,7 +60,7 @@ impl Collect for Groups {
                     ctx.resource(
                         Arn::from(arn),
                         tags(group.tags()),
-                        Body::AutoScalingGroup(body::AutoScalingGroup {
+                        Body::ScaleGroup(body::ScaleGroup {
                             name: own(group.auto_scaling_group_name()),
                             min_size: group.min_size(),
                             desired_capacity: group.desired_capacity(),
@@ -96,6 +97,7 @@ impl Collect for Groups {
 pub(crate) struct LaunchTemplates;
 
 impl Collect for LaunchTemplates {
+    type Context = RegionContext;
     const API: &'static str = "ec2:DescribeLaunchTemplateVersions";
     const STAGE: Stage = Stage::Second;
 
@@ -110,7 +112,7 @@ impl Collect for LaunchTemplates {
             .resources
             .iter()
             .filter_map(|r| {
-                let Body::AutoScalingGroup(g) = &r.body else { return None };
+                let Body::ScaleGroup(g) = &r.body else { return None };
                 let id = g.launch_template_id.as_deref()?;
                 let version =
                     g.launch_template_version.as_deref().unwrap_or("$Default");
@@ -160,6 +162,7 @@ impl Collect for LaunchTemplates {
 pub(crate) struct LaunchConfigurations;
 
 impl Collect for LaunchConfigurations {
+    type Context = RegionContext;
     const API: &'static str = "autoscaling:DescribeLaunchConfigurations";
     const STAGE: Stage = Stage::Second;
 
@@ -170,7 +173,7 @@ impl Collect for LaunchConfigurations {
     ) -> Result<Collected, CollectError> {
         let mut out = Collected::default();
         let names = prior.distinct(|b| {
-            if let Body::AutoScalingGroup(g) = b {
+            if let Body::ScaleGroup(g) = b {
                 g.launch_configuration_name.as_deref()
             } else {
                 None

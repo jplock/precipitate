@@ -61,7 +61,7 @@ pub(crate) fn next_step(v: &ScheduleView) -> String {
     let m = &v.metrics;
     if !v.findings.is_empty() {
         return format!(
-            "{} pair(s) marked done still have resources in AWS. Select one below and press enter.",
+            "{} pair(s) marked done still have resources in the cloud. Select one below and press enter.",
             v.findings.len()
         );
     }
