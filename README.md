@@ -207,6 +207,14 @@ rebuilds the plan from the events alone.
 values (CSV) or JSON, and the schedule as CSV, JSON or an iCalendar feed. In the feed, agreed dates
 are confirmed events and proposed dates are tentative.
 
+`precip export terraform --workload shop --environment prod` writes one
+pair's Terraform for the Oxide provider: a project, the VPCs and subnets
+its instances use, firewall rules translated from their security groups,
+custom routers for routes other than the default, and its disks, floating
+IPs and instances, created stopped with blank disks. What does not
+translate, such as load balancers, managed services, peerings, rules that
+match by tag, and disks over 1,023 GiB, is listed at the top of the file.
+
 ## Layout
 
 ```

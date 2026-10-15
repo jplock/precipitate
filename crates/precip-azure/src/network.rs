@@ -3,8 +3,11 @@
 //! and load balancers with their backend pools.
 
 use crate::collect::{BASE, Base, Batch};
-use crate::id::{Ref, parent, rid, text};
+use crate::id::{Ref, name, parent, rid, text};
 use precip_collect::{Collect, CollectError, Collected};
+use precip_types::body::{
+    Peer, Protocol, RouteTarget, RuleAction, TrafficDirection,
+};
 use precip_types::scan::{Edge, Resource};
 use precip_types::{AccountId, Body, Region, body};
 use serde::Deserialize;
@@ -301,44 +304,48 @@ fn one_or_many(one: &str, many: &[String]) -> Vec<String> {
     }
 }
 
-/// A port range as `(from, to)`; `*` is every port and leaves both open.
-fn ports(range: &str) -> (Option<i32>, Option<i32>) {
+/// Where an Azure route's next hop sends traffic.
+fn route_target(r: &RouteProperties) -> RouteTarget {
+    match r.next_hop_type.to_ascii_lowercase().as_str() {
+        "vnetlocal" => RouteTarget::Local,
+        "internet" => RouteTarget::Internet,
+        "none" => RouteTarget::Drop,
+        "virtualappliance" => match text(&r.next_hop_ip_address) {
+            Some(ip) => RouteTarget::Ip(ip),
+            None => RouteTarget::Other(r.next_hop_type.clone()),
+        },
+        _ => RouteTarget::Other(r.next_hop_type.clone()),
+    }
+}
+
+/// A port range as `(from, to)`; `*` is every port.
+fn ports(range: &str) -> Option<(i32, i32)> {
     match range.split_once('-') {
-        Some((a, b)) => (a.trim().parse().ok(), b.trim().parse().ok()),
-        None => {
-            let p = range.trim().parse().ok();
-            (p, p)
-        }
+        Some((a, b)) => a.trim().parse().ok().zip(b.trim().parse().ok()),
+        None => range.trim().parse().ok().map(|p| (p, p)),
     }
 }
 
 /// Where a rule's traffic comes from or goes to: an address range, or a
-/// service tag (`Internet`, `VirtualNetwork`), which is a named prefix
-/// list.
-enum Peer {
-    V4(String),
-    V6(String),
-    Tag(String),
-    Group(String),
-}
-
+/// service tag such as `Internet` or `VirtualNetwork`.
 fn peer(prefix: &str) -> Peer {
     match prefix {
-        "*" => Peer::V4("0.0.0.0/0".into()),
-        p if p.contains(':') => Peer::V6(p.into()),
-        p if p.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
-            Peer::V4(p.into())
+        "*" => Peer::IpNet("0.0.0.0/0".into()),
+        p if p.contains(':')
+            || p.chars().next().is_some_and(|c| c.is_ascii_digit()) =>
+        {
+            Peer::IpNet(p.into())
         }
-        p => Peer::Tag(p.into()),
+        p => Peer::ServiceTag(p.into()),
     }
 }
 
-/// One NSG rule as one stored rule per peer and port range, the way EC2
-/// states rules.
+/// One NSG rule as one stored rule per peer and port range. Peers in an
+/// application security group are referenced as a group.
 fn rules(nsg: &Base, rule: &RuleJson) -> Vec<Resource> {
     let p = &rule.properties;
-    let egress = p.direction.eq_ignore_ascii_case("outbound");
-    let (prefix, many, groups) = if egress {
+    let outbound = p.direction.eq_ignore_ascii_case("outbound");
+    let (prefix, many, groups) = if outbound {
         (
             &p.destination_address_prefix,
             &p.destination_address_prefixes,
@@ -356,10 +363,7 @@ fn rules(nsg: &Base, rule: &RuleJson) -> Vec<Resource> {
     peers.extend(ids(groups).into_iter().map(Peer::Group));
     let ranges =
         one_or_many(&p.destination_port_range, &p.destination_port_ranges);
-    let protocol = match p.protocol.to_ascii_lowercase().as_str() {
-        "*" => "-1".to_string(),
-        other => other.to_string(),
-    };
+    let protocol = Protocol::parse(&p.protocol);
     let base_id = rid(&rule.id).to_string();
     let count = peers.len() * ranges.len().max(1);
     let mut out = Vec::new();
@@ -374,25 +378,25 @@ fn rules(nsg: &Base, rule: &RuleJson) -> Vec<Resource> {
             } else {
                 format!("{base_id}#{}", out.len() + 1)
             };
-            let (from_port, to_port) = ports(range);
-            let mut r = body::SecurityGroupRule {
-                rule_id: id.clone(),
-                group_id: Some(rid(&nsg.id).to_string()),
-                egress: Some(egress),
-                deny: p.access.eq_ignore_ascii_case("deny"),
+            let r = body::SecurityGroupRule {
+                group: rid(&nsg.id).to_string(),
+                direction: if outbound {
+                    TrafficDirection::Outbound
+                } else {
+                    TrafficDirection::Inbound
+                },
+                action: if p.access.eq_ignore_ascii_case("deny") {
+                    RuleAction::Deny
+                } else {
+                    RuleAction::Allow
+                },
                 priority: p.priority,
-                ip_protocol: Some(protocol.clone()),
-                from_port,
-                to_port,
+                protocol: protocol.clone(),
+                ports: ports(range),
+                icmp: None,
+                peer: peer.clone(),
                 description: text(&p.description),
-                ..Default::default()
             };
-            match peer {
-                Peer::V4(c) => r.cidr_ipv4 = Some(c.clone()),
-                Peer::V6(c) => r.cidr_ipv6 = Some(c.clone()),
-                Peer::Tag(t) => r.prefix_list_id = Some(t.clone()),
-                Peer::Group(g) => r.referenced_group_id = Some(g.clone()),
-            }
             out.push(child(nsg, &id, Body::SecurityGroupRule(r)));
         }
     }
@@ -406,7 +410,6 @@ impl Rows {
             let network_id = rid(&vnet.base.id).to_string();
             out.resources.push(vnet.base.resource(Body::Network(
                 body::Network {
-                    network_id: network_id.clone(),
                     name: Some(vnet.base.name.clone()),
                     cidr_block: vnet.address_prefixes.first().cloned(),
                     cidr_blocks: vnet.address_prefixes.clone(),
@@ -424,7 +427,7 @@ impl Rows {
                     &vnet.base,
                     &s.id,
                     Body::Subnet(body::Subnet {
-                        subnet_id: rid(&s.id).to_string(),
+                        name: Some(name(&s.id).to_string()),
                         network_id: Some(network_id.clone()),
                         cidr_block: v4.into_iter().next(),
                         ipv6_cidr_blocks: v6,
@@ -438,7 +441,7 @@ impl Rows {
                     &vnet.base,
                     &peering.id,
                     Body::PeeringConnection(body::PeeringConnection {
-                        peering_id: rid(&peering.id).to_string(),
+                        name: Some(name(&peering.id).to_string()),
                         status: text(&pp.peering_state),
                         requester: body::PeeringSide {
                             network_id: Some(network_id.clone()),
@@ -476,8 +479,7 @@ impl Rows {
             let group = rid(&nsg.base.id);
             out.resources.push(nsg.base.resource(Body::SecurityGroup(
                 body::SecurityGroup {
-                    group_id: group.to_string(),
-                    group_name: Some(nsg.base.name.clone()),
+                    name: Some(nsg.base.name.clone()),
                     ..Default::default()
                 },
             )));
@@ -493,7 +495,7 @@ impl Rows {
             let subnets = ids(&rt.subnets);
             out.resources.push(
                 rt.base.resource(Body::RouteTable(body::RouteTable {
-                    route_table_id: rid(&rt.base.id).to_string(),
+                    name: Some(rt.base.name.clone()),
                     network_id: subnets
                         .first()
                         .and_then(|s| parent(s, "subnets")),
@@ -504,8 +506,7 @@ impl Rows {
                         .iter()
                         .map(|r| body::Route {
                             destination: text(&r.properties.address_prefix),
-                            target: text(&r.properties.next_hop_ip_address)
-                                .or_else(|| text(&r.properties.next_hop_type)),
+                            target: route_target(&r.properties),
                             state: text(&r.properties.provisioning_state),
                         })
                         .collect(),
@@ -517,7 +518,7 @@ impl Rows {
             let subnets = ids(&nat.subnets);
             out.resources.push(nat.base.resource(Body::NatGateway(
                 body::NatGateway {
-                    nat_gateway_id: rid(&nat.base.id).to_string(),
+                    name: Some(nat.base.name.clone()),
                     network_id:
                         subnets.first().and_then(|s| parent(s, "subnets")),
                     subnet_id: subnets.first().cloned(),
@@ -531,7 +532,6 @@ impl Rows {
         for g in &self.ip_groups {
             out.resources.push(g.base.resource(Body::PrefixList(
                 body::PrefixList {
-                    prefix_list_id: rid(&g.base.id).to_string(),
                     name: Some(g.base.name.clone()),
                     entries: g.ip_addresses.clone(),
                     ..Default::default()
@@ -728,22 +728,23 @@ mod tests {
             .collect();
         assert_eq!(rules.len(), 5, "one https rule, four admin rules");
         let https = rules[0];
-        assert_eq!(https.prefix_list_id.as_deref(), Some("Internet"));
-        assert_eq!((https.from_port, https.to_port), (Some(443), Some(443)));
-        assert_eq!(https.ip_protocol.as_deref(), Some("tcp"));
-        assert!(!https.deny);
+        assert_eq!(https.peer, Peer::ServiceTag("Internet".into()));
+        assert_eq!(https.ports, Some((443, 443)));
+        assert_eq!(https.protocol, Protocol::Tcp);
+        assert_eq!(https.action, RuleAction::Allow);
+        assert_eq!(https.direction, TrafficDirection::Inbound);
+        assert_eq!(https.priority, Some(100));
         let admin = &rules[1..];
-        assert!(
-            admin
-                .iter()
-                .all(|r| r.deny && r.ip_protocol.as_deref() == Some("-1"))
-        );
-        assert_eq!(admin[1].from_port, Some(3389));
-        assert_eq!(admin[1].to_port, Some(3390));
-        assert_eq!(admin[2].cidr_ipv6.as_deref(), Some("2001:db8::/32"));
-        let ids: std::collections::BTreeSet<&str> =
-            admin.iter().map(|r| r.rule_id.as_str()).collect();
-        assert_eq!(ids.len(), 4, "split rules get distinct ids");
+        assert!(admin.iter().all(
+            |r| r.action == RuleAction::Deny && r.protocol == Protocol::All
+        ));
+        assert_eq!(admin[1].ports, Some((3389, 3390)));
+        assert_eq!(admin[2].peer, Peer::IpNet("2001:db8::/32".into()));
+        let ids: std::collections::BTreeSet<&str> = out
+            .of_kind(ResourceKind::SecurityGroupRule)
+            .map(|r| r.arn.as_str())
+            .collect();
+        assert_eq!(ids.len(), 5, "split rules get distinct ids");
         assert_eq!(
             out.relationships.iter().filter(|r| r.edge == Edge::RuleOf).count(),
             5
@@ -760,7 +761,7 @@ mod tests {
             panic!()
         };
         assert_eq!(rt.network_id.as_deref(), Some(hub.as_str()));
-        assert_eq!(rt.routes[0].target.as_deref(), Some("10.0.0.4"));
+        assert_eq!(rt.routes[0].target, RouteTarget::Ip("10.0.0.4".into()));
         let Body::NatGateway(n) =
             &out.of_kind(ResourceKind::NatGateway).next().unwrap().body
         else {
@@ -811,12 +812,34 @@ mod tests {
     }
 
     #[test]
-    fn port_ranges_and_peers_parse() {
-        assert_eq!(ports("*"), (None, None));
-        assert_eq!(ports("80"), (Some(80), Some(80)));
-        assert_eq!(ports("1000 - 2000"), (Some(1000), Some(2000)));
-        assert!(matches!(peer("*"), Peer::V4(c) if c == "0.0.0.0/0"));
-        assert!(matches!(peer("10.0.0.0/8"), Peer::V4(_)));
-        assert!(matches!(peer("VirtualNetwork"), Peer::Tag(_)));
+    fn port_ranges_peers_and_next_hops_parse() {
+        assert_eq!(ports("*"), None);
+        assert_eq!(ports("80"), Some((80, 80)));
+        assert_eq!(ports("1000 - 2000"), Some((1000, 2000)));
+        assert_eq!(peer("*"), Peer::IpNet("0.0.0.0/0".into()));
+        assert_eq!(peer("10.0.0.0/8"), Peer::IpNet("10.0.0.0/8".into()));
+        assert_eq!(peer("fd00::/8"), Peer::IpNet("fd00::/8".into()));
+        assert_eq!(
+            peer("VirtualNetwork"),
+            Peer::ServiceTag("VirtualNetwork".into())
+        );
+        let hop = |t: &str, ip: &str| {
+            route_target(&RouteProperties {
+                next_hop_type: t.into(),
+                next_hop_ip_address: ip.into(),
+                ..Default::default()
+            })
+        };
+        assert_eq!(hop("VnetLocal", ""), RouteTarget::Local);
+        assert_eq!(hop("Internet", ""), RouteTarget::Internet);
+        assert_eq!(hop("None", ""), RouteTarget::Drop);
+        assert_eq!(
+            hop("VirtualAppliance", ""),
+            RouteTarget::Other("VirtualAppliance".into())
+        );
+        assert_eq!(
+            hop("VirtualNetworkGateway", ""),
+            RouteTarget::Other("VirtualNetworkGateway".into())
+        );
     }
 }

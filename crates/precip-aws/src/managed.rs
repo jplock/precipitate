@@ -55,7 +55,8 @@ impl Collect for Rds {
                         instance_class: own(db.db_instance_class()),
                         allocated_storage_gib: db.allocated_storage(),
                         high_availability: db.multi_az(),
-                        network_id: own(
+                        network_id: ctx.refer(
+                            ArnType::Vpc,
                             db.db_subnet_group().and_then(|g| g.vpc_id()),
                         ),
                     },
@@ -139,19 +140,24 @@ impl Collect for Lambda {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for f in page.functions() {
                 let Some(arn) = f.function_arn() else { continue };
-                out.resources.push(ctx.managed(
-                    Arn::from(arn),
-                    f.function_name(),
-                    BTreeMap::new(),
-                    body::Service::Functions {
-                        product: "lambda".into(),
-                        runtime: own(f.runtime().map(|r| r.as_str())),
-                        memory_mib: f.memory_size(),
-                        network_id: own(
-                            f.vpc_config().and_then(|v| v.vpc_id()),
-                        ),
-                    },
-                ));
+                out.resources.push(
+                    ctx.managed(
+                        Arn::from(arn),
+                        f.function_name(),
+                        BTreeMap::new(),
+                        body::Service::Functions {
+                            product: "lambda".into(),
+                            runtime: own(f.runtime().map(|r| r.as_str())),
+                            memory_mib: f.memory_size(),
+                            network_id: ctx.refer(
+                                ArnType::Vpc,
+                                f.vpc_config()
+                                    .and_then(|v| v.vpc_id())
+                                    .filter(|v| !v.is_empty()),
+                            ),
+                        },
+                    ),
+                );
             }
         }
         Ok(out)

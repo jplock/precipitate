@@ -368,15 +368,13 @@ pub fn sized_instances(
         }
         .assess(profile, disposition);
 
-        let instance_id =
-            Some(inst.instance_id.as_str()).filter(|id| !id.is_empty());
         out.push(SizedInstance {
             arn: r.arn.clone(),
             name: r
                 .tags
                 .get("Name")
                 .map(String::as_str)
-                .or(instance_id)
+                .or(inst.name.as_deref())
                 .unwrap_or(r.arn.as_str())
                 .to_string(),
             pair: m.pair.clone(),
@@ -661,7 +659,7 @@ mod tests {
                 res(
                     "vm",
                     ResourceKind::Instance,
-                    serde_json::json!({"instance_id": "vm", "instance_type": "D4ps"}),
+                    serde_json::json!({"name": "vm", "instance_type": "D4ps"}),
                 ),
                 res(
                     "t",

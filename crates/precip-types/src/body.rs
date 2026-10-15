@@ -62,31 +62,31 @@ impl Body {
         }
     }
 
-    /// The resource's own name, for kinds that have one.
+    /// The resource's own name, where the cloud gives it one.
     pub fn name(&self) -> Option<&str> {
         match self {
             Self::Account(b) => Some(&b.name),
             Self::InstanceType(b) => Some(&b.name),
+            Self::Instance(b) => b.name.as_deref(),
+            Self::Volume(b) => b.name.as_deref(),
             Self::Image(b) => b.name.as_deref(),
             Self::Network(b) => b.name.as_deref(),
+            Self::Subnet(b) => b.name.as_deref(),
+            Self::SecurityGroup(b) => b.name.as_deref(),
+            Self::SecurityGroupRule(_) => None,
+            Self::RouteTable(b) => b.name.as_deref(),
+            Self::InternetGateway(b) => b.name.as_deref(),
+            Self::NatGateway(b) => b.name.as_deref(),
+            Self::PeeringConnection(b) => b.name.as_deref(),
             Self::PrefixList(b) => b.name.as_deref(),
             Self::ScaleGroup(b) => b.name.as_deref(),
             Self::LaunchTemplate(b) => b.name.as_deref(),
             Self::LaunchConfiguration(b) => b.name.as_deref(),
+            Self::PublicIp(b) => b.name.as_deref(),
             Self::LoadBalancer(b) => b.name.as_deref(),
             Self::TargetGroup(b) => b.name.as_deref(),
             Self::DeploymentGroup(b) => b.name.as_deref(),
             Self::ManagedService(b) => b.name.as_deref(),
-            Self::Instance(_)
-            | Self::Volume(_)
-            | Self::Subnet(_)
-            | Self::SecurityGroup(_)
-            | Self::SecurityGroupRule(_)
-            | Self::RouteTable(_)
-            | Self::InternetGateway(_)
-            | Self::NatGateway(_)
-            | Self::PeeringConnection(_)
-            | Self::PublicIp(_) => None,
         }
     }
 
@@ -162,7 +162,7 @@ macro_rules! bodies {
 bodies! {
     /// A cloud account: an AWS account in the Organization with its OU, an
     /// Azure subscription with its management group, or a Google Cloud
-    /// project with its folder.
+    /// project with its folder. Becomes an Oxide project's scope.
     Account {
         name: String,
         status: String,
@@ -173,19 +173,25 @@ bodies! {
         /// in.
         cloud: String,
     }
-    /// A virtual machine. Scanners normalise `architecture` to `x86_64` or
-    /// `arm64` and `boot_mode` to `legacy-bios` or `uefi` where they can.
+    /// A virtual machine, which becomes an `oxide_instance`. Scanners
+    /// normalise `architecture` to `x86_64` or `arm64` and `boot_mode` to
+    /// `legacy-bios` or `uefi` where they can.
     Instance {
-        instance_id: String,
+        name: Option<String>,
         instance_type: Option<String>,
         architecture: Option<String>,
         /// The operating system as the provider reports it. Every Windows
         /// variant starts with `Windows`.
         platform: Option<String>,
         state: Option<String>,
+        /// The image's ARN, or a marketplace image's URN.
         image_id: Option<String>,
-        subnet_id: Option<String>,
+        /// The subnet of each network interface, by ARN, primary first.
+        subnets: Vec<String>,
+        /// The network of the primary interface, by ARN.
         network_id: Option<String>,
+        /// The disk it boots from, by ARN.
+        boot_disk: Option<String>,
         boot_mode: Option<String>,
         launch_time: Option<String>,
         /// Network-attached data and OS disks.
@@ -194,6 +200,8 @@ bodies! {
         /// instance store.
         local_disk_count: usize,
         network_interface_count: usize,
+        /// The public address, if any. A static address is also a
+        /// `PublicIp` attached to the instance.
         public_ip: Option<String>,
     }
     /// vCPU and memory for a machine size seen in a region: an EC2
@@ -209,8 +217,9 @@ bodies! {
         local_storage_gb: Option<i64>,
         network_performance: Option<String>,
     }
+    /// A network-attached disk, which becomes an `oxide_disk`.
     Volume {
-        volume_id: String,
+        name: Option<String>,
         size_gib: Option<i32>,
         volume_type: Option<String>,
         iops: Option<i32>,
@@ -218,10 +227,10 @@ bodies! {
         encrypted: Option<bool>,
         encryption_key_id: Option<String>,
         state: Option<String>,
+        /// The instances it is attached to, by ARN.
         attached_to: Vec<String>,
     }
     Image {
-        image_id: String,
         name: Option<String>,
         owner_id: Option<String>,
         owner_alias: Option<String>,
@@ -233,9 +242,8 @@ bodies! {
         public: Option<bool>,
         state: Option<String>,
     }
-    /// A VPC or a virtual network.
+    /// A VPC or virtual network, which becomes an `oxide_vpc`.
     Network {
-        network_id: String,
         /// The network's own name, for providers that name networks
         /// outside their tags.
         name: Option<String>,
@@ -244,71 +252,57 @@ bodies! {
         is_default: Option<bool>,
         owner_id: Option<String>,
     }
+    /// A subnet, which becomes an `oxide_vpc_subnet`.
     Subnet {
-        subnet_id: String,
+        name: Option<String>,
+        /// The network, by ARN.
         network_id: Option<String>,
         cidr_block: Option<String>,
         ipv6_cidr_blocks: Vec<String>,
         availability_zone: Option<String>,
         map_public_ip_on_launch: Option<bool>,
     }
-    /// An EC2 security group or an Azure network security group.
+    /// An EC2 security group, an Azure network security group or a Google
+    /// Cloud firewall. Its rules become `oxide_vpc_firewall_rules`
+    /// targeting the instances related to it by `has_security_group`.
     SecurityGroup {
-        group_id: String,
-        group_name: Option<String>,
+        name: Option<String>,
         description: Option<String>,
+        /// The network, by ARN.
         network_id: Option<String>,
-    }
-    /// One rule, with its source kept distinct: CIDR, prefix list (or
-    /// Azure service tag) or another security group.
-    SecurityGroupRule {
-        rule_id: String,
-        group_id: Option<String>,
-        egress: Option<bool>,
-        /// Azure rules can deny; EC2 rules only allow.
-        deny: bool,
-        /// Azure evaluates rules in priority order, lowest first.
-        priority: Option<i32>,
-        ip_protocol: Option<String>,
-        from_port: Option<i32>,
-        to_port: Option<i32>,
-        cidr_ipv4: Option<String>,
-        cidr_ipv6: Option<String>,
-        prefix_list_id: Option<String>,
-        referenced_group_id: Option<String>,
-        description: Option<String>,
     }
     RouteTable {
-        route_table_id: String,
+        name: Option<String>,
+        /// The network, by ARN.
         network_id: Option<String>,
         main: bool,
+        /// The subnets associated with it, by ARN.
         subnets: Vec<String>,
         routes: Vec<Route>,
     }
-    Route {
-        destination: Option<String>,
-        target: Option<String>,
-        state: Option<String>,
-    }
     InternetGateway {
-        internet_gateway_id: String,
+        name: Option<String>,
+        /// The networks it is attached to, by ARN.
         networks: Vec<String>,
     }
     NatGateway {
-        nat_gateway_id: String,
+        name: Option<String>,
+        /// The network and subnet, by ARN.
         network_id: Option<String>,
         subnet_id: Option<String>,
         state: Option<String>,
         connectivity: Option<String>,
+        /// Its public addresses, by ARN.
         public_ips: Vec<String>,
     }
     PeeringConnection {
-        peering_id: String,
+        name: Option<String>,
         status: Option<String>,
         requester: PeeringSide,
         accepter: PeeringSide,
     }
     PeeringSide {
+        /// The network, by ARN.
         network_id: Option<String>,
         owner_id: Option<String>,
         region: Option<String>,
@@ -316,19 +310,20 @@ bodies! {
     }
     /// An AWS managed prefix list or an Azure IP group.
     PrefixList {
-        prefix_list_id: String,
         name: Option<String>,
         owner_id: Option<String>,
         address_family: Option<String>,
         entries: Vec<String>,
     }
-    /// An Auto Scaling group or a VM scale set.
+    /// An Auto Scaling group, VM scale set or managed instance group.
     ScaleGroup {
         name: Option<String>,
         min_size: Option<i32>,
         desired_capacity: Option<i32>,
         max_size: Option<i32>,
         observed_instances: usize,
+        /// The AWS launch template's own id, which with the version names
+        /// the template the group launches; not a resource reference.
         launch_template_id: Option<String>,
         launch_configuration_name: Option<String>,
         launch_template_version: Option<String>,
@@ -337,7 +332,6 @@ bodies! {
     }
     /// The launch template version an Auto Scaling group points at.
     LaunchTemplate {
-        launch_template_id: String,
         name: Option<String>,
         version: i64,
         requested_version: String,
@@ -350,11 +344,13 @@ bodies! {
         image_id: Option<String>,
         created: Option<String>,
     }
-    /// An Elastic IP or an Azure public IP address.
+    /// A static public address (an Elastic IP or an Azure or Google Cloud
+    /// public IP), which becomes an `oxide_floating_ip`.
     PublicIp {
-        allocation_id: String,
+        name: Option<String>,
         public_ip: Option<String>,
-        instance_id: Option<String>,
+        /// The instance it is attached to, by ARN.
+        instance: Option<String>,
         network_interface_id: Option<String>,
         domain: Option<String>,
     }
@@ -363,8 +359,10 @@ bodies! {
         #[serde(rename = "type")]
         lb_type: Option<String>,
         scheme: Option<String>,
+        /// The network, by ARN.
         network_id: Option<String>,
         dns_name: Option<String>,
+        /// Its security groups, by ARN.
         security_groups: Vec<String>,
     }
     /// A target group or a load balancer backend pool.
@@ -373,18 +371,138 @@ bodies! {
         target_type: Option<String>,
         protocol: Option<String>,
         port: Option<i32>,
+        /// The network, by ARN.
         network_id: Option<String>,
+        /// The load balancers in front of it, by ARN.
         load_balancers: Vec<String>,
         instance_targets: usize,
     }
-    /// A unit resources are deployed in together: a CloudFormation stack
-    /// or an Azure resource group.
+    /// A unit resources are deployed in together: a CloudFormation stack,
+    /// an Azure resource group or a GKE cluster's nodes.
     DeploymentGroup {
         name: Option<String>,
+        /// The parent and root groups, by ARN.
         parent_id: Option<String>,
         root_id: Option<String>,
         status: Option<String>,
     }
+}
+
+/// One firewall rule in Oxide's terms: a direction, an action, a priority,
+/// a protocol filter and one peer. The instances it applies to are those
+/// related to its group by `has_security_group`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecurityGroupRule {
+    /// The group, NSG or firewall it belongs to, by ARN.
+    pub group: String,
+    pub direction: TrafficDirection,
+    pub action: RuleAction,
+    /// Lowest first. `None` where the provider does not order rules, as in
+    /// EC2, whose rules only allow.
+    pub priority: Option<i32>,
+    pub protocol: Protocol,
+    /// The destination port range. `None` is every port.
+    pub ports: Option<(i32, i32)>,
+    /// The ICMP type and code, for ICMP. `None` is every type.
+    pub icmp: Option<(i32, Option<i32>)>,
+    /// Where traffic comes from (inbound) or goes to (outbound).
+    pub peer: Peer,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleAction {
+    Allow,
+    Deny,
+}
+
+/// The protocols an Oxide firewall rule can filter on, and any other the
+/// provider names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    All,
+    Tcp,
+    Udp,
+    Icmp,
+    Icmp6,
+    Other(String),
+}
+
+impl Protocol {
+    /// A protocol by name or IANA number, as the providers write them:
+    /// `tcp`, `6`, `-1` and `*` for every protocol, and so on.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "-1" | "*" | "all" | "any" => Self::All,
+            "tcp" | "6" => Self::Tcp,
+            "udp" | "17" => Self::Udp,
+            "icmp" | "1" => Self::Icmp,
+            "icmpv6" | "icmp6" | "58" => Self::Icmp6,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+/// The far side of a rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Peer {
+    /// An IPv4 or IPv6 network, `0.0.0.0/0` for anywhere.
+    IpNet(String),
+    /// A prefix list or IP group, by ARN, whose entries are IP networks.
+    PrefixList(String),
+    /// The instances in another security group, by ARN.
+    Group(String),
+    /// The instances carrying a Google Cloud network tag.
+    Tag(String),
+    /// The instances running as a Google Cloud service account.
+    ServiceAccount(String),
+    /// An Azure service tag, such as `Internet` or `VirtualNetwork`.
+    ServiceTag(String),
+}
+
+/// One route of a route table.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Route {
+    /// A CIDR, or a prefix list by ARN.
+    pub destination: Option<String>,
+    pub target: RouteTarget,
+    pub state: Option<String>,
+}
+
+/// Where a route sends traffic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteTarget {
+    /// Within the network; Oxide's system router covers these.
+    #[default]
+    Local,
+    /// An internet gateway, by ARN.
+    InternetGateway(String),
+    /// The internet, through a gateway the provider does not list as a
+    /// resource (Azure's `Internet` next hop, Google Cloud's default
+    /// internet gateway).
+    Internet,
+    /// Traffic is dropped.
+    Drop,
+    NatGateway(String),
+    Instance(String),
+    /// A next-hop address, such as a virtual appliance.
+    Ip(String),
+    Peering(String),
+    /// A target with no Oxide equivalent (a transit gateway, a VPN), by
+    /// the provider's id or name.
+    Other(String),
 }
 
 /// A managed service with no Oxide equivalent. Counted, never sized. The

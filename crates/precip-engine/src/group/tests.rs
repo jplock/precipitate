@@ -31,7 +31,10 @@ fn inst(id: &str, tags: &[(&str, &str)]) -> Resource {
         &format!("arn:aws:ec2:us-east-1:{ACCT}:instance/{id}"),
         ResourceKind::Instance,
         tags,
-        serde_json::json!({ "instance_type": "t3.micro", "network_id": "vpc-1" }),
+        serde_json::json!({
+            "instance_type": "t3.micro",
+            "network_id": "arn:aws:ec2:us-east-1:123456789012:vpc/vpc-1",
+        }),
     )
 }
 
@@ -327,7 +330,7 @@ fn vpc_then_unassigned_are_the_last_resorts() {
                 vpc,
                 ResourceKind::Network,
                 &[("Name", "Core Network")],
-                serde_json::json!({ "network_id": "vpc-1" }),
+                serde_json::json!({}),
             ),
             inst("i-1", &[]),
             bare,
@@ -738,7 +741,7 @@ mod azure {
                 "{RG}/{group}/providers/microsoft.compute/virtualmachines/{name}"
             ),
             ResourceKind::Instance,
-            serde_json::json!({ "instance_id": name }),
+            serde_json::json!({ "name": name }),
         )
     }
 
@@ -808,7 +811,7 @@ mod azure {
             az(
                 &net,
                 ResourceKind::Network,
-                serde_json::json!({ "network_id": net, "name": "billing-vnet" }),
+                serde_json::json!({ "name": "billing-vnet" }),
             ),
             lone.clone(),
         ];
@@ -890,7 +893,7 @@ mod gcp {
                 "net-host",
                 "global",
                 ResourceKind::Network,
-                serde_json::json!({ "network_id": net, "name": "billing-vpc" }),
+                serde_json::json!({ "name": "billing-vpc" }),
             ),
             vm.clone(),
         ];

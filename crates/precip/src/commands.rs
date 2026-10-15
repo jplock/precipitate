@@ -5,7 +5,7 @@ use camino::Utf8PathBuf;
 use precip_db::{DispositionSource, Store, Trigger, export};
 use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_tui::workspace::WorkspaceDir;
-use precip_types::{Disposition, Provider};
+use precip_types::{Disposition, PairKey, Provider};
 
 use crate::cli::{Cli, ExportWhat, PairArgs, ScanArgs, SizingArgs};
 use crate::schedule::today;
@@ -719,18 +719,24 @@ pub(crate) async fn export(
     what: ExportWhat,
     out: Option<Utf8PathBuf>,
     format: Option<String>,
+    pair: Option<(String, String)>,
     sizing: &SizingArgs,
 ) -> anyhow::Result<()> {
     // Warnings go to stderr so they never mix into an export
     // written to stdout.
     init_tracing();
     let store = env.store("export").await?;
-    let format = match (&format, &out) {
-        (Some(f), _) => f.to_lowercase(),
-        (None, Some(path)) => {
+    let format = match (&format, &out, what) {
+        (Some(f), _, _) => f.to_lowercase(),
+        (None, Some(path), _) => {
             path.extension().unwrap_or_default().to_lowercase()
         }
-        (None, None) => anyhow::bail!("give --out <file> or --format"),
+        (None, None, ExportWhat::Terraform) => "tf".into(),
+        (
+            None,
+            None,
+            ExportWhat::Workloads | ExportWhat::Sizing | ExportWhat::Schedule,
+        ) => anyhow::bail!("give --out <file> or --format"),
     };
     let latest = latest_scan(&store).await?;
     let text = match (what, format.as_str()) {
@@ -773,6 +779,24 @@ pub(crate) async fn export(
                     jiff::Timestamp::now(),
                 ),
             }
+        }
+        (ExportWhat::Terraform, "tf") => {
+            let Some((workload, environment)) = pair else {
+                anyhow::bail!(
+                    "terraform needs --workload <name> --environment <name>"
+                );
+            };
+            let key = PairKey::new(workload.as_str(), environment.as_str());
+            let summary = store.workload_summary(&latest.id).await?;
+            if !summary.iter().any(|r| {
+                r.workload == key.workload.as_str()
+                    && r.environment == key.environment.as_str()
+            }) {
+                anyhow::bail!(
+                    "no pair {workload} {environment} in the latest scan; see `precip workloads`"
+                );
+            }
+            store.pair_terraform(&latest.id, &key).await?
         }
         (_, other) => {
             anyhow::bail!("{other} is not a format this export knows")

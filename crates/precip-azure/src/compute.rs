@@ -48,6 +48,7 @@ fn vm_query() -> String {
     | project osDiskId = tolower(id), hyperVGeneration = tostring(properties.hyperVGeneration)
   ) on osDiskId
 | project {BASE},
+    osDiskId,
     vmSize = tostring(properties.hardwareProfile.vmSize),
     osType = tostring(properties.storageProfile.osDisk.osType),
     imageId = tostring(properties.storageProfile.imageReference.id),
@@ -140,6 +141,7 @@ fn image_query() -> String {
 pub(crate) struct VmRow {
     #[serde(flatten)]
     pub base: Base,
+    pub os_disk_id: String,
     pub vm_size: String,
     pub os_type: String,
     pub image_id: String,
@@ -255,7 +257,7 @@ pub(crate) struct Rows {
 /// What an instance's network interfaces say about it.
 #[derive(Debug, Default)]
 struct Wiring {
-    subnets: BTreeSet<Arn>,
+    subnets: Vec<Arn>,
     security_groups: BTreeSet<Arn>,
     pools: BTreeSet<Arn>,
     public_ips: Vec<Arn>,
@@ -266,7 +268,11 @@ impl Wiring {
         self.security_groups.extend(nsg);
         for c in configs {
             let p = &c.properties;
-            self.subnets.extend(p.subnet.as_ref().and_then(Ref::rid));
+            if let Some(s) = p.subnet.as_ref().and_then(Ref::rid) {
+                if !self.subnets.contains(&s) {
+                    self.subnets.push(s);
+                }
+            }
             self.public_ips
                 .extend(p.public_ip_address.as_ref().and_then(Ref::rid));
             self.pools.extend(
@@ -278,17 +284,15 @@ impl Wiring {
         }
     }
 
-    /// The first subnet, as the instance's own, and its network.
-    fn subnet_and_network(&self) -> (Option<String>, Option<String>) {
-        let subnet = self.subnets.first().map(Arn::to_string);
-        let network = subnet.as_deref().and_then(|s| parent(s, "subnets"));
-        (subnet, network)
+    /// Each interface's subnet, primary first, and the primary's network.
+    fn subnets_and_network(&self) -> (Vec<String>, Option<String>) {
+        let subnets: Vec<String> =
+            self.subnets.iter().map(Arn::to_string).collect();
+        let network = subnets.first().and_then(|s| parent(s, "subnets"));
+        (subnets, network)
     }
 
     fn relate(&self, out: &mut Collected, instance: &Arn) {
-        for s in &self.subnets {
-            out.relate(instance.clone(), Edge::InSubnet, s.clone());
-        }
         for g in &self.security_groups {
             out.relate(instance.clone(), Edge::HasSecurityGroup, g.clone());
         }
@@ -349,11 +353,6 @@ impl Rows {
             .iter()
             .filter_map(|n| Some((rid(&n.id), rid(&text(&n.vm_id)?))))
             .collect();
-        let vm_names: HashMap<Arn, &str> = self
-            .vms
-            .iter()
-            .map(|v| (rid(&v.base.id), v.base.name.as_str()))
-            .collect();
 
         for vm in &self.vms {
             let arn = rid(&vm.base.id);
@@ -364,7 +363,7 @@ impl Rows {
                     &nic.ip_configurations,
                 );
             }
-            let (subnet_id, network_id) = wiring.subnet_and_network();
+            let (subnets, network_id) = wiring.subnets_and_network();
             let public_ip = wiring
                 .public_ips
                 .iter()
@@ -376,14 +375,16 @@ impl Rows {
             }
             out.resources.push(vm.base.resource(Body::Instance(
                 body::Instance {
-                    instance_id: vm.base.name.clone(),
+                    name: Some(vm.base.name.clone()),
                     instance_type: text(&vm.vm_size),
                     architecture: None,
                     platform: text(&vm.os_type),
                     state: power_state(&vm.power_state),
                     image_id: vm.image(),
-                    subnet_id,
+                    subnets,
                     network_id,
+                    boot_disk:
+                        text(&vm.os_disk_id).map(|d| rid(&d).to_string()),
                     boot_mode: vm.boot_mode(),
                     launch_time: text(&vm.time_created),
                     volume_count: 1 + vm.data_disks.unwrap_or(0),
@@ -414,7 +415,7 @@ impl Rows {
                 wiring.add(nsg, &c.properties.ip_configurations);
             }
             wiring.public_ips.clear();
-            let (subnet_id, network_id) = wiring.subnet_and_network();
+            let (subnets, network_id) = wiring.subnets_and_network();
             wiring.relate(&mut out, &arn);
             if let Some(set_id) = &set_id {
                 out.relate(
@@ -427,11 +428,11 @@ impl Rows {
                 .or_else(|| set.and_then(|s| text(&s.sku_name)));
             out.resources.push(vm.base.resource(Body::Instance(
                 body::Instance {
-                    instance_id: vm.base.name.clone(),
+                    name: Some(vm.base.name.clone()),
                     instance_type,
                     platform: text(&vm.os_type),
                     state: power_state(&vm.power_state),
-                    subnet_id,
+                    subnets,
                     network_id,
                     launch_time: text(&vm.time_created),
                     volume_count: 1,
@@ -477,7 +478,7 @@ impl Rows {
             }
             out.resources.push(disk.base.resource(Body::Volume(
                 body::Volume {
-                    volume_id: disk.base.name.clone(),
+                    name: Some(disk.base.name.clone()),
                     size_gib: disk.size_gb,
                     volume_type: text(&disk.sku_name),
                     iops: disk.iops,
@@ -501,24 +502,21 @@ impl Rows {
             if let Some(vm) = vm {
                 out.relate(arn.clone(), Edge::AttachedTo, vm.clone());
             }
-            out.resources.push(
-                ip.base.resource(Body::PublicIp(body::PublicIp {
-                    allocation_id: ip.base.name.clone(),
+            out.resources.push(ip.base.resource(Body::PublicIp(
+                body::PublicIp {
+                    name: Some(ip.base.name.clone()),
                     public_ip: text(&ip.ip_address),
-                    instance_id: vm
-                        .and_then(|v| vm_names.get(v))
-                        .map(|n| (*n).to_string()),
+                    instance: vm.map(ToString::to_string),
                     network_interface_id: nic.map(String::from),
                     domain: None,
-                })),
-            );
+                },
+            )));
         }
 
         for image in &self.images {
             let os = text(&image.image_os_type)
                 .or_else(|| text(&image.gallery_os_type));
             out.resources.push(image.base.resource(Body::Image(body::Image {
-                image_id: rid(&image.base.id).to_string(),
                 name: Some(image.base.name.clone()),
                 platform: os,
                 architecture: architecture(&image.architecture),
@@ -719,7 +717,7 @@ mod tests {
         );
         let ip = out.of_kind(ResourceKind::PublicIp).next().unwrap();
         let Body::PublicIp(p) = &ip.body else { panic!() };
-        assert_eq!(p.instance_id.as_deref(), Some("web-1"));
+        assert_eq!(p.instance.as_deref(), Some(vm.as_str()));
         assert_eq!(
             out.of_kind(ResourceKind::Volume).count(),
             2,

@@ -7,7 +7,9 @@
 //!   pairs.
 //! - [`sizing`] packs the pairs that migrate onto sleds and racks.
 //! - [`schedule`] places them on a calendar under the plan's rules.
+//! - [`terraform`] writes a pair's Oxide Terraform.
 
 pub mod group;
 pub mod schedule;
 pub mod sizing;
+pub mod terraform;

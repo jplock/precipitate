@@ -8,7 +8,7 @@ use precip_types::scan::{
     Edge, Relationship, Resource, ResourceKind, ScanTarget, TargetStatus,
 };
 use precip_types::{
-    Arn, Disposition, GroupingConfig, Provider, Scan, WorkloadMember,
+    Arn, Disposition, GroupingConfig, PairKey, Provider, Scan, WorkloadMember,
 };
 use sea_query::{Expr, ExprTrait, Query};
 use std::collections::BTreeMap;
@@ -171,7 +171,10 @@ fn inst(id: &str, tags: &[(&str, &str)]) -> Resource {
         &format!("arn:aws:ec2:us-east-1:{ACCT}:instance/{id}"),
         ResourceKind::Instance,
         tags,
-        serde_json::json!({ "instance_type": "t3.micro", "network_id": "vpc-1" }),
+        serde_json::json!({
+            "instance_type": "t3.micro",
+            "network_id": format!("arn:aws:ec2:us-east-1:{ACCT}:vpc/vpc-1"),
+        }),
     )
 }
 
@@ -263,6 +266,37 @@ async fn pair_members_lists_each_resource_with_kind_name_and_signal() {
     assert!(
         store.pair_members("s", "billing", "dev").await.unwrap().is_empty()
     );
+}
+
+#[tokio::test]
+async fn a_pairs_terraform_holds_its_instances_and_attached_disks() {
+    let (store, _) = grouped(fixture(
+        "s",
+        vec![
+            inst("i-1", &[("app", "billing-prod"), ("Name", "web-1")]),
+            inst("i-2", &[("app", "shop-prod")]),
+            res(
+                V1,
+                ResourceKind::Volume,
+                &[],
+                serde_json::json!({ "size_gib": 8, "attached_to": [I1] }),
+            ),
+            res(
+                "arn:aws:ec2:us-east-1::instance-type/t3.micro",
+                ResourceKind::InstanceType,
+                &[],
+                serde_json::json!({ "name": "t3.micro", "vcpus": 2, "memory_mib": 1024 }),
+            ),
+        ],
+        vec![rel(V1, Edge::AttachedTo, I1)],
+    ))
+    .await;
+    let pair = PairKey::new("billing", "prod");
+    let tf = store.pair_terraform("s", &pair).await.unwrap();
+    assert!(tf.contains("resource \"oxide_project\" \"billing-prod\""), "{tf}");
+    assert!(tf.contains("resource \"oxide_instance\" \"web-1\""), "{tf}");
+    assert!(tf.contains("oxide_disk.vol-1.id"), "{tf}");
+    assert!(!tf.contains("i-2"), "the other pair's instance is left out");
 }
 
 #[tokio::test]

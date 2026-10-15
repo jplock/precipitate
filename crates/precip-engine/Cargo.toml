@@ -8,6 +8,7 @@ repository.workspace = true
 description = "The pure engine: workload grouping, sled and rack sizing, and the migration schedule"
 
 [dependencies]
+hcl-rs.workspace = true
 jiff = { workspace = true, features = ["std", "serde"] }
 precip-types.workspace = true
 serde = { workspace = true, features = ["std", "derive"] }

@@ -312,14 +312,21 @@ pub(crate) enum Command {
     },
     /// Write the workloads, the sizing or the schedule to a file, or to
     /// standard output. The format follows the file's extension (.csv,
-    /// .json, .ics) or --format.
+    /// .json, .ics) or --format. `terraform` writes one pair's Oxide
+    /// Terraform and needs --workload and --environment.
     Export {
         what: ExportWhat,
         #[arg(long)]
         out: Option<Utf8PathBuf>,
-        /// csv, json, or ics (schedule only); needed without --out.
+        /// csv, json, or ics (schedule only); needed without --out, except
+        /// for terraform.
         #[arg(long)]
         format: Option<String>,
+        /// The pair to write Terraform for.
+        #[arg(long, requires = "environment")]
+        workload: Option<String>,
+        #[arg(long, requires = "workload")]
+        environment: Option<String>,
         #[command(flatten)]
         sizing: SizingArgs,
     },
@@ -330,6 +337,7 @@ pub(crate) enum ExportWhat {
     Workloads,
     Sizing,
     Schedule,
+    Terraform,
 }
 
 #[derive(Subcommand)]

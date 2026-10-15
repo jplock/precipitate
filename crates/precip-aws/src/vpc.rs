@@ -1,12 +1,16 @@
 //! VPCs, subnets, security groups and their rules.
 
+use aws_sdk_ec2::types::SecurityGroupRule as SdkRule;
+use precip_types::body::{
+    Peer, Protocol, RouteTarget, RuleAction, TrafficDirection,
+};
 use precip_types::scan::Edge;
-use precip_types::{Arn, Body, body};
+use precip_types::{AccountId, Arn, Body, body};
 
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, Stage, next_page, own,
-    owned, tags,
+    Collect, CollectError, Collected, RegionContext, Stage, name_tag,
+    next_page, own, owned, tags,
 };
 
 pub(crate) struct Vpcs;
@@ -26,14 +30,13 @@ impl Collect for Vpcs {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for vpc in page.vpcs() {
                 let Some(id) = vpc.vpc_id() else { continue };
+                let tags = tags(vpc.tags());
                 out.resources.push(
                     ctx.resource(
                         ctx.arn(ArnType::Vpc, id),
-                        tags(vpc.tags()),
+                        tags.clone(),
                         Body::Network(body::Network {
-                            network_id: id.to_string(),
-                            // VPCs are named by their Name tag.
-                            name: None,
+                            name: name_tag(&tags),
                             cidr_block: own(vpc.cidr_block()),
                             cidr_blocks: owned(
                                 vpc.cidr_block_association_set()
@@ -68,13 +71,14 @@ impl Collect for Subnets {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for s in page.subnets() {
                 let Some(id) = s.subnet_id() else { continue };
+                let tags = tags(s.tags());
                 out.resources.push(
                     ctx.resource(
                         ctx.arn(ArnType::Subnet, id),
-                        tags(s.tags()),
+                        tags.clone(),
                         Body::Subnet(body::Subnet {
-                            subnet_id: id.to_string(),
-                            network_id: own(s.vpc_id()),
+                            name: name_tag(&tags),
+                            network_id: ctx.refer(ArnType::Vpc, s.vpc_id()),
                             cidr_block: own(s.cidr_block()),
                             ipv6_cidr_blocks: owned(
                                 s.ipv6_cidr_block_association_set()
@@ -114,10 +118,9 @@ impl Collect for SecurityGroups {
                     ctx.arn(ArnType::SecurityGroup, id),
                     tags(sg.tags()),
                     Body::SecurityGroup(body::SecurityGroup {
-                        group_id: id.to_string(),
-                        group_name: own(sg.group_name()),
+                        name: own(sg.group_name()),
                         description: own(sg.description()),
-                        network_id: own(sg.vpc_id()),
+                        network_id: ctx.refer(ArnType::Vpc, sg.vpc_id()),
                     }),
                 ));
             }
@@ -126,10 +129,66 @@ impl Collect for SecurityGroups {
     }
 }
 
-/// One row per rule, with the source kept distinct: CIDR, prefix list or
-/// another security group. The group-to-group case is what the firewall
-/// translation has to flag.
+/// One row per rule, with its peer kept distinct: a CIDR, a prefix list
+/// or another security group, which may be in another account.
 pub(crate) struct SecurityGroupRules;
+
+/// An EC2 rule in Oxide's terms. EC2 rules only allow and are unordered.
+/// For ICMP, EC2 puts the type in the from port and the code in the to
+/// port; -1 means every one.
+fn rule_body(
+    ctx: &RegionContext,
+    rule: &SdkRule,
+) -> Option<body::SecurityGroupRule> {
+    let group = ctx.arn(ArnType::SecurityGroup, rule.group_id()?).to_string();
+    let any = |n: Option<i32>| n.filter(|p| *p >= 0);
+    let protocol = Protocol::parse(rule.ip_protocol().unwrap_or("-1"));
+    let (ports, icmp) = match protocol {
+        Protocol::Tcp | Protocol::Udp => {
+            (any(rule.from_port()).zip(any(rule.to_port())), None)
+        }
+        Protocol::Icmp | Protocol::Icmp6 => {
+            (None, any(rule.from_port()).map(|t| (t, any(rule.to_port()))))
+        }
+        Protocol::All | Protocol::Other(_) => (None, None),
+    };
+    let peer = if let Some(c) = rule.cidr_ipv4().or(rule.cidr_ipv6()) {
+        Peer::IpNet(c.to_string())
+    } else if let Some(pl) = rule.prefix_list_id() {
+        Peer::PrefixList(ctx.arn(ArnType::PrefixList, pl).to_string())
+    } else {
+        let r = rule.referenced_group_info()?;
+        // A group in a peered VPC can belong to another account.
+        let account = r
+            .user_id()
+            .map_or_else(|| ctx.identity.account_id.clone(), AccountId::from);
+        Peer::Group(
+            ArnType::SecurityGroup
+                .arn(
+                    &ctx.identity.partition,
+                    &ctx.region,
+                    &account,
+                    r.group_id()?,
+                )
+                .to_string(),
+        )
+    };
+    Some(body::SecurityGroupRule {
+        group,
+        direction: if rule.is_egress() == Some(true) {
+            TrafficDirection::Outbound
+        } else {
+            TrafficDirection::Inbound
+        },
+        action: RuleAction::Allow,
+        priority: None,
+        protocol,
+        ports,
+        icmp,
+        peer,
+        description: own(rule.description()),
+    })
+}
 
 impl Collect for SecurityGroupRules {
     type Context = RegionContext;
@@ -149,37 +208,18 @@ impl Collect for SecurityGroupRules {
                 let Some(id) = rule.security_group_rule_id() else {
                     continue;
                 };
+                let Some(body) = rule_body(ctx, rule) else { continue };
                 let arn = ctx.arn(ArnType::SecurityGroupRule, id);
-                if let Some(g) = rule.group_id() {
-                    out.relate(
-                        arn.clone(),
-                        Edge::RuleOf,
-                        ctx.arn(ArnType::SecurityGroup, g),
-                    );
-                }
-                out.resources.push(
-                    ctx.resource(
-                        arn,
-                        tags(rule.tags()),
-                        Body::SecurityGroupRule(body::SecurityGroupRule {
-                            rule_id: id.to_string(),
-                            group_id: own(rule.group_id()),
-                            egress: rule.is_egress(),
-                            deny: false,
-                            priority: None,
-                            ip_protocol: own(rule.ip_protocol()),
-                            from_port: rule.from_port(),
-                            to_port: rule.to_port(),
-                            cidr_ipv4: own(rule.cidr_ipv4()),
-                            cidr_ipv6: own(rule.cidr_ipv6()),
-                            prefix_list_id: own(rule.prefix_list_id()),
-                            referenced_group_id: own(rule
-                                .referenced_group_info()
-                                .and_then(|r| r.group_id())),
-                            description: own(rule.description()),
-                        }),
-                    ),
+                out.relate(
+                    arn.clone(),
+                    Edge::RuleOf,
+                    Arn::from(body.group.as_str()),
                 );
+                out.resources.push(ctx.resource(
+                    arn,
+                    tags(rule.tags()),
+                    Body::SecurityGroupRule(body),
+                ));
             }
         }
         Ok(out)
@@ -187,6 +227,42 @@ impl Collect for SecurityGroupRules {
 }
 
 pub(crate) struct RouteTables;
+
+/// Where an EC2 route sends traffic. `local` is the VPC itself; a virtual
+/// private gateway, transit gateway or network interface has no Oxide
+/// equivalent.
+fn route_target(
+    ctx: &RegionContext,
+    r: &aws_sdk_ec2::types::Route,
+) -> RouteTarget {
+    let arn = |ty, id: &str| ctx.arn(ty, id).to_string();
+    if let Some(g) = r.gateway_id() {
+        return match g {
+            "local" => RouteTarget::Local,
+            g if g.starts_with("igw-") => {
+                RouteTarget::InternetGateway(arn(ArnType::InternetGateway, g))
+            }
+            other => RouteTarget::Other(other.to_string()),
+        };
+    }
+    if let Some(n) = r.nat_gateway_id() {
+        RouteTarget::NatGateway(arn(ArnType::NatGateway, n))
+    } else if let Some(p) = r.vpc_peering_connection_id() {
+        RouteTarget::Peering(arn(ArnType::VpcPeeringConnection, p))
+    } else if let Some(i) = r.instance_id() {
+        RouteTarget::Instance(arn(ArnType::Instance, i))
+    } else if let Some(other) = r
+        .transit_gateway_id()
+        .or(r.network_interface_id())
+        .or(r.egress_only_internet_gateway_id())
+        .or(r.carrier_gateway_id())
+        .or(r.local_gateway_id())
+    {
+        RouteTarget::Other(other.to_string())
+    } else {
+        RouteTarget::Local
+    }
+}
 
 impl Collect for RouteTables {
     type Context = RegionContext;
@@ -209,30 +285,31 @@ impl Collect for RouteTables {
                     .map(|r| body::Route {
                         destination: own(r
                             .destination_cidr_block()
-                            .or(r.destination_ipv6_cidr_block())
-                            .or(r.destination_prefix_list_id())),
-                        target: own(r
-                            .gateway_id()
-                            .or(r.nat_gateway_id())
-                            .or(r.transit_gateway_id())
-                            .or(r.vpc_peering_connection_id())
-                            .or(r.instance_id())
-                            .or(r.network_interface_id())),
+                            .or(r.destination_ipv6_cidr_block()))
+                        .or_else(|| {
+                            ctx.refer(
+                                ArnType::PrefixList,
+                                r.destination_prefix_list_id(),
+                            )
+                        }),
+                        target: route_target(ctx, r),
                         state: own(r.state().map(|s| s.as_str())),
                     })
                     .collect();
+                let tags = tags(rt.tags());
                 out.resources.push(
                     ctx.resource(
                         ctx.arn(ArnType::RouteTable, id),
-                        tags(rt.tags()),
+                        tags.clone(),
                         Body::RouteTable(body::RouteTable {
-                            route_table_id: id.to_string(),
-                            network_id: own(rt.vpc_id()),
+                            name: name_tag(&tags),
+                            network_id: ctx.refer(ArnType::Vpc, rt.vpc_id()),
                             main: rt
                                 .associations()
                                 .iter()
                                 .any(|a| a.main() == Some(true)),
-                            subnets: owned(
+                            subnets: ctx.refer_all(
+                                ArnType::Subnet,
                                 rt.associations()
                                     .iter()
                                     .filter_map(|a| a.subnet_id()),
@@ -265,12 +342,14 @@ impl Collect for InternetGateways {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for igw in page.internet_gateways() {
                 let Some(id) = igw.internet_gateway_id() else { continue };
+                let tags = tags(igw.tags());
                 out.resources.push(ctx.resource(
                     ctx.arn(ArnType::InternetGateway, id),
-                    tags(igw.tags()),
+                    tags.clone(),
                     Body::InternetGateway(body::InternetGateway {
-                        internet_gateway_id: id.to_string(),
-                        networks: owned(
+                        name: name_tag(&tags),
+                        networks: ctx.refer_all(
+                            ArnType::Vpc,
                             igw.attachments().iter().filter_map(|a| a.vpc_id()),
                         ),
                     }),
@@ -298,22 +377,25 @@ impl Collect for NatGateways {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for nat in page.nat_gateways() {
                 let Some(id) = nat.nat_gateway_id() else { continue };
+                let tags = tags(nat.tags());
                 out.resources.push(
                     ctx.resource(
                         ctx.arn(ArnType::NatGateway, id),
-                        tags(nat.tags()),
+                        tags.clone(),
                         Body::NatGateway(body::NatGateway {
-                            nat_gateway_id: id.to_string(),
-                            network_id: own(nat.vpc_id()),
-                            subnet_id: own(nat.subnet_id()),
+                            name: name_tag(&tags),
+                            network_id: ctx.refer(ArnType::Vpc, nat.vpc_id()),
+                            subnet_id: ctx
+                                .refer(ArnType::Subnet, nat.subnet_id()),
                             state: own(nat.state().map(|s| s.as_str())),
                             connectivity: own(nat
                                 .connectivity_type()
                                 .map(|c| c.as_str())),
-                            public_ips: owned(
+                            public_ips: ctx.refer_all(
+                                ArnType::ElasticIp,
                                 nat.nat_gateway_addresses()
                                     .iter()
-                                    .filter_map(|a| a.public_ip()),
+                                    .filter_map(|a| a.allocation_id()),
                             ),
                         }),
                     ),
@@ -344,22 +426,44 @@ impl Collect for PeeringConnections {
                 let Some(id) = pc.vpc_peering_connection_id() else {
                     continue;
                 };
+                // Each side is in its own account and region.
                 let side = |v: Option<
                     &aws_sdk_ec2::types::VpcPeeringConnectionVpcInfo,
                 >| {
+                    let network = v.and_then(|x| {
+                        let region = x.region().map_or_else(
+                            || ctx.region.clone(),
+                            precip_types::Region::from,
+                        );
+                        let account = x.owner_id().map_or_else(
+                            || ctx.identity.account_id.clone(),
+                            AccountId::from,
+                        );
+                        Some(
+                            ArnType::Vpc
+                                .arn(
+                                    &ctx.identity.partition,
+                                    &region,
+                                    &account,
+                                    x.vpc_id()?,
+                                )
+                                .to_string(),
+                        )
+                    });
                     body::PeeringSide {
-                        network_id: own(v.and_then(|x| x.vpc_id())),
+                        network_id: network,
                         owner_id: own(v.and_then(|x| x.owner_id())),
                         region: own(v.and_then(|x| x.region())),
                         cidr_block: own(v.and_then(|x| x.cidr_block())),
                     }
                 };
+                let tags = tags(pc.tags());
                 out.resources.push(
                     ctx.resource(
                         ctx.arn(ArnType::VpcPeeringConnection, id),
-                        tags(pc.tags()),
+                        tags.clone(),
                         Body::PeeringConnection(body::PeeringConnection {
-                            peering_id: id.to_string(),
+                            name: name_tag(&tags),
                             status: own(pc
                                 .status()
                                 .and_then(|s| s.code())
@@ -392,11 +496,9 @@ impl Collect for PrefixLists {
     ) -> Result<Collected, CollectError> {
         let mut out = Collected::default();
         let ids = prior.distinct(|b| {
-            if let Body::SecurityGroupRule(r) = b {
-                r.prefix_list_id.as_deref()
-            } else {
-                None
-            }
+            let Body::SecurityGroupRule(r) = b else { return None };
+            let Peer::PrefixList(arn) = &r.peer else { return None };
+            arn.rsplit_once("prefix-list/").map(|(_, id)| id)
         });
         if ids.is_empty() {
             return Ok(out);
@@ -421,14 +523,12 @@ impl Collect for PrefixLists {
                     page.entries().iter().filter_map(|e| e.cidr()),
                 ));
             }
-            let arn = pl
-                .prefix_list_arn()
-                .map_or_else(|| ctx.arn(ArnType::PrefixList, id), Arn::from);
+            // Named as rules name it, in this account, even for lists AWS
+            // owns, so a rule's peer finds its list.
             out.resources.push(ctx.resource(
-                arn,
+                ctx.arn(ArnType::PrefixList, id),
                 tags(pl.tags()),
                 Body::PrefixList(body::PrefixList {
-                    prefix_list_id: id.to_string(),
                     name: own(pl.prefix_list_name()),
                     owner_id: own(pl.owner_id()),
                     address_family: own(pl.address_family()),
@@ -437,5 +537,159 @@ impl Collect for PrefixLists {
             ));
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_ec2::types::{ReferencedSecurityGroup, Route};
+
+    fn rule() -> aws_sdk_ec2::types::builders::SecurityGroupRuleBuilder {
+        SdkRule::builder().group_id("sg-web").is_egress(false)
+    }
+
+    #[test]
+    fn rules_name_their_group_peer_and_ports_by_arn() {
+        let ctx = RegionContext::test();
+        let https = rule_body(
+            &ctx,
+            &rule()
+                .ip_protocol("tcp")
+                .from_port(443)
+                .to_port(443)
+                .cidr_ipv4("0.0.0.0/0")
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(
+            https.group,
+            "arn:aws:ec2:us-east-1:111111111111:security-group/sg-web"
+        );
+        assert_eq!(https.direction, TrafficDirection::Inbound);
+        assert_eq!((https.action, https.priority), (RuleAction::Allow, None));
+        assert_eq!(
+            (https.protocol, https.ports),
+            (Protocol::Tcp, Some((443, 443)))
+        );
+        assert_eq!(https.peer, Peer::IpNet("0.0.0.0/0".into()));
+
+        let from_peer_account = rule_body(
+            &ctx,
+            &rule()
+                .ip_protocol("-1")
+                .from_port(-1)
+                .to_port(-1)
+                .is_egress(true)
+                .referenced_group_info(
+                    ReferencedSecurityGroup::builder()
+                        .group_id("sg-db")
+                        .user_id("222222222222")
+                        .build(),
+                )
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(from_peer_account.direction, TrafficDirection::Outbound);
+        assert_eq!(
+            (from_peer_account.protocol, from_peer_account.ports),
+            (Protocol::All, None)
+        );
+        assert_eq!(
+            from_peer_account.peer,
+            Peer::Group(
+                "arn:aws:ec2:us-east-1:222222222222:security-group/sg-db"
+                    .into()
+            )
+        );
+
+        let listed = rule_body(
+            &ctx,
+            &rule().ip_protocol("6").prefix_list_id("pl-1").build(),
+        )
+        .unwrap();
+        assert_eq!(
+            listed.peer,
+            Peer::PrefixList(
+                "arn:aws:ec2:us-east-1:111111111111:prefix-list/pl-1".into()
+            )
+        );
+        assert_eq!(listed.ports, None, "no port range is every port");
+    }
+
+    #[test]
+    fn icmp_rules_carry_type_and_code_and_a_rule_without_peer_is_skipped() {
+        let ctx = RegionContext::test();
+        let ping = rule_body(
+            &ctx,
+            &rule()
+                .ip_protocol("icmp")
+                .from_port(8)
+                .to_port(-1)
+                .cidr_ipv4("10.0.0.0/8")
+                .build(),
+        )
+        .unwrap();
+        assert_eq!((ping.ports, ping.icmp), (None, Some((8, None))));
+        let all_icmp6 = rule_body(
+            &ctx,
+            &rule()
+                .ip_protocol("58")
+                .from_port(-1)
+                .to_port(-1)
+                .cidr_ipv6("::/0")
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(
+            (all_icmp6.protocol, all_icmp6.icmp),
+            (Protocol::Icmp6, None)
+        );
+        assert!(rule_body(&ctx, &rule().ip_protocol("tcp").build()).is_none());
+        assert!(
+            rule_body(&ctx, &SdkRule::builder().cidr_ipv4("0.0.0.0/0").build())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn route_targets_are_typed_and_referenced_by_arn() {
+        let ctx = RegionContext::test();
+        let t = |r: Route| route_target(&ctx, &r);
+        assert_eq!(
+            t(Route::builder().gateway_id("local").build()),
+            RouteTarget::Local
+        );
+        assert_eq!(
+            t(Route::builder().gateway_id("igw-1").build()),
+            RouteTarget::InternetGateway(
+                "arn:aws:ec2:us-east-1:111111111111:internet-gateway/igw-1"
+                    .into()
+            )
+        );
+        assert_eq!(
+            t(Route::builder().gateway_id("vgw-1").build()),
+            RouteTarget::Other("vgw-1".into())
+        );
+        assert_eq!(
+            t(Route::builder().nat_gateway_id("nat-1").build()),
+            RouteTarget::NatGateway(
+                "arn:aws:ec2:us-east-1:111111111111:natgateway/nat-1".into()
+            )
+        );
+        assert_eq!(
+            t(Route::builder().vpc_peering_connection_id("pcx-1").build()),
+            RouteTarget::Peering("arn:aws:ec2:us-east-1:111111111111:vpc-peering-connection/pcx-1".into())
+        );
+        assert_eq!(
+            t(Route::builder().instance_id("i-1").build()),
+            RouteTarget::Instance(
+                "arn:aws:ec2:us-east-1:111111111111:instance/i-1".into()
+            )
+        );
+        assert_eq!(
+            t(Route::builder().transit_gateway_id("tgw-1").build()),
+            RouteTarget::Other("tgw-1".into())
+        );
     }
 }
