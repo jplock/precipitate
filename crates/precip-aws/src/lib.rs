@@ -82,7 +82,7 @@ impl Default for Options {
 }
 
 use precip_collect::ProgressSender;
-use precip_collect::emit;
+use precip_collect::{Collected, emit, scan_regions, selected};
 
 /// Loads the default AWS credential chain, the same one the AWS CLI uses.
 pub async fn load_config(profile: Option<&str>) -> SdkConfig {
@@ -137,8 +137,13 @@ pub async fn scan_estate(
     let selected: Vec<accounts::MemberAccount> = members
         .into_iter()
         .filter(|a| a.id != identity.account_id)
-        .filter(|a| opts.accounts.is_empty() || opts.accounts.contains(&a.id))
-        .filter(|a| !opts.exclude_accounts.contains(&a.id))
+        .filter(|a| {
+            selected(
+                &[a.id.as_str(), a.name.as_str()],
+                &opts.accounts,
+                &opts.exclude_accounts,
+            )
+        })
         .collect();
 
     tracing::info!(
@@ -341,111 +346,26 @@ async fn scan_account(
         }
         None => regions,
     };
-    emit(
+    let account = identity.account_id.clone();
+    let (targets, got) = scan_regions(
         &progress,
-        ScanEvent::RegionsPlanned {
-            account_id: identity.account_id.clone(),
-            regions: regions.len(),
-            skipped: skipped.len(),
+        &account,
+        regions,
+        skipped,
+        REGION_CONCURRENCY,
+        |region| {
+            let config = config.clone();
+            let identity = identity.clone();
+            async move { scan_region(&config, identity, region).await }
         },
-    );
-
-    let limit =
-        std::sync::Arc::new(tokio::sync::Semaphore::new(REGION_CONCURRENCY));
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut task_regions = std::collections::HashMap::new();
-    for region in regions {
-        let config = config.clone();
-        let identity = identity.clone();
-        let limit = limit.clone();
-        let progress = progress.clone();
-        let task_region = region.clone();
-        let handle = tasks.spawn(async move {
-            let _permit = limit.acquire_owned().await;
-            let outcome = scan_region(&config, identity.clone(), region).await;
-            emit(
-                &progress,
-                ScanEvent::RegionFinished {
-                    account_id: identity.account_id.clone(),
-                    region: outcome.region.clone(),
-                    status: outcome.status.clone(),
-                    resources: outcome.resources.len(),
-                },
-            );
-            outcome
-        });
-        task_regions.insert(handle.id(), task_region);
+    )
+    .await;
+    AccountOutcome {
+        account_id: account,
+        targets,
+        resources: got.resources,
+        relationships: got.relationships,
     }
-
-    let mut outcomes = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(outcome) => outcomes.push(outcome),
-            Err(e) => {
-                let region = task_regions.remove(&e.id()).unwrap_or_default();
-                tracing::error!(%region, error = %e, "region task panicked");
-                // The region is reported as failed rather than left out,
-                // so the scan does not read as complete.
-                let status =
-                    TargetStatus::Failed(format!("region scan panicked: {e}"));
-                emit(
-                    &progress,
-                    ScanEvent::RegionFinished {
-                        account_id: identity.account_id.clone(),
-                        region: region.clone(),
-                        status: status.clone(),
-                        resources: 0,
-                    },
-                );
-                outcomes.push(RegionOutcome {
-                    region,
-                    status,
-                    resources: Vec::new(),
-                    relationships: Vec::new(),
-                });
-            }
-        }
-    }
-    // Deterministic order regardless of which region finished first.
-    outcomes.sort_by(|a, b| a.region.cmp(&b.region));
-
-    let mut out = AccountOutcome {
-        account_id: identity.account_id.clone(),
-        targets: skipped
-            .into_iter()
-            .map(|region| ScanTarget {
-                account_id: identity.account_id.clone(),
-                region,
-                status: TargetStatus::Empty,
-            })
-            .collect(),
-        resources: Vec::new(),
-        relationships: Vec::new(),
-    };
-    for o in outcomes {
-        out.resources.extend(o.resources);
-        out.relationships.extend(o.relationships);
-        out.targets.push(ScanTarget {
-            account_id: identity.account_id.clone(),
-            region: o.region,
-            status: o.status,
-        });
-    }
-    emit(
-        &progress,
-        ScanEvent::AccountFinished {
-            account_id: identity.account_id.clone(),
-            resources: out.resources.len(),
-        },
-    );
-    out
-}
-
-struct RegionOutcome {
-    region: Region,
-    status: TargetStatus,
-    resources: Vec<Resource>,
-    relationships: Vec<Relationship>,
 }
 
 /// Run every collector for one region. Collectors that do not depend on
@@ -457,22 +377,16 @@ async fn scan_region(
     config: &SdkConfig,
     identity: accounts::CallerIdentity,
     region: Region,
-) -> RegionOutcome {
+) -> (Collected, TargetStatus) {
     let ctx = std::sync::Arc::new(collect::RegionContext {
         config: config
             .to_builder()
             .region(aws_config::Region::new(region.to_string()))
             .build(),
         identity,
-        region: region.clone(),
-    });
-    let (so_far, status) = precip_collect::run(collect::all(), ctx).await;
-    RegionOutcome {
         region,
-        status,
-        resources: so_far.resources,
-        relationships: so_far.relationships,
-    }
+    });
+    precip_collect::run(collect::all(), ctx).await
 }
 
 #[cfg(test)]

@@ -1,0 +1,5 @@
+Allow group precip-readers to inspect compartments in tenancy
+Allow group precip-readers to inspect tenancies in tenancy
+Allow group precip-readers to read instance-family in tenancy
+Allow group precip-readers to read volume-family in tenancy
+Allow group precip-readers to read virtual-network-family in tenancy

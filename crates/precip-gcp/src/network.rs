@@ -12,6 +12,9 @@ use crate::assets::{
 use crate::collect::Batch;
 use crate::id::{i32_at, items_at, name, project, rid, str_at, strs_at};
 use precip_collect::{Collect, CollectError, Collected};
+use precip_types::body::{
+    Peer, Protocol, RouteTarget, RuleAction, TrafficDirection,
+};
 use precip_types::scan::Edge;
 use precip_types::{Arn, Body, body};
 use serde_json::Value;
@@ -36,107 +39,92 @@ impl Collect for Network {
     }
 }
 
-/// A port range as `(from, to)`; none is every port.
-fn ports(range: &str) -> (Option<i32>, Option<i32>) {
+/// A port range as `(from, to)`.
+fn ports(range: &str) -> Option<(i32, i32)> {
     match range.split_once('-') {
-        Some((a, b)) => (a.trim().parse().ok(), b.trim().parse().ok()),
-        None => {
-            let p = range.trim().parse().ok();
-            (p, p)
-        }
+        Some((a, b)) => a.trim().parse().ok().zip(b.trim().parse().ok()),
+        None => range.trim().parse().ok().map(|p| (p, p)),
     }
 }
 
-/// Where a rule's traffic comes from or goes to.
-enum Peer {
-    V4(String),
-    V6(String),
-    /// Instances with a network tag or service account, named
-    /// `tag:<tag>` or `serviceAccount:<email>`.
-    Instances(String),
-}
-
+/// Where a firewall's traffic comes from (ingress) or goes to (egress).
+/// Egress with no destination is everywhere.
 fn peers(d: &Value, egress: bool) -> Vec<Peer> {
-    let range = |r: &&str| {
-        if r.contains(':') {
-            Peer::V6((*r).to_string())
-        } else {
-            Peer::V4((*r).to_string())
-        }
-    };
+    let range = |r: &&str| Peer::IpNet((*r).to_string());
     if egress {
         let ranges = strs_at(d, "/destinationRanges");
         if ranges.is_empty() {
-            return vec![Peer::V4("0.0.0.0/0".into())];
+            return vec![Peer::IpNet("0.0.0.0/0".into())];
         }
         return ranges.iter().map(range).collect();
     }
     let mut out: Vec<Peer> =
         strs_at(d, "/sourceRanges").iter().map(range).collect();
     out.extend(
-        strs_at(d, "/sourceTags")
-            .iter()
-            .map(|t| Peer::Instances(format!("tag:{t}"))),
+        strs_at(d, "/sourceTags").iter().map(|t| Peer::Tag((*t).into())),
     );
     out.extend(
         strs_at(d, "/sourceServiceAccounts")
             .iter()
-            .map(|s| Peer::Instances(format!("serviceAccount:{s}"))),
+            .map(|a| Peer::ServiceAccount((*a).into())),
     );
     out
 }
 
 /// One firewall as one stored rule per protocol entry, port range and
-/// peer, the way EC2 states rules.
-fn rules(firewall: &Arn, d: &Value) -> Vec<body::SecurityGroupRule> {
+/// peer, each with its id: the firewall's own when there is one rule,
+/// else the firewall's with `#<n>`.
+fn rules(firewall: &Arn, d: &Value) -> Vec<(String, body::SecurityGroupRule)> {
     let egress = str_at(d, "/direction").as_deref() == Some("EGRESS");
     let peers = peers(d, egress);
-    let entries: Vec<(bool, &Value)> = items_at(d, "/allowed")
+    let entries: Vec<(RuleAction, &Value)> = items_at(d, "/allowed")
         .iter()
-        .map(|e| (false, e))
-        .chain(items_at(d, "/denied").iter().map(|e| (true, e)))
+        .map(|e| (RuleAction::Allow, e))
+        .chain(items_at(d, "/denied").iter().map(|e| (RuleAction::Deny, e)))
         .collect();
     let mut expanded = Vec::new();
-    for (deny, entry) in &entries {
-        let protocol = match str_at(entry, "/IPProtocol").as_deref() {
-            None | Some("all") => "-1".to_string(),
-            Some(p) => p.to_lowercase(),
-        };
+    for (action, entry) in &entries {
+        let protocol = Protocol::parse(
+            &str_at(entry, "/IPProtocol").unwrap_or_else(|| "all".into()),
+        );
         let ranges = strs_at(entry, "/ports");
-        let ranges = if ranges.is_empty() { vec![""] } else { ranges };
+        let ranges: Vec<Option<(i32, i32)>> = if ranges.is_empty() {
+            vec![None]
+        } else {
+            ranges.iter().map(|r| ports(r)).collect()
+        };
         for range in ranges {
             for peer in &peers {
-                expanded.push((*deny, protocol.clone(), range, peer));
+                expanded.push((*action, protocol.clone(), range, peer));
             }
         }
     }
     let count = expanded.len();
     let mut out = Vec::new();
-    for (deny, protocol, range, peer) in expanded {
-        let rule_id = if count == 1 {
+    for (action, protocol, range, peer) in expanded {
+        let id = if count == 1 {
             firewall.to_string()
         } else {
             format!("{firewall}#{}", out.len() + 1)
         };
-        let (from_port, to_port) = ports(range);
-        let mut r = body::SecurityGroupRule {
-            rule_id,
-            group_id: Some(firewall.to_string()),
-            egress: Some(egress),
-            deny,
-            priority: i32_at(d, "/priority").or(Some(DEFAULT_PRIORITY)),
-            ip_protocol: Some(protocol),
-            from_port,
-            to_port,
-            description: str_at(d, "/description"),
-            ..Default::default()
-        };
-        match peer {
-            Peer::V4(c) => r.cidr_ipv4 = Some(c.clone()),
-            Peer::V6(c) => r.cidr_ipv6 = Some(c.clone()),
-            Peer::Instances(g) => r.referenced_group_id = Some(g.clone()),
-        }
-        out.push(r);
+        out.push((
+            id,
+            body::SecurityGroupRule {
+                group: firewall.to_string(),
+                direction: if egress {
+                    TrafficDirection::Outbound
+                } else {
+                    TrafficDirection::Inbound
+                },
+                action,
+                priority: i32_at(d, "/priority").or(Some(DEFAULT_PRIORITY)),
+                protocol,
+                ports: range,
+                icmp: None,
+                peer: peer.clone(),
+                description: str_at(d, "/description"),
+            },
+        ));
     }
     out
 }
@@ -186,24 +174,33 @@ fn applies(firewall: &Value, network: &Arn, t: &Target) -> bool {
         || accounts.iter().any(|x| t.service_accounts.contains(*x))
 }
 
-/// A route's next hop: an address or peering as given, else the name of
-/// the gateway, instance, load balancer or tunnel.
-fn next_hop(d: &Value) -> Option<String> {
-    str_at(d, "/nextHopIp").or_else(|| str_at(d, "/nextHopPeering")).or_else(
-        || {
-            [
-                "/nextHopGateway",
-                "/nextHopInstance",
-                "/nextHopIlb",
-                "/nextHopVpnTunnel",
-                "/nextHopHub",
-                "/nextHopNetwork",
-            ]
-            .iter()
-            .find_map(|p| str_at(d, p))
-            .map(|h| name(&h).to_string())
-        },
-    )
+/// Where a route sends traffic. The default internet gateway is not a
+/// resource; a peering is named within its network; a load balancer,
+/// VPN tunnel or hub has no Oxide equivalent.
+fn next_hop(network: &Arn, d: &Value) -> RouteTarget {
+    if let Some(ip) = str_at(d, "/nextHopIp") {
+        return RouteTarget::Ip(ip);
+    }
+    if let Some(p) = str_at(d, "/nextHopPeering") {
+        return RouteTarget::Peering(format!("{network}/peerings/{p}"));
+    }
+    if let Some(i) = str_at(d, "/nextHopInstance") {
+        return RouteTarget::Instance(rid(&i).to_string());
+    }
+    if let Some(g) = str_at(d, "/nextHopGateway") {
+        return if name(&g) == "default-internet-gateway" {
+            RouteTarget::Internet
+        } else {
+            RouteTarget::Other(name(&g).to_string())
+        };
+    }
+    match ["/nextHopIlb", "/nextHopVpnTunnel", "/nextHopHub"]
+        .iter()
+        .find_map(|p| str_at(d, p))
+    {
+        Some(other) => RouteTarget::Other(name(&other).to_string()),
+        None => RouteTarget::Local,
+    }
 }
 
 pub(crate) fn assemble(ctx: &Batch) -> Collected {
@@ -228,7 +225,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         out.resources.push(ctx.resource(
             s,
             Body::Subnet(body::Subnet {
-                subnet_id: rid(&s.name).to_string(),
+                name: Some(name(&s.name).to_string()),
                 network_id: network.map(String::from),
                 cidr_block: str_at(d, "/ipCidrRange"),
                 ipv6_cidr_blocks: ipv6,
@@ -245,7 +242,6 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         out.resources.push(ctx.resource(
             net,
             Body::Network(body::Network {
-                network_id: network_id.clone(),
                 cidr_block: legacy.clone(),
                 cidr_blocks: legacy.into_iter().collect(),
                 is_default: Some(own == "default"),
@@ -262,7 +258,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
                     net,
                     &id,
                     Body::PeeringConnection(body::PeeringConnection {
-                        peering_id: id.clone(),
+                        name: Some(peer_name.clone()),
                         status: str_at(peering, "/state"),
                         requester: body::PeeringSide {
                             network_id: Some(network_id.clone()),
@@ -291,8 +287,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         out.resources.push(ctx.resource(
             fw,
             Body::SecurityGroup(body::SecurityGroup {
-                group_id: group.to_string(),
-                group_name: Some(name(&fw.name).to_string()),
+                name: Some(name(&fw.name).to_string()),
                 description: str_at(d, "/description"),
                 network_id: network.as_ref().map(ToString::to_string),
             }),
@@ -301,8 +296,8 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         if d.get("disabled").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        for r in rules(&group, d) {
-            let arn = Arn::from(r.rule_id.as_str());
+        for (id, r) in rules(&group, d) {
+            let arn = Arn::from(id);
             out.relate(arn.clone(), Edge::RuleOf, group.clone());
             out.resources.push(ctx.child(
                 fw,
@@ -332,7 +327,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
                 first,
                 &id,
                 Body::RouteTable(body::RouteTable {
-                    route_table_id: id.clone(),
+                    name: Some(format!("{} routes", name(network.as_str()))),
                     network_id: Some(network.to_string()),
                     main: true,
                     subnets: subnets_of
@@ -343,7 +338,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
                         .iter()
                         .map(|r| body::Route {
                             destination: str_at(&r.resource.data, "/destRange"),
-                            target: next_hop(&r.resource.data),
+                            target: next_hop(&network, &r.resource.data),
                             state: None,
                         })
                         .collect(),
@@ -363,7 +358,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
                     router,
                     &id,
                     Body::NatGateway(body::NatGateway {
-                        nat_gateway_id: id.clone(),
+                        name: Some(nat_name.clone()),
                         network_id: network.clone(),
                         subnet_id: items_at(nat, "/subnetworks")
                             .iter()
@@ -535,13 +530,20 @@ mod tests {
             "four web rules, one egress deny, none disabled"
         );
         let web = &rules[..4];
-        assert!(web.iter().all(|r| !r.deny && r.priority == Some(900)));
-        assert_eq!(web[2].from_port, Some(443));
-        assert_eq!(web[1].cidr_ipv6.as_deref(), Some("::/0"));
+        assert!(
+            web.iter()
+                .all(|r| r.action == RuleAction::Allow
+                    && r.priority == Some(900))
+        );
+        assert_eq!(web[2].ports, Some((443, 443)));
+        assert_eq!(web[1].peer, Peer::IpNet("::/0".into()));
         let out_deny = rules[4];
-        assert!(out_deny.deny && out_deny.egress == Some(true));
-        assert_eq!(out_deny.ip_protocol.as_deref(), Some("-1"));
-        assert_eq!(out_deny.cidr_ipv4.as_deref(), Some("0.0.0.0/0"));
+        assert_eq!(
+            (out_deny.action, out_deny.direction),
+            (RuleAction::Deny, TrafficDirection::Outbound)
+        );
+        assert_eq!(out_deny.protocol, Protocol::All);
+        assert_eq!(out_deny.peer, Peer::IpNet("0.0.0.0/0".into()));
         assert_eq!(out_deny.priority, Some(DEFAULT_PRIORITY));
         let applied: BTreeSet<(String, String)> = out
             .relationships
@@ -572,27 +574,18 @@ mod tests {
             "allowed": [{"IPProtocol": "tcp", "ports": ["8000-8080"]}],
         });
         let got = rules(&Arn::from("fw"), &d);
-        assert_eq!(got[0].referenced_group_id.as_deref(), Some("tag:lb"));
-        assert_eq!(
-            got[1].referenced_group_id.as_deref(),
-            Some("serviceAccount:a@x")
-        );
-        assert_eq!(
-            (got[0].from_port, got[0].to_port),
-            (Some(8000), Some(8080))
-        );
-        assert_eq!(got[0].rule_id, "fw#1");
+        assert_eq!(got[0].1.peer, Peer::Tag("lb".into()));
+        assert_eq!(got[1].1.peer, Peer::ServiceAccount("a@x".into()));
+        assert_eq!(got[0].1.ports, Some((8000, 8080)));
+        assert_eq!(got[0].0, "fw#1");
         let one = rules(
             &Arn::from("fw"),
             &serde_json::json!({
                 "sourceRanges": ["10.0.0.0/8"], "allowed": [{"IPProtocol": "udp"}],
             }),
         );
-        assert_eq!(
-            one[0].rule_id, "fw",
-            "a single rule keeps the firewall's id"
-        );
-        assert_eq!((one[0].from_port, one[0].to_port), (None, None));
+        assert_eq!(one[0].0, "fw", "a single rule keeps the firewall's id");
+        assert_eq!(one[0].1.ports, None);
     }
 
     #[test]
@@ -604,11 +597,8 @@ mod tests {
             panic!()
         };
         assert_eq!(rt.routes.len(), 2);
-        assert_eq!(
-            rt.routes[0].target.as_deref(),
-            Some("default-internet-gateway")
-        );
-        assert_eq!(rt.routes[1].target.as_deref(), Some("10.0.1.9"));
+        assert_eq!(rt.routes[0].target, RouteTarget::Internet);
+        assert_eq!(rt.routes[1].target, RouteTarget::Ip("10.0.1.9".into()));
         assert_eq!(
             rt.subnets,
             [format!("{P}/regions/us-east1/subnetworks/web")]
@@ -617,9 +607,11 @@ mod tests {
         assert_eq!(nat.region, "us-east1");
         let Body::NatGateway(n) = &nat.body else { panic!() };
         assert_eq!(
-            n.nat_gateway_id,
+            nat.arn,
             format!("{P}/regions/us-east1/routers/nat-router/nats/egress")
+                .as_str()
         );
+        assert_eq!(n.name.as_deref(), Some("egress"));
         assert_eq!(
             n.public_ips,
             [format!("{P}/regions/us-east1/addresses/nat-ip")]
@@ -627,6 +619,42 @@ mod tests {
         assert_eq!(
             n.subnet_id.as_deref(),
             Some(format!("{P}/regions/us-east1/subnetworks/web").as_str())
+        );
+    }
+
+    #[test]
+    fn next_hops_name_their_target() {
+        let net = Arn::from(format!("{P}/global/networks/prod"));
+        let hop = |v: serde_json::Value| next_hop(&net, &v);
+        assert_eq!(
+            hop(serde_json::json!({"nextHopPeering": "to-shared"})),
+            RouteTarget::Peering(format!(
+                "{P}/global/networks/prod/peerings/to-shared"
+            ))
+        );
+        assert_eq!(
+            hop(
+                serde_json::json!({"nextHopInstance": format!("{SELF}/zones/us-east1-b/instances/nat-vm")})
+            ),
+            RouteTarget::Instance(format!(
+                "{P}/zones/us-east1-b/instances/nat-vm"
+            ))
+        );
+        assert_eq!(
+            hop(
+                serde_json::json!({"nextHopVpnTunnel": format!("{SELF}/regions/us-east1/vpnTunnels/t1")})
+            ),
+            RouteTarget::Other("t1".into())
+        );
+        assert_eq!(
+            hop(
+                serde_json::json!({"nextHopGateway": format!("{SELF}/global/gateways/other")})
+            ),
+            RouteTarget::Other("other".into())
+        );
+        assert_eq!(
+            hop(serde_json::json!({"nextHopNetwork": "x"})),
+            RouteTarget::Local
         );
     }
 }

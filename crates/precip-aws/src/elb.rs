@@ -35,9 +35,10 @@ impl Collect for LoadBalancers {
                         name: own(lb.load_balancer_name()),
                         lb_type: own(lb.r#type().map(|t| t.as_str())),
                         scheme: own(lb.scheme().map(|s| s.as_str())),
-                        network_id: own(lb.vpc_id()),
+                        network_id: ctx.refer(ArnType::Vpc, lb.vpc_id()),
                         dns_name: own(lb.dns_name()),
-                        security_groups: owned(
+                        security_groups: ctx.refer_all(
+                            ArnType::SecurityGroup,
                             lb.security_groups().iter().map(String::as_str),
                         ),
                     }),
@@ -104,7 +105,7 @@ impl Collect for TargetGroups {
                         target_type: own(tg.target_type().map(|t| t.as_str())),
                         protocol: own(tg.protocol().map(|p| p.as_str())),
                         port: tg.port(),
-                        network_id: own(tg.vpc_id()),
+                        network_id: ctx.refer(ArnType::Vpc, tg.vpc_id()),
                         load_balancers: owned(
                             tg.load_balancer_arns().iter().map(String::as_str),
                         ),

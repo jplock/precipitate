@@ -76,8 +76,16 @@ async fn main() -> anyhow::Result<()> {
             let store = env.store("schedule").await?;
             schedule::run(&store, command).await
         }
-        Some(Command::Export { what, out, format, sizing }) => {
-            commands::export(&env, what, out, format, &sizing).await
+        Some(Command::Export {
+            what,
+            out,
+            format,
+            workload,
+            environment,
+            sizing,
+        }) => {
+            let pair = workload.zip(environment);
+            commands::export(&env, what, out, format, pair, &sizing).await
         }
         Some(Command::Profiles { use_profile }) => {
             commands::profiles(&env, use_profile).await

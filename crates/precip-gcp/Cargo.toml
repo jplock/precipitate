@@ -15,7 +15,6 @@ http = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std"] }
 precip-collect.workspace = true
 precip-types.workspace = true
-reqwest = { workspace = true, features = ["rustls", "gzip"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true, features = ["std"] }
@@ -24,6 +23,7 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 uuid = { workspace = true, features = ["std", "v7"] }
 
 [dev-dependencies]
+precip-collect = { workspace = true, features = ["fake"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
 [lints]

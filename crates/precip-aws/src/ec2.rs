@@ -8,8 +8,8 @@ use precip_types::{Body, body};
 use crate::ScanError;
 use crate::arn::ArnType;
 use crate::collect::{
-    Collect, CollectError, Collected, RegionContext, Stage, next_page, own,
-    owned, tags,
+    Collect, CollectError, Collected, RegionContext, Stage, name_tag,
+    next_page, own, owned, tags,
 };
 
 pub(crate) async fn enabled_regions(
@@ -73,22 +73,41 @@ impl Collect for Instances {
                             );
                         }
                     }
-                    if let Some(subnet) = inst.subnet_id() {
-                        out.relate(
-                            arn.clone(),
-                            Edge::InSubnet,
-                            ctx.arn(ArnType::Subnet, subnet),
-                        );
-                    }
                     let mappings = inst.block_device_mappings();
                     let local_disk_count =
                         mappings.iter().filter(|b| b.ebs().is_none()).count();
+                    let boot_disk = mappings
+                        .iter()
+                        .find(|b| {
+                            b.device_name().is_some()
+                                && b.device_name() == inst.root_device_name()
+                        })
+                        .and_then(|b| b.ebs()?.volume_id())
+                        .map(|v| ctx.arn(ArnType::Volume, v).to_string());
+                    // The subnet of each interface, primary first.
+                    let mut nics: Vec<(i32, &str)> = inst
+                        .network_interfaces()
+                        .iter()
+                        .filter_map(|n| {
+                            let index = n
+                                .attachment()
+                                .and_then(|a| a.device_index())
+                                .unwrap_or(i32::MAX);
+                            Some((index, n.subnet_id()?))
+                        })
+                        .collect();
+                    nics.sort_unstable();
+                    let subnets = nics
+                        .iter()
+                        .map(|(_, s)| ctx.arn(ArnType::Subnet, s).to_string())
+                        .collect();
+                    let tags = tags(inst.tags());
                     out.resources.push(
                         ctx.resource(
                             arn,
-                            tags(inst.tags()),
+                            tags.clone(),
                             Body::Instance(body::Instance {
-                                instance_id: id.to_string(),
+                                name: name_tag(&tags),
                                 instance_type: own(inst
                                     .instance_type()
                                     .map(|t| t.as_str())),
@@ -97,9 +116,12 @@ impl Collect for Instances {
                                     .map(|a| a.as_str())),
                                 platform: own(inst.platform_details()),
                                 state: own(state.map(|n| n.as_str())),
-                                image_id: own(inst.image_id()),
-                                subnet_id: own(inst.subnet_id()),
-                                network_id: own(inst.vpc_id()),
+                                image_id: ctx
+                                    .refer(ArnType::Image, inst.image_id()),
+                                subnets,
+                                network_id: ctx
+                                    .refer(ArnType::Vpc, inst.vpc_id()),
+                                boot_disk,
                                 // The mode the instance booted in, else the
                                 // one its image asks for.
                                 boot_mode: own(inst
@@ -226,12 +248,13 @@ impl Collect for Volumes {
         while let Some(page) = next_page(Self::API, &mut pages).await? {
             for vol in page.volumes() {
                 let Some(id) = vol.volume_id() else { continue };
+                let tags = tags(vol.tags());
                 out.resources.push(
                     ctx.resource(
                         ctx.arn(ArnType::Volume, id),
-                        tags(vol.tags()),
+                        tags.clone(),
                         Body::Volume(body::Volume {
-                            volume_id: id.to_string(),
+                            name: name_tag(&tags),
                             size_gib: vol.size(),
                             volume_type: own(vol
                                 .volume_type()
@@ -241,7 +264,8 @@ impl Collect for Volumes {
                             encrypted: vol.encrypted(),
                             encryption_key_id: own(vol.kms_key_id()),
                             state: own(vol.state().map(|s| s.as_str())),
-                            attached_to: owned(
+                            attached_to: ctx.refer_all(
+                                ArnType::Instance,
                                 vol.attachments()
                                     .iter()
                                     .filter_map(|a| a.instance_id()),
@@ -269,8 +293,13 @@ impl Collect for Images {
         ctx: &RegionContext,
         prior: &Collected,
     ) -> Result<Collected, CollectError> {
-        let ids =
-            prior.distinct(|b| b.launch_source().and_then(|(_, image)| image));
+        // Launch sources name images by ARN; the API takes the AMI id.
+        let ids = prior.distinct(|b| {
+            b.launch_source()
+                .and_then(|(_, image)| image)
+                .and_then(|arn| arn.rsplit_once("image/"))
+                .map(|(_, id)| id)
+        });
         let mut out = Collected::default();
         if ids.is_empty() {
             return Ok(out);
@@ -290,7 +319,6 @@ impl Collect for Images {
                     ctx.arn(ArnType::Image, id),
                     tags(img.tags()),
                     Body::Image(body::Image {
-                        image_id: id.to_string(),
                         name: own(img.name()),
                         owner_id: own(img.owner_id()),
                         owner_alias: own(img.image_owner_alias()),
@@ -337,6 +365,7 @@ impl Collect for Addresses {
         for a in page.addresses() {
             let Some(id) = a.allocation_id() else { continue };
             let arn = ctx.arn(ArnType::ElasticIp, id);
+            let tags = tags(a.tags());
             if let Some(instance) = a.instance_id() {
                 out.relate(
                     arn.clone(),
@@ -346,11 +375,11 @@ impl Collect for Addresses {
             }
             out.resources.push(ctx.resource(
                 arn,
-                tags(a.tags()),
+                tags.clone(),
                 Body::PublicIp(body::PublicIp {
-                    allocation_id: id.to_string(),
+                    name: name_tag(&tags).or_else(|| own(Some(id))),
                     public_ip: own(a.public_ip()),
-                    instance_id: own(a.instance_id()),
+                    instance: ctx.refer(ArnType::Instance, a.instance_id()),
                     network_interface_id: own(a.network_interface_id()),
                     domain: own(a.domain().map(|d| d.as_str())),
                 }),

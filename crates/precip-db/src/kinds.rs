@@ -12,6 +12,7 @@ precip_types::named_enum! {
         AwsScanOptions = "scan.options.aws",
         AzureScanOptions = "scan.options.azure",
         GcpScanOptions = "scan.options.gcp",
+        OciScanOptions = "scan.options.oci",
         SizingProfile = "sizing.profile",
         DefaultDisposition = "default_disposition",
         PerDay = "schedule.per_day",

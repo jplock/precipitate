@@ -99,7 +99,7 @@ pub(crate) mod test {
     //! Batches built from JSON assets.
 
     use super::*;
-    use crate::api::fake::Script;
+    use precip_collect::http::fake::Script;
 
     pub(crate) fn batch(assets: serde_json::Value) -> Batch {
         batch_with(assets, Arc::new(Script::default()))

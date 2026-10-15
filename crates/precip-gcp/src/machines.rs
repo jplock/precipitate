@@ -195,8 +195,8 @@ fn instance_type(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::fake::{Script, ok, status};
     use crate::collect::test::batch_with;
+    use precip_collect::http::fake::{Script, ok, status};
     use precip_types::scan::ResourceKind;
     use std::sync::Arc;
 
@@ -259,7 +259,7 @@ mod tests {
             ..Default::default()
         };
         let out = block_on(MachineTypes.collect(&ctx, &prior)).unwrap();
-        let sent = script.sent();
+        let sent = script.urls();
         assert_eq!(sent.len(), 1, "one filtered call");
         assert!(sent[0].contains(
             "/compute/v1/projects/shop/aggregated/machineTypes?filter="
@@ -299,7 +299,7 @@ mod tests {
         let none = block_on(MachineTypes.collect(&ctx, &Collected::default()))
             .unwrap();
         assert!(none.resources.is_empty());
-        assert!(script.sent().is_empty());
+        assert!(script.urls().is_empty());
         let prior = Collected {
             resources: vec![r("us-east1", "shop", vm("e2-medium"))],
             ..Default::default()

@@ -25,9 +25,9 @@ use azure_identity::{
     ClientSecretCredentialOptions, DeveloperToolsCredential,
     WorkloadIdentityCredential, WorkloadIdentityCredentialOptions,
 };
-use precip_collect::{ProgressSender, emit};
-use precip_types::scan::{ScanTarget, TargetStatus};
-use precip_types::{AccountId, Provider, Region, Scan, ScanEvent};
+use precip_collect::{ProgressSender, emit, finish_batch, selected};
+use precip_types::scan::TargetStatus;
+use precip_types::{AccountId, Provider, Scan, ScanEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -230,44 +230,9 @@ async fn scan_with(
             subscriptions: batch.iter().map(|s| s.id().to_string()).collect(),
         });
         let (got, status) = precip_collect::run(collect::all(), ctx).await;
-        let mut per_subscription: HashMap<&str, usize> = HashMap::new();
-        for r in &got.resources {
-            *per_subscription.entry(r.account_id.as_str()).or_default() += 1;
-        }
-        for s in batch {
-            let id = s.id();
-            let resources =
-                per_subscription.get(id.as_str()).copied().unwrap_or(0);
-            emit(
-                &progress,
-                ScanEvent::RegionsPlanned {
-                    account_id: id.clone(),
-                    regions: 1,
-                    skipped: 0,
-                },
-            );
-            emit(
-                &progress,
-                ScanEvent::RegionFinished {
-                    account_id: id.clone(),
-                    region: Region::every(),
-                    status: status.clone(),
-                    resources,
-                },
-            );
-            emit(
-                &progress,
-                ScanEvent::AccountFinished {
-                    account_id: id.clone(),
-                    resources,
-                },
-            );
-            scan.targets.push(ScanTarget {
-                account_id: id,
-                region: Region::every(),
-                status: status.clone(),
-            });
-        }
+        let accounts: Vec<AccountId> =
+            batch.iter().map(Subscription::id).collect();
+        scan.targets.extend(finish_batch(&progress, &accounts, &got, &status));
         scan.resources.extend(got.resources);
         scan.relationships.extend(got.relationships);
     }
@@ -293,18 +258,16 @@ fn select(
     parents: &HashMap<String, Parent>,
     opts: &Options,
 ) -> Vec<Subscription> {
-    let lower = |ids: &[AccountId]| -> Vec<String> {
-        ids.iter().map(|i| i.as_str().to_lowercase()).collect()
-    };
-    let only = lower(&opts.subscriptions);
-    let except = lower(&opts.exclude_subscriptions);
     let mut out = Vec::new();
     for mut s in all {
         let id = s.id().to_string();
         s.parent = parents.get(&id).cloned();
         let keep = s.is_readable()
-            && (only.is_empty() || only.contains(&id))
-            && !except.contains(&id)
+            && selected(
+                &[id.as_str(), s.display_name.as_str()],
+                &opts.subscriptions,
+                &opts.exclude_subscriptions,
+            )
             && opts
                 .tenant
                 .as_deref()
@@ -400,6 +363,11 @@ mod tests {
             ["b"],
             "disabled stays out"
         );
+        let by_name = Options {
+            subscriptions: vec!["c-NAME".into()],
+            ..Default::default()
+        };
+        assert_eq!(ids(select(all(), &parents, &by_name)), ["c"]);
         let except = Options {
             exclude_subscriptions: vec!["A".into()],
             ..Default::default()

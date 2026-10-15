@@ -12,6 +12,7 @@ pub enum Provider {
     Aws = "aws",
     Azure = "azure",
     Gcp = "gcp",
+    Oci = "oci",
 }
 }
 
@@ -24,7 +25,8 @@ pub struct Scan {
     pub started: Timestamp,
     pub finished: Option<Timestamp>,
     /// The identity the scan ran as: an AWS principal ARN, an Azure
-    /// principal's sign-in name or id, or a Google account's email.
+    /// principal's sign-in name or id, a Google account's email, or an
+    /// OCI user's OCID.
     pub caller: String,
     pub targets: Vec<ScanTarget>,
     pub resources: Vec<Resource>,
@@ -72,8 +74,9 @@ impl TargetStatus {
 
 crate::named_enum! {
 pub enum ResourceKind {
-    /// An AWS account, Azure subscription or Google Cloud project, with
-    /// its OU, management group or folder. Region is `global`.
+    /// An AWS account, Azure subscription, Google Cloud project or OCI
+    /// compartment, with its OU, management group, folder or parent
+    /// compartment. Region is `global`.
     Account = "account",
     Instance = "instance",
     /// vCPU and memory for a machine size seen in the region, under a
@@ -194,7 +197,6 @@ pub enum Edge {
     MemberOfScaleGroup = "member_of_scale_group",
     InDeploymentGroup = "in_deployment_group",
     TargetOf = "target_of",
-    InSubnet = "in_subnet",
     HasSecurityGroup = "has_security_group",
     /// Security group rule to the group it belongs to.
     RuleOf = "rule_of",
@@ -274,13 +276,12 @@ mod tests {
 
     #[test]
     fn stored_bodies_round_trip_and_tolerate_missing_fields() {
-        let stored =
-            serde_json::json!({"instance_id": "i-1", "state": "running"});
+        let stored = serde_json::json!({"name": "i-1", "state": "running"});
         let b = Body::from_value(ResourceKind::Instance, stored).unwrap();
         let Body::Instance(i) = &b else { panic!("wrong kind") };
         assert_eq!(i.state.as_deref(), Some("running"));
         assert_eq!(i.network_interface_count, 0, "missing fields default");
-        assert_eq!(b.to_value().unwrap()["instance_id"], "i-1");
+        assert_eq!(b.to_value().unwrap()["name"], "i-1");
         assert!(
             Body::from_value(
                 ResourceKind::ManagedService,
@@ -296,7 +297,7 @@ mod tests {
     #[test]
     fn bodies_store_flat_objects_with_their_field_names() {
         let instance = Body::Instance(body::Instance {
-            instance_id: "i-1".into(),
+            name: Some("i-1".into()),
             instance_type: Some("m5.large".into()),
             network_id: Some("vpc-1".into()),
             volume_count: 2,
@@ -305,14 +306,15 @@ mod tests {
         assert_eq!(
             instance.to_value().unwrap(),
             serde_json::json!({
-                "instance_id": "i-1",
+                "name": "i-1",
                 "instance_type": "m5.large",
                 "architecture": null,
                 "platform": null,
                 "state": null,
                 "image_id": null,
-                "subnet_id": null,
+                "subnets": [],
                 "network_id": "vpc-1",
+                "boot_disk": null,
                 "boot_mode": null,
                 "launch_time": null,
                 "volume_count": 2,
@@ -365,11 +367,88 @@ mod tests {
         );
     }
 
+    /// A rule is stored in Oxide's terms, with its peer and protocol
+    /// named by kind.
+    #[test]
+    fn rules_store_direction_action_protocol_and_peer() {
+        let rule = Body::SecurityGroupRule(body::SecurityGroupRule {
+            group: "sg".into(),
+            direction: body::TrafficDirection::Inbound,
+            action: body::RuleAction::Deny,
+            priority: Some(100),
+            protocol: body::Protocol::Tcp,
+            ports: Some((22, 22)),
+            icmp: None,
+            peer: body::Peer::IpNet("10.0.0.0/8".into()),
+            description: None,
+        });
+        let v = rule.to_value().unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "group": "sg",
+                "direction": "inbound",
+                "action": "deny",
+                "priority": 100,
+                "protocol": "tcp",
+                "ports": [22, 22],
+                "icmp": null,
+                "peer": {"ip_net": "10.0.0.0/8"},
+                "description": null,
+            })
+        );
+        assert_eq!(
+            Body::from_value(ResourceKind::SecurityGroupRule, v).unwrap(),
+            rule
+        );
+        let other =
+            serde_json::to_value(body::Protocol::Other("gre".into())).unwrap();
+        assert_eq!(other, serde_json::json!({"other": "gre"}));
+        let route = serde_json::to_value(body::Route {
+            destination: Some("0.0.0.0/0".into()),
+            target: body::RouteTarget::InternetGateway("igw".into()),
+            state: None,
+        })
+        .unwrap();
+        assert_eq!(
+            route["target"],
+            serde_json::json!({"internet_gateway": "igw"})
+        );
+    }
+
+    #[test]
+    fn protocols_parse_from_names_and_numbers() {
+        use body::Protocol;
+        for (s, p) in [
+            ("-1", Protocol::All),
+            ("*", Protocol::All),
+            ("TCP", Protocol::Tcp),
+            ("6", Protocol::Tcp),
+            ("udp", Protocol::Udp),
+            ("17", Protocol::Udp),
+            ("Icmp", Protocol::Icmp),
+            ("1", Protocol::Icmp),
+            ("icmpv6", Protocol::Icmp6),
+            ("58", Protocol::Icmp6),
+            ("esp", Protocol::Other("esp".into())),
+        ] {
+            assert_eq!(Protocol::parse(s), p, "{s}");
+        }
+    }
+
     #[test]
     fn every_kind_has_a_body_with_the_same_name() {
         for kind in ResourceKind::ALL {
+            // These two have required fields; every other body defaults.
             let value = if *kind == ResourceKind::ManagedService {
                 serde_json::json!({"service": "kubernetes", "product": "eks"})
+            } else if *kind == ResourceKind::SecurityGroupRule {
+                serde_json::json!({
+                    "group": "sg", "direction": "inbound", "action": "allow",
+                    "priority": null, "protocol": "all", "ports": null,
+                    "icmp": null, "peer": {"ip_net": "0.0.0.0/0"},
+                    "description": null,
+                })
             } else {
                 serde_json::json!({})
             };

@@ -1,6 +1,7 @@
 //! Popups, drawn over the tab in stack order.
 
 use super::{accent, dim, short_date, short_span, value, warn};
+use crate::workloads::merge_preview;
 use crate::{
     ActionMenu, App, DISPOSITIONS, DatePicker, DependsPicker,
     DispositionPicker, ExportPrompt, Fields, HistoryView, HolidayPicker,
@@ -8,6 +9,7 @@ use crate::{
     WEEKDAY_ROWS, WeekdayPicker, disposition_help,
 };
 use precip_engine::schedule::{WeekdayPreset, Weekdays, day_name};
+use precip_types::{WorkloadName, fold_chain};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, Padding, Paragraph,
@@ -31,6 +33,7 @@ pub(crate) fn draw_date_picker(app: &mut App, frame: &mut Frame) {
         .enumerate()
         .map(|(i, d)| {
             ListItem::new(Line::from(vec![
+                key_label(i),
                 Span::styled(
                     format!("{d}  {}", day_name(d.weekday())),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -62,7 +65,7 @@ pub(crate) fn draw_date_picker(app: &mut App, frame: &mut Frame) {
                         accent().add_modifier(Modifier::BOLD),
                     ))
                     .title_bottom(Span::styled(
-                        " enter to confirm   esc to cancel ",
+                        " a number or enter to confirm   esc to cancel ",
                         dim(),
                     ))
                     .padding(Padding::new(1, 1, 1, 0)),
@@ -71,6 +74,17 @@ pub(crate) fn draw_date_picker(app: &mut App, frame: &mut Frame) {
         popup,
         &mut p.state,
     );
+}
+
+/// The number key that picks row `i`, as a label: `[1]` to `[9]`, `[0]`
+/// for the tenth row, and blank beyond.
+pub(crate) fn key_label(i: usize) -> Span<'static> {
+    let text = match i {
+        0..=8 => format!("[{}] ", i + 1),
+        9 => "[0] ".to_string(),
+        _ => "    ".to_string(),
+    };
+    Span::styled(text, accent())
 }
 
 /// A centred rectangle for a popup, clamped to the terminal.
@@ -113,13 +127,17 @@ pub(crate) fn draw_action_menu(app: &mut App, frame: &mut Frame) {
     let items: Vec<ListItem> = m
         .actions
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             ListItem::new(vec![
-                Line::from(Span::styled(
-                    a.label(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(format!("  {}", a.help()), dim())),
+                Line::from(vec![
+                    key_label(i),
+                    Span::styled(
+                        a.label(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(Span::styled(format!("      {}", a.help()), dim())),
             ])
         })
         .collect();
@@ -128,7 +146,9 @@ pub(crate) fn draw_action_menu(app: &mut App, frame: &mut Frame) {
             format!("{}? enter again to confirm, esc to go back", a.label()),
             warn(),
         ),
-        None => ("enter to choose   esc to close".to_string(), dim()),
+        None => {
+            ("a number or enter to choose   esc to close".to_string(), dim())
+        }
     };
     frame.render_stateful_widget(
         List::new(items)
@@ -450,9 +470,11 @@ pub(crate) fn draw_holiday_picker(app: &mut App, frame: &mut Frame) {
         .holidays
         .iter()
         .zip(&p.chosen)
-        .map(|(h, on)| {
+        .enumerate()
+        .map(|(i, (h, on))| {
             let mark = if *on { "[x] " } else { "[ ] " };
             ListItem::new(Line::from(vec![
+                key_label(i),
                 Span::styled(mark, if *on { accent() } else { dim() }),
                 Span::raw(format!("{:<8}", short_date(h.date, today))),
                 Span::raw(h.name),
@@ -463,7 +485,7 @@ pub(crate) fn draw_holiday_picker(app: &mut App, frame: &mut Frame) {
         List::new(items)
             .block(popup_block(
                 format!("Which US federal holidays of {} do you observe?", p.year),
-                "space to tick or untick   enter to add the ticked ones   esc to cancel".into(),
+                "space or a number to tick   enter to add the ticked ones   esc to cancel".into(),
                 dim(),
             ))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
@@ -482,12 +504,17 @@ pub(crate) fn draw_reason_picker(app: &mut App, frame: &mut Frame) {
     frame.render_widget(Clear, popup);
     let mut items: Vec<ListItem> = precip_db::RESCHEDULE_REASONS
         .iter()
-        .map(|r| ListItem::new(Line::from((*r).to_string())))
+        .enumerate()
+        .map(|(i, r)| {
+            ListItem::new(Line::from(vec![key_label(i), Span::raw(*r)]))
+        })
         .collect();
-    items.push(ListItem::new(Line::from(match &p.custom {
+    let mut other = vec![key_label(items.len())];
+    other.extend(match &p.custom {
         Some(text) => vec![Span::raw("other: "), value(format!("{text}_"))],
         None => vec![Span::styled("other, typed in", dim())],
-    })));
+    });
+    items.push(ListItem::new(Line::from(other)));
     let (what, title) = match &p.pending {
         crate::Pending::Missed { workload, environment } => {
             ("didn't happen", format!("{workload} / {environment}"))
@@ -499,7 +526,7 @@ pub(crate) fn draw_reason_picker(app: &mut App, frame: &mut Frame) {
     let hint = if p.custom.is_some() {
         "type the reason, enter to save   esc to pick from the list"
     } else {
-        "enter to choose   esc to cancel"
+        "a number or enter to choose   esc to cancel"
     };
     frame.render_stateful_widget(
         List::new(items)
@@ -525,13 +552,19 @@ pub(crate) fn draw_depends_picker(app: &mut App, frame: &mut Frame) {
     let items: Vec<ListItem> = p
         .candidates
         .iter()
-        .map(|pair| ListItem::new(Line::from(pair.to_string())))
+        .enumerate()
+        .map(|(i, pair)| {
+            ListItem::new(Line::from(vec![
+                key_label(i),
+                Span::raw(pair.to_string()),
+            ]))
+        })
         .collect();
     frame.render_stateful_widget(
         List::new(items)
             .block(popup_block(
                 "Wait for which pair?".into(),
-                "enter to choose   esc to cancel".into(),
+                "a number or enter to choose   esc to cancel".into(),
                 dim(),
             ))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
@@ -542,18 +575,77 @@ pub(crate) fn draw_depends_picker(app: &mut App, frame: &mut Frame) {
 
 pub(crate) fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
     let Some(p) = app.popups.get::<MergePrompt>() else { return };
-    let popup = popup_rect(frame, 72, 6);
-    frame.render_widget(Clear, popup);
-    let lines = vec![
+    let typed = p.text.trim();
+    // Resources end in the last workload of any folds after the typed one.
+    let chain = fold_chain(&app.folds, &WorkloadName::from(typed));
+    let loops = chain.iter().any(|w| w.as_str() == p.alias);
+    let last = chain.last().map_or(typed, WorkloadName::as_str);
+    let into = if loops { typed } else { last };
+    let landing = merge_preview(&app.workloads, &p.alias, into);
+    let mut lines = vec![
         Line::from(vec![
             Span::raw(format!("{} is really part of ", p.alias)),
             value(format!("{}_", p.text)),
         ]),
-        Line::from(Span::styled(
-            "Its resources move to that workload when the scan is regrouped.",
-            dim(),
-        )),
+        Line::from(""),
     ];
+    let same = typed == p.alias;
+    if same {
+        lines.push(Line::from(Span::styled(
+            "  That is this workload; saving changes nothing.",
+            dim(),
+        )));
+    } else if loops {
+        let path: Vec<&str> = chain.iter().map(WorkloadName::as_str).collect();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {typed} is already folded into {}: {}. That would loop.",
+                p.alias,
+                path.join(" → ")
+            ),
+            warn(),
+        )));
+    } else if into != typed {
+        lines.push(Line::from(Span::styled(
+            format!("  {typed} is folded into {into}, so these land there."),
+            dim(),
+        )));
+    }
+    // Each environment keeps its name; only the workload changes.
+    for (env, exists) in landing.iter().filter(|_| !same && !loops) {
+        let target = if into.is_empty() { "?" } else { into };
+        let mut spans = vec![
+            Span::raw(format!("  {env:<12}")),
+            Span::styled("→ ", dim()),
+            Span::raw(format!("{target} / {env}")),
+        ];
+        if !into.is_empty() {
+            spans.push(Span::styled(
+                if *exists {
+                    "   joins the existing pair"
+                } else {
+                    "   becomes a new pair"
+                },
+                dim(),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Resources move when the scan is regrouped and keep their environment.",
+        dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "The {} pairs' dispositions and migration settings stay behind.",
+            p.alias
+        ),
+        dim(),
+    )));
+    let height = u16::try_from(landing.len()).unwrap_or(4) + 9;
+    let popup = popup_rect(frame, 80, height);
+    frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines).block(popup_block(
             "Fold into another workload".into(),
@@ -665,7 +757,10 @@ pub(crate) fn draw_weekday_picker(app: &mut App, frame: &mut Frame) {
             };
             let mark = if on { "[x] " } else { "[ ] " };
             let style = if on { accent() } else { Style::default() };
-            let mut spans = vec![Span::styled(format!("{mark}{label}"), style)];
+            let mut spans = vec![
+                key_label(i),
+                Span::styled(format!("{mark}{label}"), style),
+            ];
             if i == 2 {
                 spans.push(Span::styled("   presets above, days below", dim()));
             }
@@ -683,7 +778,7 @@ pub(crate) fn draw_weekday_picker(app: &mut App, frame: &mut Frame) {
                         accent().add_modifier(Modifier::BOLD),
                     ))
                     .title_bottom(Span::styled(
-                        " space to toggle   enter to save ",
+                        " space or a number to toggle   enter to save ",
                         dim(),
                     ))
                     .padding(Padding::new(1, 1, 1, 0)),
@@ -712,7 +807,7 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
     };
     let longest_help = DISPOSITIONS
         .iter()
-        .map(|d| 12 + disposition_help(*d).chars().count())
+        .map(|d| 16 + disposition_help(*d).chars().count())
         .max()
         .unwrap_or(40);
     let wanted = longest_help.max(title.chars().count()) + 6;
@@ -746,6 +841,7 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
             ))));
         }
         items.push(ListItem::new(Line::from(vec![
+            key_label(i),
             Span::styled(
                 format!("{d:<12}"),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -768,7 +864,7 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
                         accent().add_modifier(Modifier::BOLD),
                     ))
                     .title_bottom(Span::styled(
-                        " enter to set   esc to cancel ",
+                        " a number or enter to set   esc to cancel ",
                         dim(),
                     ))
                     .padding(Padding::new(1, 1, 1, 0)),

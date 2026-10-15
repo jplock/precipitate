@@ -3,7 +3,8 @@
 //! or a project) with its full configuration, so a scope costs a few calls
 //! however many projects and regions it covers.
 
-use crate::api::{ApiError, Gcp};
+use crate::api::Gcp;
+use precip_collect::http::HttpError;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -118,7 +119,7 @@ pub(crate) async fn list(
     gcp: &Gcp,
     scope: &str,
     types: &[&str],
-) -> Result<Vec<Asset>, ApiError> {
+) -> Result<Vec<Asset>, HttpError> {
     let mut url = gcp.url("cloudasset", &format!("/v1/{scope}/assets"))?;
     {
         let mut q = url.query_pairs_mut();
@@ -168,7 +169,7 @@ impl Inventory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::fake::{Script, ok};
+    use precip_collect::http::fake::{Script, ok};
     use std::sync::Arc;
 
     #[test]
@@ -194,7 +195,7 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].project_number(), Some("1"));
         assert_eq!(got[0].resource.data["name"], "a");
-        let sent = script.sent();
+        let sent = script.urls();
         assert!(sent[0].starts_with(
             "https://gcp.test/cloudasset/v1/organizations/9/assets?contentType=RESOURCE&pageSize=1000"
         ));

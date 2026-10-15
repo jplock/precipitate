@@ -11,7 +11,7 @@ use precip_collect::{Collect, CollectError, Collected};
 use precip_types::scan::Edge;
 use precip_types::{Arn, Body, body};
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 const API: &str = "cloudasset.assets.listResource (compute)";
 
@@ -88,13 +88,11 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         let d = &vm.resource.data;
         let arn = rid(&vm.name);
         let nics = items_at(d, "/networkInterfaces");
-        let mut subnets = BTreeSet::new();
-        for nic in nics {
-            subnets.extend(str_at(nic, "/subnetwork").map(|s| rid(&s)));
-        }
-        for s in &subnets {
-            out.relate(arn.clone(), Edge::InSubnet, s.clone());
-        }
+        let subnets: Vec<String> = nics
+            .iter()
+            .filter_map(|n| str_at(n, "/subnetwork"))
+            .map(|s| rid(&s).to_string())
+            .collect();
         let first = nics.first();
         let public_ip = nics.iter().find_map(|n| {
             items_at(n, "/accessConfigs")
@@ -119,7 +117,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
             ctx.resource(
                 vm,
                 Body::Instance(body::Instance {
-                    instance_id: name(&vm.name).to_string(),
+                    name: Some(name(&vm.name).to_string()),
                     instance_type: str_at(d, "/machineType")
                         .map(|t| name(&t).to_string()),
                     architecture: boot
@@ -130,11 +128,12 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
                     image_id: boot_disk
                         .and_then(|b| str_at(&b.resource.data, "/sourceImage"))
                         .map(|i| rid(&i).to_string()),
-                    subnet_id: first
-                        .and_then(|n| str_at(n, "/subnetwork"))
-                        .map(|s| rid(&s).to_string()),
+                    subnets,
                     network_id: first
                         .and_then(|n| str_at(n, "/network"))
+                        .map(|s| rid(&s).to_string()),
+                    boot_disk: boot
+                        .and_then(|b| str_at(b, "/source"))
                         .map(|s| rid(&s).to_string()),
                     boot_mode: boot.and_then(boot_mode),
                     launch_time: str_at(d, "/creationTimestamp"),
@@ -160,7 +159,7 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         out.resources.push(ctx.resource(
             d,
             Body::Volume(body::Volume {
-                volume_id: name(&d.name).to_string(),
+                name: Some(name(&d.name).to_string()),
                 size_gib: i32_at(data, "/sizeGb"),
                 volume_type:
                     str_at(data, "/type").map(|t| name(&t).to_string()),
@@ -185,7 +184,6 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
             ctx.resource(
                 image,
                 Body::Image(body::Image {
-                    image_id: rid(&image.name).to_string(),
                     name: Some(name(&image.name).to_string()),
                     owner_id: Some(ctx.account(image).to_string()),
                     platform: platform(data),
@@ -234,11 +232,6 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         ));
     }
 
-    let names: HashMap<Arn, &str> = inv
-        .of(INSTANCE)
-        .iter()
-        .map(|i| (rid(&i.name), name(&i.name)))
-        .collect();
     for address in inv.of_types(&[ADDRESS, GLOBAL_ADDRESS]) {
         let data = &address.resource.data;
         // Internal addresses are reserved private IPs, not public ones.
@@ -253,25 +246,16 @@ pub(crate) fn assemble(ctx: &Batch) -> Collected {
         if let Some(vm) = &instance {
             out.relate(arn.clone(), Edge::AttachedTo, vm.clone());
         }
-        out.resources.push(
-            ctx.resource(
-                address,
-                Body::PublicIp(body::PublicIp {
-                    allocation_id: name(&address.name).to_string(),
-                    public_ip: str_at(data, "/address"),
-                    instance_id: instance
-                        .as_ref()
-                        .map(|vm| {
-                            names
-                                .get(vm)
-                                .map_or_else(|| name(vm.as_str()), |n| n)
-                        })
-                        .map(str::to_string),
-                    network_interface_id: None,
-                    domain: None,
-                }),
-            ),
-        );
+        out.resources.push(ctx.resource(
+            address,
+            Body::PublicIp(body::PublicIp {
+                name: Some(name(&address.name).to_string()),
+                public_ip: str_at(data, "/address"),
+                instance: instance.as_ref().map(ToString::to_string),
+                network_interface_id: None,
+                domain: None,
+            }),
+        ));
     }
     out
 }
@@ -392,7 +376,7 @@ mod tests {
         assert_eq!(r.region, "us-east1");
         assert_eq!(r.tags["app"], "shop");
         let i = instance(&out);
-        assert_eq!(i.instance_id, "web-1");
+        assert_eq!(i.name.as_deref(), Some("web-1"));
         assert_eq!(i.instance_type.as_deref(), Some("n2-standard-4"));
         assert_eq!(i.state.as_deref(), Some("running"));
         assert_eq!(i.platform.as_deref(), Some("Windows"));
@@ -411,8 +395,12 @@ mod tests {
             Some(format!("{P}/global/networks/prod").as_str())
         );
         assert_eq!(
-            i.subnet_id.as_deref(),
-            Some(format!("{P}/regions/us-east1/subnetworks/web").as_str())
+            i.subnets,
+            [format!("{P}/regions/us-east1/subnetworks/web")]
+        );
+        assert_eq!(
+            i.boot_disk.as_deref(),
+            Some(format!("{P}/zones/us-east1-b/disks/web-1").as_str())
         );
     }
 
@@ -470,7 +458,10 @@ mod tests {
             .collect();
         assert_eq!(ips.len(), 1);
         assert_eq!(ips[0].public_ip.as_deref(), Some("34.9.9.9"));
-        assert_eq!(ips[0].instance_id.as_deref(), Some("web-1"));
+        assert_eq!(
+            ips[0].instance.as_deref(),
+            Some(format!("{P}/zones/us-east1-b/instances/web-1").as_str())
+        );
     }
 
     #[test]

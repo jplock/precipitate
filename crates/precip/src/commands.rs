@@ -5,7 +5,8 @@ use camino::Utf8PathBuf;
 use precip_db::{DispositionSource, Store, Trigger, export};
 use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_tui::workspace::WorkspaceDir;
-use precip_types::{Disposition, Provider};
+use precip_types::{Disposition, PairKey, Provider};
+use serde::de::DeserializeOwned;
 
 use crate::cli::{Cli, ExportWhat, PairArgs, ScanArgs, SizingArgs};
 use crate::schedule::today;
@@ -61,37 +62,60 @@ pub(crate) enum Estate {
     Aws { config: Box<aws_config::SdkConfig>, opts: precip_aws::Options },
     Azure { credential: precip_azure::Credential, opts: precip_azure::Options },
     Gcp { credential: precip_gcp::Credential, opts: precip_gcp::Options },
+    Oci { credential: precip_oci::Credential, opts: precip_oci::Options },
+}
+
+/// A cloud's selection: the saved JSON when there is one, else the flags.
+fn selection<T: DeserializeOwned>(
+    saved: Option<&str>,
+    cloud: &str,
+    from_flags: impl FnOnce() -> T,
+) -> anyhow::Result<T> {
+    match saved {
+        Some(j) => serde_json::from_str(j).with_context(|| {
+            format!("reading the saved {cloud} scan selection")
+        }),
+        None => Ok(from_flags()),
+    }
 }
 
 impl Estate {
     /// The estate `provider` names, signed in with the flags' profile or
-    /// tenant.
+    /// tenant, selecting what `saved` selected, else what the flags do.
     pub(crate) async fn load(
         provider: Provider,
         args: &ScanArgs,
-        aws: precip_aws::Options,
-        azure: precip_azure::Options,
-        gcp: precip_gcp::Options,
+        saved: Option<&str>,
     ) -> anyhow::Result<Self> {
         Ok(match provider {
             Provider::Aws => Self::Aws {
                 config: Box::new(
-                    precip_aws::load_config(args.profile.as_deref()).await,
+                    precip_aws::load_config(args.aws_profile.as_deref()).await,
                 ),
-                opts: aws,
+                opts: selection(saved, "AWS", || args.aws_options())?,
             },
-            Provider::Azure => Self::Azure {
-                credential: precip_azure::load_credential(
-                    azure.tenant.as_deref(),
-                    azure.cloud,
-                )
-                .context("loading Azure credentials")?,
-                opts: azure,
-            },
+            Provider::Azure => {
+                let opts = selection(saved, "Azure", || args.azure_options())?;
+                Self::Azure {
+                    credential: precip_azure::load_credential(
+                        opts.tenant.as_deref(),
+                        opts.cloud,
+                    )
+                    .context("loading Azure credentials")?,
+                    opts,
+                }
+            }
             Provider::Gcp => Self::Gcp {
                 credential: precip_gcp::load_credential()
                     .context("loading Google Cloud credentials")?,
-                opts: gcp,
+                opts: selection(saved, "Google Cloud", || args.gcp_options())?,
+            },
+            Provider::Oci => Self::Oci {
+                credential: precip_oci::load_credential(
+                    args.oci_profile.as_deref(),
+                )
+                .context("loading OCI credentials")?,
+                opts: selection(saved, "OCI", || args.oci_options())?,
             },
         })
     }
@@ -101,6 +125,7 @@ impl Estate {
             Self::Aws { .. } => Provider::Aws,
             Self::Azure { .. } => Provider::Azure,
             Self::Gcp { .. } => Provider::Gcp,
+            Self::Oci { .. } => Provider::Oci,
         }
     }
 
@@ -109,6 +134,7 @@ impl Estate {
             Self::Aws { opts, .. } => serde_json::to_string(opts),
             Self::Azure { opts, .. } => serde_json::to_string(opts),
             Self::Gcp { opts, .. } => serde_json::to_string(opts),
+            Self::Oci { opts, .. } => serde_json::to_string(opts),
         }
     }
 
@@ -126,13 +152,16 @@ impl Estate {
             Self::Gcp { credential, opts } => {
                 precip_gcp::scan_estate(credential, opts, progress).await?
             }
+            Self::Oci { credential, opts } => {
+                precip_oci::scan_estate(credential, opts, progress).await?
+            }
         })
     }
 
     /// What the interface's header says the scan reads.
     pub(crate) fn describe(&self, args: &ScanArgs) -> String {
         match self {
-            Self::Aws { .. } => match &args.profile {
+            Self::Aws { .. } => match &args.aws_profile {
                 Some(p) => format!("aws profile {p}"),
                 None => "aws default chain".into(),
             },
@@ -147,6 +176,10 @@ impl Estate {
                     (None, None) => "gcp projects".into(),
                 }
             }
+            Self::Oci { .. } => match &args.oci_profile {
+                Some(p) => format!("oci profile {p}"),
+                None => "oci default profile".into(),
+            },
         }
     }
 }
@@ -307,54 +340,7 @@ pub(crate) async fn scan(env: &Env, args: &ScanArgs) -> anyhow::Result<()> {
         if saved.is_some() {
             tracing::info!(%provider, "using the workspace's saved scan selection");
         }
-        let estate = match provider {
-            Provider::Aws => {
-                let opts = match &saved {
-                    Some(j) => serde_json::from_str(j)
-                        .context("reading the saved AWS scan selection")?,
-                    None => args.aws_options(),
-                };
-                Estate::load(
-                    provider,
-                    args,
-                    opts,
-                    args.azure_options(),
-                    args.gcp_options(),
-                )
-                .await?
-            }
-            Provider::Azure => {
-                let opts = match &saved {
-                    Some(j) => serde_json::from_str(j)
-                        .context("reading the saved Azure scan selection")?,
-                    None => args.azure_options(),
-                };
-                Estate::load(
-                    provider,
-                    args,
-                    args.aws_options(),
-                    opts,
-                    args.gcp_options(),
-                )
-                .await?
-            }
-            Provider::Gcp => {
-                let opts = match &saved {
-                    Some(j) => serde_json::from_str(j).context(
-                        "reading the saved Google Cloud scan selection",
-                    )?,
-                    None => args.gcp_options(),
-                };
-                Estate::load(
-                    provider,
-                    args,
-                    args.aws_options(),
-                    args.azure_options(),
-                    opts,
-                )
-                .await?
-            }
-        };
+        let estate = Estate::load(provider, args, saved.as_deref()).await?;
         scan_and_store(estate, store.clone(), None).await?;
     }
     Ok(())
@@ -367,14 +353,7 @@ pub(crate) async fn tui(env: Env, args: &ScanArgs) -> anyhow::Result<()> {
         init_tracing();
     }
     let provider = args.provider()?.unwrap_or(Provider::Aws);
-    let estate = Estate::load(
-        provider,
-        args,
-        args.aws_options(),
-        args.azure_options(),
-        args.gcp_options(),
-    )
-    .await?;
+    let estate = Estate::load(provider, args, None).await?;
     let context = precip_tui::Context {
         target: estate.describe(args),
         workspace: String::new(),
@@ -719,18 +698,24 @@ pub(crate) async fn export(
     what: ExportWhat,
     out: Option<Utf8PathBuf>,
     format: Option<String>,
+    pair: Option<(String, String)>,
     sizing: &SizingArgs,
 ) -> anyhow::Result<()> {
     // Warnings go to stderr so they never mix into an export
     // written to stdout.
     init_tracing();
     let store = env.store("export").await?;
-    let format = match (&format, &out) {
-        (Some(f), _) => f.to_lowercase(),
-        (None, Some(path)) => {
+    let format = match (&format, &out, what) {
+        (Some(f), _, _) => f.to_lowercase(),
+        (None, Some(path), _) => {
             path.extension().unwrap_or_default().to_lowercase()
         }
-        (None, None) => anyhow::bail!("give --out <file> or --format"),
+        (None, None, ExportWhat::Terraform) => "tf".into(),
+        (
+            None,
+            None,
+            ExportWhat::Workloads | ExportWhat::Sizing | ExportWhat::Schedule,
+        ) => anyhow::bail!("give --out <file> or --format"),
     };
     let latest = latest_scan(&store).await?;
     let text = match (what, format.as_str()) {
@@ -773,6 +758,24 @@ pub(crate) async fn export(
                     jiff::Timestamp::now(),
                 ),
             }
+        }
+        (ExportWhat::Terraform, "tf") => {
+            let Some((workload, environment)) = pair else {
+                anyhow::bail!(
+                    "terraform needs --workload <name> --environment <name>"
+                );
+            };
+            let key = PairKey::new(workload.as_str(), environment.as_str());
+            let summary = store.workload_summary(&latest.id).await?;
+            if !summary.iter().any(|r| {
+                r.workload == key.workload.as_str()
+                    && r.environment == key.environment.as_str()
+            }) {
+                anyhow::bail!(
+                    "no pair {workload} {environment} in the latest scan; see `precip workloads`"
+                );
+            }
+            store.pair_terraform(&latest.id, &key).await?
         }
         (_, other) => {
             anyhow::bail!("{other} is not a format this export knows")

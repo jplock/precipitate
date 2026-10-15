@@ -7,6 +7,8 @@ use precip_collect::Collector;
 pub(crate) use precip_collect::{
     Collect, CollectError, Collected, Stage, own, owned,
 };
+#[cfg(test)]
+use precip_types::AccountId;
 use precip_types::scan::Resource;
 use precip_types::{Arn, Body, Region};
 use std::collections::BTreeMap;
@@ -34,6 +36,39 @@ impl RegionContext {
             &self.identity.account_id,
             id,
         )
+    }
+
+    /// A reference to the resource of type `ty` with id `id`, as its ARN.
+    pub(crate) fn refer(
+        &self,
+        ty: ArnType,
+        id: Option<&str>,
+    ) -> Option<String> {
+        id.map(|i| self.arn(ty, i).to_string())
+    }
+
+    /// References to resources of type `ty`, as their ARNs.
+    pub(crate) fn refer_all<'a>(
+        &self,
+        ty: ArnType,
+        ids: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<String> {
+        ids.into_iter().map(|i| self.arn(ty, i).to_string()).collect()
+    }
+
+    /// A context for account 111111111111 in us-east-1, for tests that
+    /// build bodies without calling AWS.
+    #[cfg(test)]
+    pub(crate) fn test() -> Self {
+        Self {
+            config: SdkConfig::builder().build(),
+            identity: CallerIdentity {
+                account_id: AccountId::from("111111111111"),
+                arn: Arn::from("arn:aws:iam::111111111111:root"),
+                partition: "aws".into(),
+            },
+            region: Region::from("us-east-1"),
+        }
     }
 
     /// A resource in this region with the common fields filled.
@@ -113,6 +148,11 @@ pub(crate) fn tags<'a, T: SdkTag + 'a>(
             Some((t.tag_key()?.to_string(), t.tag_value()?.to_string()))
         })
         .collect()
+}
+
+/// EC2 names most resources by their `Name` tag.
+pub(crate) fn name_tag(tags: &BTreeMap<String, String>) -> Option<String> {
+    tags.get("Name").filter(|n| !n.trim().is_empty()).cloned()
 }
 
 /// Every collector. Second-stage collectors run after the rest, in this

@@ -19,7 +19,7 @@ pub(crate) const OX_YELLOW: Color = Color::Rgb(0xF5, 0xCF, 0x65);
 
 pub(crate) const NAME: &str = "precip";
 pub(crate) const TAGLINE: &str =
-    "AWS, Azure and Google Cloud estates → Oxide rack sizing";
+    "AWS, Azure, Google Cloud and OCI estates → Oxide rack sizing";
 
 /// Width in cells of the widest banner line.
 pub(crate) fn width(text: &str) -> u16 {

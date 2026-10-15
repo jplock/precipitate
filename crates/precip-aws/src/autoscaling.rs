@@ -140,14 +140,13 @@ impl Collect for LaunchTemplates {
                     ctx.arn(ArnType::LaunchTemplate, &format!("{id}:{number}")),
                     Default::default(),
                     Body::LaunchTemplate(body::LaunchTemplate {
-                        launch_template_id: id.to_string(),
                         name: own(v.launch_template_name()),
                         version: number,
                         requested_version: version.to_string(),
                         instance_type: own(
                             data.instance_type().map(|t| t.as_str()),
                         ),
-                        image_id: own(data.image_id()),
+                        image_id: ctx.refer(ArnType::Image, data.image_id()),
                     }),
                 ));
             }
@@ -201,7 +200,7 @@ impl Collect for LaunchConfigurations {
                         Body::LaunchConfiguration(body::LaunchConfiguration {
                             name: own(lc.launch_configuration_name()),
                             instance_type: own(lc.instance_type()),
-                            image_id: own(lc.image_id()),
+                            image_id: ctx.refer(ArnType::Image, lc.image_id()),
                             created: lc.created_time().map(|t| t.to_string()),
                         }),
                     ));

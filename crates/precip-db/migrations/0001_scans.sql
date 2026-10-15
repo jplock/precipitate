@@ -3,7 +3,7 @@ CREATE TABLE scans (
     id          TEXT PRIMARY KEY,
     started     TEXT NOT NULL,   -- RFC 3339
     finished    TEXT,            -- RFC 3339
-    provider    TEXT NOT NULL,   -- aws | azure | gcp
+    provider    TEXT NOT NULL,   -- aws | azure | gcp | oci
     caller      TEXT NOT NULL,
     created     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

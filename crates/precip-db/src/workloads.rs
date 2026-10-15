@@ -8,8 +8,8 @@ use crate::schema::{
     WorkloadEnvironments, WorkloadMembers, WorkloadOverrides, Workloads,
 };
 use crate::{DbError, Store};
-use precip_engine::group;
 use precip_engine::sizing::inputs::{self, SizedInstance};
+use precip_engine::{group, terraform};
 use precip_types::{
     Arn, Disposition, GroupingConfig, PairKey, WorkloadMember, WorkloadName,
 };
@@ -269,7 +269,7 @@ impl Store {
     }
 
     /// Workload names that map onto another workload.
-    pub(crate) async fn aliases(
+    pub async fn aliases(
         &self,
     ) -> Result<BTreeMap<WorkloadName, WorkloadName>, DbError> {
         let rows = (Query::select()
@@ -730,6 +730,24 @@ impl Store {
             &dispositions,
             profile,
         ))
+    }
+
+    /// Oxide Terraform for one pair's resources at a scan.
+    pub async fn pair_terraform(
+        &self,
+        scan_id: &str,
+        pair: &PairKey,
+    ) -> Result<String, DbError> {
+        let seq = self.seq_of(scan_id).await?;
+        let resources = self.live_resources(seq).await?;
+        let relationships = self.live_relationships(seq).await?;
+        let members = self.members(scan_id).await?;
+        Ok(terraform::render(&terraform::Input {
+            resources: &resources,
+            relationships: &relationships,
+            members: &members,
+            pair,
+        }))
     }
 
     /// Remove pairs that no resource of `scan_id` belongs to, and
