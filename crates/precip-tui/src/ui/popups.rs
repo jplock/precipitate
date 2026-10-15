@@ -9,6 +9,7 @@ use crate::{
     WEEKDAY_ROWS, WeekdayPicker, disposition_help,
 };
 use precip_engine::schedule::{WeekdayPreset, Weekdays, day_name};
+use precip_types::{WorkloadName, fold_chain};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, Padding, Paragraph,
@@ -574,7 +575,12 @@ pub(crate) fn draw_depends_picker(app: &mut App, frame: &mut Frame) {
 
 pub(crate) fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
     let Some(p) = app.popups.get::<MergePrompt>() else { return };
-    let into = p.text.trim();
+    let typed = p.text.trim();
+    // Resources end in the last workload of any folds after the typed one.
+    let chain = fold_chain(&app.folds, &WorkloadName::from(typed));
+    let loops = chain.iter().any(|w| w.as_str() == p.alias);
+    let last = chain.last().map_or(typed, WorkloadName::as_str);
+    let into = if loops { typed } else { last };
     let landing = merge_preview(&app.workloads, &p.alias, into);
     let mut lines = vec![
         Line::from(vec![
@@ -583,14 +589,30 @@ pub(crate) fn draw_merge_prompt(app: &mut App, frame: &mut Frame) {
         ]),
         Line::from(""),
     ];
-    if into == p.alias {
+    let same = typed == p.alias;
+    if same {
         lines.push(Line::from(Span::styled(
             "  That is this workload; saving changes nothing.",
             dim(),
         )));
+    } else if loops {
+        let path: Vec<&str> = chain.iter().map(WorkloadName::as_str).collect();
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {typed} is already folded into {}: {}. That would loop.",
+                p.alias,
+                path.join(" → ")
+            ),
+            warn(),
+        )));
+    } else if into != typed {
+        lines.push(Line::from(Span::styled(
+            format!("  {typed} is folded into {into}, so these land there."),
+            dim(),
+        )));
     }
     // Each environment keeps its name; only the workload changes.
-    for (env, exists) in landing.iter().filter(|_| into != p.alias) {
+    for (env, exists) in landing.iter().filter(|_| !same && !loops) {
         let target = if into.is_empty() { "?" } else { into };
         let mut spans = vec![
             Span::raw(format!("  {env:<12}")),

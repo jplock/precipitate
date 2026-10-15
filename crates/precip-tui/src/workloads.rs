@@ -2,7 +2,7 @@
 //! one workload into another.
 
 use crate::{Action, App, Tab, TuiError};
-use precip_db::{DispositionChange, MemberDetail, WorkloadSummary};
+use precip_db::{DbError, DispositionChange, MemberDetail, WorkloadSummary};
 use precip_types::Disposition;
 use ratatui::widgets::ListState;
 
@@ -307,8 +307,17 @@ impl App {
             self.note(format!("{into} is already {into}; nothing changed"));
             return Ok(());
         }
-        tokio::runtime::Handle::current()
-            .block_on(store.merge_workload(&p.alias, &into))?;
+        // A fold that would loop is refused; say why and carry on.
+        match tokio::runtime::Handle::current()
+            .block_on(store.merge_workload(&p.alias, &into))
+        {
+            Ok(()) => {}
+            Err(DbError::Invalid(why)) => {
+                self.note(why);
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        }
         self.note(format!("{} is now part of {into}", p.alias));
         self.regroup()
     }

@@ -269,7 +269,7 @@ impl Store {
     }
 
     /// Workload names that map onto another workload.
-    pub(crate) async fn aliases(
+    pub async fn aliases(
         &self,
     ) -> Result<BTreeMap<WorkloadName, WorkloadName>, DbError> {
         let rows = (Query::select()

@@ -312,6 +312,23 @@ async fn folding_a_workload_into_itself_records_nothing() {
 }
 
 #[tokio::test]
+async fn a_fold_that_would_loop_is_refused() {
+    let store = memory_store().await;
+    store.merge_workload("a", "b").await.unwrap();
+    store.merge_workload("b", "c").await.unwrap();
+    let before = store.events().await.unwrap().len();
+    let err = store.merge_workload("c", "a").await.unwrap_err();
+    assert!(err.to_string().contains("a → b → c"), "{err}");
+    assert_eq!(store.events().await.unwrap().len(), before, "nothing recorded");
+    store.merge_workload("a", "c").await.unwrap();
+    assert_eq!(
+        store.aliases().await.unwrap().len(),
+        2,
+        "refolding a name replaces its fold"
+    );
+}
+
+#[tokio::test]
 async fn disposition_changes_are_kept_as_lineage() {
     let (store, _) = grouped(fixture(
         "s",

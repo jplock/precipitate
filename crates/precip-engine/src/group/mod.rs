@@ -13,7 +13,7 @@ use precip_types::scan::{
 };
 use precip_types::{
     AccountId, Arn, Body, EnvName, GroupingConfig, GroupingSignal, PairKey,
-    WorkloadMember, WorkloadName,
+    WorkloadMember, WorkloadName, folded,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -513,8 +513,7 @@ impl<'a> Grouper<'a> {
                 .without_layer(&cfg.layer_tokens)
                 .without_kind_prefix(&cfg.kind_prefixes),
         );
-        let workload =
-            self.input.aliases.get(&workload).cloned().unwrap_or(workload);
+        let workload = folded(self.input.aliases, &workload);
 
         WorkloadMember {
             arn: p.arn,

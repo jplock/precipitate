@@ -456,6 +456,21 @@ fn aliases_merge_workloads_after_placement() {
 }
 
 #[test]
+fn folds_are_followed_to_the_last_workload() {
+    let aliases = BTreeMap::from([
+        (WorkloadName::from("shop-eu"), WorkloadName::from("shop-emea")),
+        (WorkloadName::from("shop-emea"), WorkloadName::from("shop")),
+    ]);
+    let m = run_with(
+        &[inst("i-1", &[("app", "shop-eu"), ("env", "prod")])],
+        &[],
+        &BTreeMap::new(),
+        &aliases,
+    );
+    assert_eq!((wl(&m, I1).0, wl(&m, I1).1), ("shop".into(), "prod".into()));
+}
+
+#[test]
 fn managed_services_without_a_stack_share_a_root_across_environments() {
     let f = |name: &str| {
         res(

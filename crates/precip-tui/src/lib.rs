@@ -24,7 +24,7 @@ use precip_db::{
 };
 use precip_engine::sizing::Sizing;
 use precip_engine::sizing::profiles::BuiltinProfile;
-use precip_types::ScanEvent;
+use precip_types::{ScanEvent, WorkloadName};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 use std::collections::{BTreeMap, VecDeque};
@@ -162,6 +162,8 @@ pub struct App {
     pub(crate) scans: Vec<ScanSummary>,
     pub(crate) overview: Option<Overview>,
     pub(crate) workloads: Vec<WorkloadSummary>,
+    /// Workload names folded into another workload.
+    pub(crate) folds: BTreeMap<WorkloadName, WorkloadName>,
     /// Account id to name, from the latest scan.
     pub(crate) account_names: BTreeMap<String, String>,
     pub(crate) workload_selected: ratatui::widgets::TableState,
@@ -199,6 +201,7 @@ impl App {
             scans: Vec::new(),
             overview: None,
             workloads: Vec::new(),
+            folds: BTreeMap::new(),
             account_names: BTreeMap::new(),
             workload_selected: ratatui::widgets::TableState::default(),
             expanded: None,
@@ -273,6 +276,7 @@ impl App {
             Some(s) => rt.block_on(store.workload_summary(&s.id))?,
             None => Vec::new(),
         };
+        self.folds = rt.block_on(store.aliases())?;
         self.account_names = match self.scans.first() {
             Some(s) => rt.block_on(store.account_names(s.seq))?,
             None => BTreeMap::new(),

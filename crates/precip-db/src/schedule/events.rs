@@ -13,6 +13,7 @@ use precip_engine::schedule::holidays::Holiday;
 use precip_engine::schedule::{
     Blackout, GlobalRules, Schedule, Status, Weekdays,
 };
+use precip_types::{WorkloadName, fold_chain};
 use sea_query::{Expr, ExprTrait, Order, Query};
 use sqlx::{Row, SqliteConnection};
 
@@ -206,14 +207,26 @@ impl Store {
     /// Record that `alias` is really `workload`; the next regroup moves
     /// its resources.
     /// Record that `alias` is really `workload`. Folding a name into
-    /// itself changes nothing and records nothing.
+    /// itself changes nothing and records nothing; a fold that would loop
+    /// back to `alias` through earlier folds is refused.
     pub async fn merge_workload(
         &self,
         alias: &str,
         workload: &str,
     ) -> Result<(), DbError> {
-        if alias.trim() == workload.trim() {
+        let (alias, workload) = (alias.trim(), workload.trim());
+        if alias == workload {
             return Ok(());
+        }
+        let chain =
+            fold_chain(&self.aliases().await?, &WorkloadName::from(workload));
+        if chain.iter().any(|w| w.as_str() == alias) {
+            let path: Vec<&str> =
+                chain.iter().map(WorkloadName::as_str).collect();
+            return Err(DbError::Invalid(format!(
+                "{workload} is already folded into {alias} ({}); folding {alias} into {workload} would loop",
+                path.join(" → ")
+            )));
         }
         self.apply(PlanEvent::WorkloadMerged {
             alias: alias.into(),

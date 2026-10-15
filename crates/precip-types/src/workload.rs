@@ -57,6 +57,33 @@ impl GroupingSignal {
     }
 }
 
+/// The workloads a name passes through when folds are followed, starting
+/// with the name itself: `a` folded into `b` folded into `c` gives
+/// `[a, b, c]`. A loop in the folds stops at the first repeat.
+pub fn fold_chain(
+    aliases: &BTreeMap<WorkloadName, WorkloadName>,
+    name: &WorkloadName,
+) -> Vec<WorkloadName> {
+    let mut chain = vec![name.clone()];
+    let mut current = name;
+    while let Some(next) = aliases.get(current) {
+        if chain.contains(next) {
+            break;
+        }
+        chain.push(next.clone());
+        current = next;
+    }
+    chain
+}
+
+/// The workload a name ends up in after every fold.
+pub fn folded(
+    aliases: &BTreeMap<WorkloadName, WorkloadName>,
+    name: &WorkloadName,
+) -> WorkloadName {
+    fold_chain(aliases, name).pop().unwrap_or_else(|| name.clone())
+}
+
 /// One resource placed in a workload and environment, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkloadMember {
@@ -167,5 +194,36 @@ impl Default for GroupingConfig {
             .to_vec(),
             kind_prefixes: vec!["rg".to_string()],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folds(pairs: &[(&str, &str)]) -> BTreeMap<WorkloadName, WorkloadName> {
+        pairs
+            .iter()
+            .map(|(a, b)| (WorkloadName::from(*a), WorkloadName::from(*b)))
+            .collect()
+    }
+
+    #[test]
+    fn folds_are_followed_to_the_end_and_stop_at_a_loop() {
+        let name = |s: &str| WorkloadName::from(s);
+        let chain = folds(&[("a", "b"), ("b", "c")]);
+        assert_eq!(
+            fold_chain(&chain, &name("a")),
+            [name("a"), name("b"), name("c")]
+        );
+        assert_eq!(folded(&chain, &name("a")), name("c"));
+        assert_eq!(
+            folded(&chain, &name("z")),
+            name("z"),
+            "an unfolded name is itself"
+        );
+        let looped = folds(&[("a", "b"), ("b", "a")]);
+        assert_eq!(fold_chain(&looped, &name("a")), [name("a"), name("b")]);
+        assert_eq!(folded(&looped, &name("b")), name("a"));
     }
 }

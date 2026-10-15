@@ -19,7 +19,9 @@ mod disposition;
 pub use disposition::Disposition;
 
 mod workload;
-pub use workload::{GroupingConfig, GroupingSignal, WorkloadMember};
+pub use workload::{
+    GroupingConfig, GroupingSignal, WorkloadMember, fold_chain, folded,
+};
 
 mod progress;
 pub use progress::ScanEvent;
