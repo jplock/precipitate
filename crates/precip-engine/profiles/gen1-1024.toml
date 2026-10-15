@@ -19,7 +19,7 @@ cores = 64
 threads_per_core = 2
 dram_gib = 1024
 reservation_gib = 44
-reservoir_pct = 0.91
+reservoir_fraction = 0.91
 nvme_bays = 10
 # Bay size is not published for Gen 1; the usable figure below is used
 # instead and this only matters when it is absent.

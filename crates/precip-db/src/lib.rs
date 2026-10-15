@@ -15,7 +15,6 @@ mod schema;
 pub use schedule::{
     Metrics, MigrationEvent, PairStatus, PlanEvent, PlanEventRecord,
     RESCHEDULE_REASONS, ScheduleVersion, Verification, WaveMetrics,
-    weekday_name, weekday_preset, weekdays_from_spec,
 };
 
 use camino::Utf8Path;
@@ -70,6 +69,8 @@ pub enum DbError {
     Timestamp(#[from] jiff::Error),
     #[error("reading a stored name")]
     Name(#[from] precip_types::UnknownName),
+    #[error("reading a weekday rule")]
+    Weekdays(#[from] precip_engine::schedule::UnknownWeekday),
     #[error("{0}")]
     Invalid(String),
 }
@@ -1932,7 +1933,7 @@ mod tests {
 
         let today = date(2026, 10, 14);
         let (_, s) = store.compute_schedule(today, "t").await.unwrap();
-        let erp = s.slots.iter().find(|x| x.workload == "erp").unwrap();
+        let erp = s.slots.iter().find(|x| x.pair.workload == "erp").unwrap();
         assert_eq!(erp.wave, 2);
         assert_eq!(
             (erp.date, erp.end),
@@ -1983,8 +1984,8 @@ mod tests {
             Status::RolledBack
         );
         let (_, s) = store.compute_schedule(today, "t").await.unwrap();
-        let dev = s.slots.iter().find(|x| x.environment == "dev").unwrap();
-        assert!(dev.reason.starts_with("rolled back"));
+        let dev = s.slots.iter().find(|x| x.pair.environment == "dev").unwrap();
+        assert!(dev.reason().starts_with("rolled back"));
         let m = store.metrics(today).await.unwrap();
         assert_eq!(m.rolled_back, 1);
         assert!((m.rollback_rate - 1.0).abs() < 1e-9);
@@ -2336,7 +2337,7 @@ mod tests {
         store.set_global_rules(&rules).await.unwrap();
         let today = date(2026, 10, 14);
         let dev_date = |s: &precip_engine::schedule::Schedule| {
-            s.slots.iter().find(|x| x.environment == "dev").unwrap().date
+            s.slots.iter().find(|x| x.pair.environment == "dev").unwrap().date
         };
 
         store
@@ -2371,7 +2372,7 @@ mod tests {
             "prod moved on, so today is open again"
         );
         assert_eq!(
-            s2.slots.iter().filter(|x| x.locked).count(),
+            s2.slots.iter().filter(|x| x.agreed).count(),
             1,
             "only one confirmed slot for prod"
         );
@@ -2409,7 +2410,9 @@ mod tests {
             .set_pair_rule(
                 "shop",
                 "prod",
-                &[jiff::civil::Weekday::Saturday],
+                Some(&precip_engine::schedule::Weekdays::only([
+                    jiff::civil::Weekday::Saturday,
+                ])),
                 None,
                 0,
             )
@@ -2419,7 +2422,7 @@ mod tests {
         let today = date(2026, 10, 14);
         let (v1, s1) = store.compute_schedule(today, "command").await.unwrap();
         let by: BTreeMap<&str, &precip_engine::schedule::Slot> =
-            s1.slots.iter().map(|x| (x.environment.as_str(), x)).collect();
+            s1.slots.iter().map(|x| (x.pair.environment.as_str(), x)).collect();
         assert_eq!(by["dev"].date, today);
         assert_eq!(by["prod"].date, date(2026, 10, 17), "saturday, after dev");
         assert_eq!(by["prod"].alternatives.len(), 2);
@@ -2451,8 +2454,9 @@ mod tests {
             .unwrap();
         let (_, s2) =
             store.compute_schedule(today, "status_change").await.unwrap();
-        let prod = s2.slots.iter().find(|x| x.environment == "prod").unwrap();
-        assert!(prod.locked);
+        let prod =
+            s2.slots.iter().find(|x| x.pair.environment == "prod").unwrap();
+        assert!(prod.agreed);
         assert_eq!(prod.date, date(2026, 10, 24));
 
         store
@@ -2470,7 +2474,10 @@ mod tests {
         // Time passes the confirmed date with no migration: back to the pool.
         let (_, s3) =
             store.compute_schedule(date(2026, 10, 26), "open").await.unwrap();
-        assert_eq!(s3.expired, vec![("shop".to_string(), "prod".to_string())]);
+        assert_eq!(
+            s3.expired,
+            vec![precip_types::PairKey::new("shop", "prod")]
+        );
         assert_eq!(
             store.pair_status("shop", "prod").await.unwrap().status,
             Status::Missed

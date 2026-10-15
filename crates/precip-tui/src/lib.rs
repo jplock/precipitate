@@ -16,6 +16,7 @@ use precip_db::{
     DispositionChange, MemberDetail, Overview, ScanStats, ScanSummary, Store,
     WorkloadSummary,
 };
+use precip_engine::sizing::profiles::BuiltinProfile;
 use precip_types::scan::TargetStatus;
 use precip_types::{Disposition, ScanEvent};
 use ratatui::DefaultTerminal;
@@ -194,14 +195,14 @@ pub struct SizingView {
 impl SizingView {
     fn compute(&mut self) {
         let inputs: Vec<precip_engine::sizing::Instance> =
-            self.instances.iter().map(|i| i.to_instance()).collect();
-        self.result = precip_engine::sizing::size(
+            self.instances.iter().map(Into::into).collect();
+        self.result = precip_engine::sizing::Sizing::new(
             &self.profile,
             &inputs,
             &self.assumptions,
         );
         self.demand =
-            precip_engine::sizing::demand_by_workload(&self.instances);
+            precip_engine::sizing::WorkloadDemand::by_pair(&self.instances);
     }
 }
 
@@ -222,7 +223,7 @@ pub struct ScheduleView {
 /// Picker for the global weekday rule: three presets, then each day of
 /// the week as a toggle.
 pub struct WeekdayPicker {
-    pub days: Vec<jiff::civil::Weekday>,
+    pub days: precip_engine::schedule::Weekdays,
     pub state: ListState,
 }
 
@@ -230,16 +231,6 @@ pub struct WeekdayPicker {
 pub const WEEKDAY_ROWS: [&str; 10] = [
     "any day", "weekdays", "weekends", "mon", "tue", "wed", "thu", "fri",
     "sat", "sun",
-];
-
-pub const ALL_WEEKDAYS: [jiff::civil::Weekday; 7] = [
-    jiff::civil::Weekday::Monday,
-    jiff::civil::Weekday::Tuesday,
-    jiff::civil::Weekday::Wednesday,
-    jiff::civil::Weekday::Thursday,
-    jiff::civil::Weekday::Friday,
-    jiff::civil::Weekday::Saturday,
-    jiff::civil::Weekday::Sunday,
 ];
 
 /// One thing the user can do from a row menu. Only the actions that make
@@ -627,7 +618,7 @@ impl ReasonPicker {
 
 /// Pick another pair for the open pair editor to depend on.
 pub struct DependsPicker {
-    pub candidates: Vec<(String, String)>,
+    pub candidates: Vec<precip_types::PairKey>,
     pub state: ListState,
 }
 
@@ -671,8 +662,7 @@ pub enum PickerMode {
 
 /// Picker for confirming a date: the proposed date and its alternatives.
 pub struct DatePicker {
-    pub workload: String,
-    pub environment: String,
+    pub pair: precip_types::PairKey,
     pub dates: Vec<jiff::civil::Date>,
     /// True when a confirmed date is being replaced by another.
     pub replacing: bool,
@@ -897,11 +887,14 @@ impl App {
     fn next_profile(&mut self) -> Result<(), TuiError> {
         let Some(store) = &self.store else { return Ok(()) };
         let Some(v) = &self.sizing else { return Ok(()) };
-        let names = precip_engine::sizing::profiles::NAMES;
-        let i = names.iter().position(|n| *n == v.profile.name).unwrap_or(0);
-        let next = names[(i + 1) % names.len()];
+        let next = v
+            .profile
+            .name
+            .parse::<BuiltinProfile>()
+            .unwrap_or(BuiltinProfile::DEFAULT)
+            .next();
         tokio::runtime::Handle::current()
-            .block_on(store.set_sizing_profile(next))?;
+            .block_on(store.set_sizing_profile(next.as_str()))?;
         self.refresh()?;
         if let Some(v) = &self.sizing {
             self.note(format!(
@@ -1074,38 +1067,32 @@ impl App {
             self.sizing.as_ref().map(|v| v.assumptions).unwrap_or_default();
         // The remembered profile, or the built-in when it is not one any
         // more.
-        let names = precip_engine::sizing::profiles::NAMES;
-        let profile_name = rt
+        let builtin = rt
             .block_on(store.sizing_profile())?
-            .filter(|n| names.contains(&n.as_str()))
-            .unwrap_or_else(|| names[0].to_string());
+            .and_then(|n| n.parse::<BuiltinProfile>().ok())
+            .unwrap_or(BuiltinProfile::DEFAULT);
         self.sizing = match self.scans.first() {
-            Some(s) => {
-                let profile =
-                    precip_engine::sizing::profiles::builtin(&profile_name)
-                        .and_then(Result::ok);
-                match profile {
-                    Some(profile) => {
-                        let instances = rt
-                            .block_on(store.sized_instances(&s.id, &profile))?;
-                        let result = precip_engine::sizing::size(
-                            &profile,
-                            &[],
-                            &assumptions,
-                        );
-                        let mut view = SizingView {
-                            profile,
-                            assumptions,
-                            instances,
-                            result,
-                            demand: Vec::new(),
-                        };
-                        view.compute();
-                        Some(view)
-                    }
-                    None => None,
+            Some(s) => match builtin.profile().ok() {
+                Some(profile) => {
+                    let instances =
+                        rt.block_on(store.sized_instances(&s.id, &profile))?;
+                    let result = precip_engine::sizing::Sizing::new(
+                        &profile,
+                        &[],
+                        &assumptions,
+                    );
+                    let mut view = SizingView {
+                        profile,
+                        assumptions,
+                        instances,
+                        result,
+                        demand: Vec::new(),
+                    };
+                    view.compute();
+                    Some(view)
                 }
-            }
+                None => None,
+            },
             None => None,
         };
         if self.workload_selected.selected().is_none()
@@ -1193,15 +1180,15 @@ impl App {
             today,
             gantt,
         });
-        for (w, e) in expired {
+        for pair in expired {
             self.note(format!(
-                "{w} / {e}: confirmed date passed without a migration, rescheduled"
+                "{pair}: confirmed date passed without a migration, rescheduled"
             ));
         }
         let conflicts =
             self.schedule.as_ref().map(|v| v.schedule.conflicts.clone());
-        for ((w, e), why) in conflicts.unwrap_or_default() {
-            self.note(format!("{w} / {e}: confirmed date {why}"));
+        for (pair, why) in conflicts.unwrap_or_default() {
+            self.note(format!("{pair}: confirmed date {why}"));
         }
         Ok(())
     }
@@ -1396,7 +1383,7 @@ impl App {
         let (workload, environment, actions) =
             if let Some(slot) = v.schedule.slots.get(i) {
                 let mut actions = Vec::new();
-                if slot.locked {
+                if slot.agreed {
                     actions.push(Action::ChangeDate);
                     actions.push(Action::Done);
                     if slot.date <= today {
@@ -1407,7 +1394,11 @@ impl App {
                     actions.push(Action::Done);
                 }
                 actions.push(Action::PairSettings);
-                (slot.workload.clone(), slot.environment.clone(), actions)
+                (
+                    slot.pair.workload.to_string(),
+                    slot.pair.environment.to_string(),
+                    actions,
+                )
             } else if let Some(f) = v.findings.get(i - v.schedule.slots.len()) {
                 (
                     f.workload.clone(),
@@ -1488,9 +1479,9 @@ impl App {
                         .block_on(store.unfinished_dependencies(&w, &e))?,
                     None => Vec::new(),
                 };
-                if let Some((dw, de)) = waiting.first() {
+                if let Some(dep) = waiting.first() {
                     self.note(format!(
-                        "{w} / {e} waits for {dw} / {de}, which has not migrated; agree that date first"
+                        "{w} / {e} waits for {dep}, which has not migrated; agree that date first"
                     ));
                 } else {
                     self.open_date_picker();
@@ -1877,7 +1868,7 @@ impl App {
         let Some(pair) = rt
             .block_on(store.schedule_inputs())?
             .into_iter()
-            .find(|p| p.workload == workload && p.environment == environment)
+            .find(|p| p.key.is(workload, environment))
         else {
             self.note(format!(
                 "{workload} / {environment} is not migrating (retire or retain), so it has no migration settings"
@@ -1888,9 +1879,7 @@ impl App {
             .block_on(store.blackouts())?
             .into_iter()
             .filter(|b| {
-                b.pair
-                    .as_ref()
-                    .is_some_and(|(w, e)| w == workload && e == environment)
+                b.pair.as_ref().is_some_and(|p| p.is(workload, environment))
             })
             .collect();
         let mut state = ListState::default();
@@ -1913,19 +1902,20 @@ impl App {
         let Some(store) = &self.store else { return Ok(()) };
         let p = ed.pair.clone();
         let rt = tokio::runtime::Handle::current();
+        let (w, e) = (p.key.workload.as_str(), p.key.environment.as_str());
         rt.block_on(store.set_pair_rule(
-            &p.workload,
-            &p.environment,
-            &p.weekdays,
+            w,
+            e,
+            p.weekdays.as_ref(),
             p.earliest,
             p.priority,
         ))?;
         rt.block_on(store.set_pair_plan(
-            &p.workload,
-            &p.environment,
+            w,
+            e,
             p.wave,
-            p.duration_days,
-            p.weight,
+            p.duration.get(),
+            p.weight.get(),
         ))?;
         self.recompute_schedule("rule_change")
     }
@@ -1935,15 +1925,18 @@ impl App {
         if ed.input.is_some() {
             return Ok(());
         }
-        let bump = |n: u32| -> u32 {
-            u32::try_from((i64::from(n) + delta).clamp(1, 1000)).unwrap_or(1)
+        let bump = |n: u32| -> std::num::NonZeroU32 {
+            u32::try_from((i64::from(n) + delta).clamp(1, 1000))
+                .ok()
+                .and_then(std::num::NonZeroU32::new)
+                .unwrap_or(std::num::NonZeroU32::MIN)
         };
         match ed.row() {
-            PairRow::Wave => ed.pair.wave = bump(ed.pair.wave),
+            PairRow::Wave => ed.pair.wave = bump(ed.pair.wave).get(),
             PairRow::Duration => {
-                ed.pair.duration_days = bump(ed.pair.duration_days);
+                ed.pair.duration = bump(ed.pair.duration.get());
             }
-            PairRow::Weight => ed.pair.weight = bump(ed.pair.weight),
+            PairRow::Weight => ed.pair.weight = bump(ed.pair.weight.get()),
             PairRow::Priority => {
                 ed.pair.priority = i32::try_from(
                     (i64::from(ed.pair.priority) + delta).clamp(-100, 100),
@@ -1975,7 +1968,9 @@ impl App {
         let rt = tokio::runtime::Handle::current();
         match ed.row() {
             PairRow::Weekdays => {
-                let days = ed.pair.weekdays.clone();
+                // The picker shows "any day" for a pair that follows the
+                // global rule.
+                let days = ed.pair.weekdays.clone().unwrap_or_default();
                 self.weekday_target = WeekdayTarget::Pair;
                 self.open_weekday_picker_from(days);
             }
@@ -1988,13 +1983,12 @@ impl App {
                 ed.input = Some(Fields::new(&["name", "from", "to"], &[]));
             }
             PairRow::AddDependency => {
-                let me =
-                    (ed.pair.workload.clone(), ed.pair.environment.clone());
+                let me = ed.pair.key.clone();
                 let have = ed.pair.depends_on.clone();
-                let candidates: Vec<(String, String)> = rt
+                let candidates: Vec<precip_types::PairKey> = rt
                     .block_on(store.schedule_inputs())?
                     .into_iter()
-                    .map(|p| (p.workload, p.environment))
+                    .map(|p| p.key)
                     .filter(|k| *k != me && !have.contains(k))
                     .collect();
                 if candidates.is_empty() {
@@ -2010,16 +2004,17 @@ impl App {
                     ed.confirming_delete = true;
                     return Ok(());
                 }
-                let (w, e) = ed.pair.depends_on.remove(i);
+                let dep = ed.pair.depends_on.remove(i);
                 ed.confirming_delete = false;
                 ed.rebuild_rows();
-                let me =
-                    (ed.pair.workload.clone(), ed.pair.environment.clone());
-                rt.block_on(store.remove_dependency(&me.0, &me.1, &w, &e))?;
-                self.note(format!(
-                    "{} / {} no longer waits for {w} / {e}",
-                    me.0, me.1
-                ));
+                let me = ed.pair.key.clone();
+                rt.block_on(store.remove_dependency(
+                    me.workload.as_str(),
+                    me.environment.as_str(),
+                    dep.workload.as_str(),
+                    dep.environment.as_str(),
+                ))?;
+                self.note(format!("{me} no longer waits for {dep}"));
                 return self.recompute_schedule("rule_change");
             }
             PairRow::Freeze(i) => {
@@ -2058,13 +2053,12 @@ impl App {
                 }
             },
             PairRow::AddFreeze => {
-                let me =
-                    (ed.pair.workload.clone(), ed.pair.environment.clone());
+                let me = ed.pair.key.clone();
                 let b = match parse_freeze(
                     f.get(0),
                     f.get(1),
                     f.get(2),
-                    Some(me),
+                    Some(me.clone()),
                 ) {
                     Ok(b) => b,
                     Err(msg) => {
@@ -2077,12 +2071,8 @@ impl App {
                 tokio::runtime::Handle::current()
                     .block_on(store.add_blackout(&b))?;
                 self.note(format!(
-                    "{} / {}: no migration from {} to {} ({})",
-                    b.pair.as_ref().map(|p| p.0.as_str()).unwrap_or_default(),
-                    b.pair.as_ref().map(|p| p.1.as_str()).unwrap_or_default(),
-                    b.start,
-                    b.end,
-                    b.name
+                    "{me}: no migration from {} to {} ({})",
+                    b.start, b.end, b.name
                 ));
                 self.recompute_schedule("rule_change")
             }
@@ -2127,20 +2117,23 @@ impl App {
         };
         let Some(ed) = self.pair_editor.as_mut() else { return Ok(()) };
         let Some(store) = &self.store else { return Ok(()) };
-        let me = (ed.pair.workload.clone(), ed.pair.environment.clone());
+        let me = ed.pair.key.clone();
         ed.pair.depends_on.push(chosen.clone());
         ed.rebuild_rows();
-        tokio::runtime::Handle::current().block_on(
-            store.add_dependency(&me.0, &me.1, &chosen.0, &chosen.1),
-        )?;
-        self.note(format!(
-            "{} / {} now waits for {} / {}",
-            me.0, me.1, chosen.0, chosen.1
-        ));
+        tokio::runtime::Handle::current().block_on(store.add_dependency(
+            me.workload.as_str(),
+            me.environment.as_str(),
+            chosen.workload.as_str(),
+            chosen.environment.as_str(),
+        ))?;
+        self.note(format!("{me} now waits for {chosen}"));
         self.recompute_schedule("rule_change")
     }
 
-    fn open_weekday_picker_from(&mut self, days: Vec<jiff::civil::Weekday>) {
+    fn open_weekday_picker_from(
+        &mut self,
+        days: precip_engine::schedule::Weekdays,
+    ) {
         let mut state = ListState::default();
         state.select(Some(0));
         self.weekday_picker = Some(WeekdayPicker { days, state });
@@ -2149,22 +2142,18 @@ impl App {
     /// Apply the highlighted row of the weekday picker: a preset replaces
     /// the set, a day toggles in or out.
     fn toggle_weekday_row(&mut self) {
+        use precip_engine::schedule::WeekdayPreset;
         let Some(p) = self.weekday_picker.as_mut() else { return };
         let Some(i) = p.state.selected() else { return };
         match i {
-            0 => p.days.clear(),
-            1 => p.days = ALL_WEEKDAYS[..5].to_vec(),
-            2 => p.days = ALL_WEEKDAYS[5..].to_vec(),
+            0 => p.days = WeekdayPreset::Any.days(),
+            1 => p.days = WeekdayPreset::Weekdays.days(),
+            2 => p.days = WeekdayPreset::Weekends.days(),
             _ => {
-                let day = ALL_WEEKDAYS[i - 3];
-                if let Some(pos) = p.days.iter().position(|d| *d == day) {
-                    p.days.remove(pos);
-                } else {
-                    p.days.push(day);
-                }
-                p.days.sort_by_key(|d| d.to_monday_zero_offset());
-                if p.days.len() == ALL_WEEKDAYS.len() {
-                    p.days.clear();
+                if let Some(day) =
+                    precip_engine::schedule::Weekdays::EVERY_DAY.get(i - 3)
+                {
+                    p.days.toggle(*day);
                 }
             }
         }
@@ -2177,10 +2166,12 @@ impl App {
         match self.weekday_target {
             WeekdayTarget::Pair => {
                 let Some(ed) = self.pair_editor.as_mut() else { return Ok(()) };
-                if ed.pair.weekdays == p.days {
+                // Any day here means the pair follows the global rule.
+                let days = (!p.days.is_any()).then_some(p.days);
+                if ed.pair.weekdays == days {
                     return Ok(());
                 }
-                ed.pair.weekdays = p.days;
+                ed.pair.weekdays = days;
                 self.save_pair()
             }
             WeekdayTarget::Global => {
@@ -2193,10 +2184,7 @@ impl App {
                 rules.weekdays = p.days;
                 tokio::runtime::Handle::current()
                     .block_on(store.set_global_rules(&rules))?;
-                self.note(format!(
-                    "migrations may run on {}",
-                    weekday_rule_label(&rules.weekdays)
-                ));
+                self.note(format!("migrations may run on {}", rules.weekdays));
                 if let Some(ed) = self.rules_editor.as_mut() {
                     ed.rules.weekdays = rules.weekdays.clone();
                 }
@@ -2209,7 +2197,7 @@ impl App {
         let Some(slot) = self.selected_slot() else { return };
         // A confirmed date never moves, but another future date can be
         // confirmed in its place; the picker then offers only alternatives.
-        let mut dates = if slot.locked { Vec::new() } else { vec![slot.date] };
+        let mut dates = if slot.agreed { Vec::new() } else { vec![slot.date] };
         dates.extend(slot.alternatives.iter().copied());
         if dates.is_empty() {
             self.note("no open dates to offer; adjust the rules or blackouts");
@@ -2218,10 +2206,9 @@ impl App {
         let mut state = ListState::default();
         state.select(Some(0));
         self.date_picker = Some(DatePicker {
-            workload: slot.workload,
-            environment: slot.environment,
+            pair: slot.pair,
             dates,
-            replacing: slot.locked,
+            replacing: slot.agreed,
             state,
         });
     }
@@ -2595,8 +2582,10 @@ impl App {
                             .state
                             .selected()
                             .and_then(|i| p.dates.get(i).copied());
-                        let (w, e) =
-                            (p.workload.clone(), p.environment.clone());
+                        let (w, e) = (
+                            p.pair.workload.to_string(),
+                            p.pair.environment.to_string(),
+                        );
                         let replacing = p.replacing;
                         self.date_picker = None;
                         if let Some(d) = chosen {
@@ -2794,18 +2783,6 @@ impl App {
     }
 }
 
-/// "any day", "weekdays", "weekends", or the day list.
-pub fn weekday_rule_label(days: &[jiff::civil::Weekday]) -> String {
-    match precip_db::weekday_preset(days) {
-        Some(preset) => preset.to_string(),
-        None => days
-            .iter()
-            .map(|d| precip_db::weekday_name(*d))
-            .collect::<Vec<_>>()
-            .join(","),
-    }
-}
-
 /// The one sentence that says what to do now on the Schedule tab.
 pub fn next_step(v: &ScheduleView) -> String {
     let s = &v.schedule;
@@ -2828,15 +2805,15 @@ pub fn next_step(v: &ScheduleView) -> String {
     let today_runs: Vec<&precip_engine::schedule::Slot> = s
         .slots
         .iter()
-        .filter(|x| x.locked && x.date <= v.today && x.end >= v.today)
+        .filter(|x| x.agreed && x.date <= v.today && x.end >= v.today)
         .collect();
     if let Some(x) = today_runs.first() {
         return format!(
-            "{} / {} runs today. When it finishes, select it, press enter and choose It's done.",
-            x.workload, x.environment
+            "{} runs today. When it finishes, select it, press enter and choose It's done.",
+            x.pair
         );
     }
-    let open = s.slots.iter().filter(|x| !x.locked).count();
+    let open = s.slots.iter().filter(|x| !x.agreed).count();
     if open > 0 {
         return format!(
             "{open} proposed date(s) need agreement. Select a row, press enter and choose Agree a date.",
@@ -2850,7 +2827,7 @@ fn parse_freeze(
     name: &str,
     from: &str,
     to: &str,
-    pair: Option<(String, String)>,
+    pair: Option<precip_types::PairKey>,
 ) -> Result<precip_engine::schedule::Blackout, String> {
     if name.is_empty() {
         return Err("the freeze needs a name".into());

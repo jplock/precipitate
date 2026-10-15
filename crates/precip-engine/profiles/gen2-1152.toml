@@ -2,7 +2,7 @@
 # as of 2026-10-14; docs/rfd/0001/notes.adoc has the links.
 #   oxide.computer/product/specifications: sleds per rack, the 192-core
 #     AMD EPYC 9005, the 1152 GiB memory option, 10 NVMe bays.
-#   Omicron source on GitHub: reservation_gib, reservoir_pct (PR 10791),
+#   Omicron source on GitHub: reservation_gib, reservoir_fraction (PR 10791),
 #     every [instance] limit.
 # The operator guide does not yet publish usable memory and storage for
 # this sled, so they are derived from DRAM, the reservation and the
@@ -16,7 +16,7 @@ cores = 192
 threads_per_core = 2
 dram_gib = 1152
 reservation_gib = 44
-reservoir_pct = 0.91
+reservoir_fraction = 0.91
 nvme_bays = 10
 bay_size_tib = 2.9
 
