@@ -49,8 +49,8 @@ fn run(
 fn run_with(
     resources: &[Resource],
     relationships: &[Relationship],
-    overrides: &BTreeMap<String, Override>,
-    aliases: &BTreeMap<String, String>,
+    overrides: &BTreeMap<Arn, PairKey>,
+    aliases: &BTreeMap<WorkloadName, WorkloadName>,
 ) -> Vec<WorkloadMember> {
     group(
         &Input { resources, relationships, overrides, aliases },
@@ -66,7 +66,7 @@ fn find<'a>(m: &'a [WorkloadMember], arn: &str) -> &'a WorkloadMember {
 
 fn wl(m: &[WorkloadMember], arn: &str) -> (String, String, GroupingSignal) {
     let p = find(m, arn);
-    (p.workload.clone(), p.environment.clone(), p.signal)
+    (p.pair.workload.to_string(), p.pair.environment.to_string(), p.signal)
 }
 
 #[test]
@@ -404,10 +404,8 @@ fn managed_services_group_by_stack_tag_or_name_prefix() {
 
 #[test]
 fn manual_override_by_arn_wins() {
-    let overrides = BTreeMap::from([(
-        I1.to_string(),
-        Override { workload: "legacy".into(), environment: "prod".into() },
-    )]);
+    let overrides =
+        BTreeMap::from([(Arn::from(I1), PairKey::new("legacy", "prod"))]);
     let m = run_with(
         &[inst("i-1", &[(OVERRIDE_TAG, "x")])],
         &[],
@@ -423,8 +421,10 @@ fn manual_override_by_arn_wins() {
 #[test]
 fn aliases_merge_workloads_after_placement() {
     let asg = "arn:aws:autoscaling:us-east-1:1:autoScalingGroup:x:autoScalingGroupName/vouch-us-prod";
-    let aliases =
-        BTreeMap::from([("vouch-us".to_string(), "vouch".to_string())]);
+    let aliases = BTreeMap::from([(
+        WorkloadName::from("vouch-us"),
+        WorkloadName::from("vouch"),
+    )]);
     let m = run_with(
         &[
             res(
@@ -490,8 +490,11 @@ fn managed_services_without_a_stack_share_a_root_across_environments() {
     );
     let pairs: std::collections::BTreeMap<(String, String), usize> =
         m.iter().fold(Default::default(), |mut acc, x| {
-            *acc.entry((x.workload.clone(), x.environment.clone()))
-                .or_default() += 1;
+            *acc.entry((
+                x.pair.workload.to_string(),
+                x.pair.environment.to_string(),
+            ))
+            .or_default() += 1;
             acc
         });
     assert_eq!(
@@ -613,10 +616,7 @@ fn terraform_managed_siblings_share_a_root() {
         ],
         &[],
     );
-    assert!(
-        m.iter().all(|x| x.workload == "serverless" && x.environment == "prod"),
-        "{m:#?}"
-    );
+    assert!(m.iter().all(|x| x.pair.is("serverless", "prod")), "{m:#?}");
     assert!(m.iter().all(|x| x.signal == GroupingSignal::NamePrefix));
 }
 

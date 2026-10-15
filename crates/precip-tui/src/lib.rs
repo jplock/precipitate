@@ -159,7 +159,7 @@ pub struct Progress {
     handle: ScanHandle,
     pub started: Instant,
     pub accounts_total: usize,
-    pub accounts: BTreeMap<String, AccountProgress>,
+    pub accounts: BTreeMap<precip_types::AccountId, AccountProgress>,
     pub outcome: Option<Result<ScanStats, String>>,
 }
 
@@ -721,13 +721,6 @@ pub fn disposition_help(d: Disposition) -> &'static str {
     }
 }
 
-pub fn disposition_name(d: Disposition) -> String {
-    serde_json::to_value(d)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
-}
-
 /// One line in the activity feed.
 #[derive(Debug, Clone)]
 pub struct Activity {
@@ -991,14 +984,14 @@ impl App {
                     "{} / {}: disposition set to {}",
                     p.workload,
                     p.environment,
-                    disposition_name(chosen)
+                    chosen.as_str()
                 ));
             }
             PickerMode::Default { apply } => {
                 rt.block_on(store.set_default_disposition(chosen, apply))?;
                 self.note(format!(
                     "new pairs start as {}{}",
-                    disposition_name(chosen),
+                    chosen.as_str(),
                     if apply {
                         "; pairs nobody set by hand changed too"
                     } else {
@@ -2243,7 +2236,7 @@ impl App {
             ScanEvent::AccountStarted { account_id, name } => {
                 let a = p.accounts.entry(account_id.clone()).or_default();
                 a.name = name.clone();
-                let label = name.as_deref().unwrap_or(account_id);
+                let label = name.as_deref().unwrap_or(account_id.as_str());
                 format!(
                     "{label} ({account_id}): credentials ok, listing regions"
                 )

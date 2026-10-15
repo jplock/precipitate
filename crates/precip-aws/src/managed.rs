@@ -11,7 +11,7 @@ use crate::collect::{
 fn managed(
     ctx: &RegionContext,
     service: &str,
-    arn: String,
+    arn: precip_types::Arn,
     name: Option<&str>,
     tags: std::collections::BTreeMap<String, String>,
     extra: serde_json::Value,
@@ -53,7 +53,7 @@ impl Collector for Rds {
                     out.resources.push(managed(
                         ctx,
                         "rds",
-                        arn.to_string(),
+                        precip_types::Arn::from(arn),
                         db.db_instance_identifier(),
                         tags(db.tag_list(), |t| t.key(), |t| t.value()),
                         serde_json::json!({
@@ -131,7 +131,7 @@ impl Collector for Ecs {
                     out.resources.push(managed(
                         ctx,
                         "ecs",
-                        arn.clone(),
+                        precip_types::Arn::from(arn.clone()),
                         name,
                         Default::default(),
                         serde_json::json!({}),
@@ -167,7 +167,7 @@ impl Collector for Lambda {
                     out.resources.push(managed(
                         ctx,
                         "lambda",
-                        arn.to_string(),
+                        precip_types::Arn::from(arn),
                         f.function_name(),
                         Default::default(),
                         serde_json::json!({
@@ -208,7 +208,7 @@ impl Collector for ElastiCache {
                     out.resources.push(managed(
                         ctx,
                         "elasticache",
-                        arn.to_string(),
+                        precip_types::Arn::from(arn),
                         c.cache_cluster_id(),
                         Default::default(),
                         serde_json::json!({
@@ -284,7 +284,7 @@ impl Collector for Efs {
                     out.resources.push(managed(
                         ctx,
                         "efs",
-                        arn.to_string(),
+                        precip_types::Arn::from(arn),
                         fs.name(),
                         tags(fs.tags(), |t| Some(t.key()), |t| Some(t.value())),
                         serde_json::json!({

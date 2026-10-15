@@ -9,7 +9,10 @@
 mod names;
 
 use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
-use precip_types::{GroupingConfig, GroupingSignal, Override, WorkloadMember};
+use precip_types::{
+    AccountId, Arn, EnvName, GroupingConfig, GroupingSignal, PairKey,
+    WorkloadMember, WorkloadName,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use names::slug;
@@ -22,14 +25,14 @@ pub struct Input<'a> {
     pub resources: &'a [Resource],
     pub relationships: &'a [Relationship],
     /// Manual placement by ARN. Wins over every signal.
-    pub overrides: &'a BTreeMap<String, Override>,
+    pub overrides: &'a BTreeMap<Arn, PairKey>,
     /// Workload names that are really another workload, applied last.
-    pub aliases: &'a BTreeMap<String, String>,
+    pub aliases: &'a BTreeMap<WorkloadName, WorkloadName>,
 }
 
 struct Index<'a> {
     by_arn: HashMap<&'a str, &'a Resource>,
-    platform_workload: String,
+    platform_workload: WorkloadName,
     /// Stack id to the root stack's name.
     stack_root_name: HashMap<&'a str, String>,
     /// From ARN to (edge, to ARN).
@@ -64,7 +67,7 @@ impl<'a> Index<'a> {
                 .unwrap_or(&r);
             if let Some(name) = root.body.get("name").and_then(|v| v.as_str()) {
                 let name = if is_platform(name) {
-                    cfg.platform_workload.clone()
+                    cfg.platform_workload.to_string()
                 } else {
                     name.to_string()
                 };
@@ -146,7 +149,7 @@ impl<'a> Index<'a> {
     /// The root stack a resource belongs to: by an `in_stack` edge from
     /// `ListStackResources`, else by the stack-id tag CloudFormation sets.
     fn stack_of(&self, r: &Resource) -> Option<String> {
-        self.edges_from(&r.arn, Edge::InStack)
+        self.edges_from(r.arn.as_str(), Edge::InStack)
             .find_map(|stack| self.root_stack_name(stack))
             .or_else(|| {
                 r.tags.get(STACK_ID_TAG).and_then(|id| self.root_stack_name(id))
@@ -167,18 +170,18 @@ fn body_str<'a>(r: &'a Resource, key: &str) -> Option<&'a str> {
 
 /// A raw placement before environment resolution.
 struct Placed {
-    arn: String,
+    arn: Arn,
     signal: GroupingSignal,
     slug: String,
-    override_env: Option<String>,
+    override_env: Option<EnvName>,
     env_tag: Option<String>,
     /// Environment token found in the resource's own name when the
     /// workload name came from somewhere else (a stack, a shared root).
-    name_env: Option<String>,
+    name_env: Option<EnvName>,
     /// The only environment of the workload this resource joined by name,
     /// when that workload has exactly one.
-    joined_env: Option<String>,
-    account_id: String,
+    joined_env: Option<EnvName>,
+    account_id: AccountId,
 }
 
 fn place_instance(
@@ -191,7 +194,7 @@ fn place_instance(
         return Placed {
             arn: r.arn.clone(),
             signal: GroupingSignal::Override,
-            slug: slug(&o.workload),
+            slug: slug(o.workload.as_str()),
             override_env: Some(o.environment.clone()),
             env_tag: None,
             name_env: None,
@@ -201,18 +204,18 @@ fn place_instance(
     }
 
     let asg = index
-        .edges_from(&r.arn, Edge::MemberOfAsg)
+        .edges_from(r.arn.as_str(), Edge::MemberOfAsg)
         .find_map(|arn| index.by_arn.get(arn))
         .map(|g| match index.stack_of(g) {
             Some(root) => (root, GroupingSignal::CloudFormationStack),
             None => (
-                body_str(g, "name").unwrap_or(&g.arn).to_string(),
+                body_str(g, "name").unwrap_or(g.arn.as_str()).to_string(),
                 GroupingSignal::AutoScalingGroup,
             ),
         });
 
     let target_group = index
-        .edges_from(&r.arn, Edge::TargetOf)
+        .edges_from(r.arn.as_str(), Edge::TargetOf)
         .filter_map(|tg_arn| {
             let tg = index.by_arn.get(tg_arn)?;
             let lb_name = index
@@ -288,7 +291,7 @@ fn place_managed(
     cfg: &GroupingConfig,
     strong_names: &[String],
     sibling_roots: &[String],
-    workload_envs: &HashMap<String, std::collections::BTreeSet<String>>,
+    workload_envs: &HashMap<String, std::collections::BTreeSet<EnvName>>,
 ) -> Placed {
     let own = managed_own_name(r);
     let (own_root, name_env) =
@@ -352,12 +355,15 @@ fn resolve(
     p: Placed,
     index: &Index<'_>,
     cfg: &GroupingConfig,
-    aliases: &BTreeMap<String, String>,
+    aliases: &BTreeMap<WorkloadName, WorkloadName>,
 ) -> WorkloadMember {
     let split = names::split_environment(&p.slug, &cfg.environment_tokens);
     let from_tag = p.env_tag.as_deref().map(|t| {
         let t = slug(t);
-        cfg.environment_tokens.get(&t).cloned().unwrap_or(t)
+        cfg.environment_tokens
+            .get(&t)
+            .cloned()
+            .unwrap_or_else(|| EnvName::from(t))
     });
     let from_account =
         index.account.get(p.account_id.as_str()).and_then(|(name, ou)| {
@@ -382,17 +388,22 @@ fn resolve(
         Some((stripped, env)) if env == environment => stripped,
         _ => p.slug,
     };
-    let workload = names::strip_layer(&workload, &cfg.layer_tokens);
+    let workload =
+        WorkloadName::from(names::strip_layer(&workload, &cfg.layer_tokens));
     let workload = aliases.get(&workload).cloned().unwrap_or(workload);
 
-    WorkloadMember { arn: p.arn, workload, environment, signal: p.signal }
+    WorkloadMember {
+        arn: p.arn,
+        pair: PairKey { workload, environment },
+        signal: p.signal,
+    }
 }
 
 /// Assign every groupable resource to a workload and environment.
 pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
     let index = Index::build(input, cfg);
     let mut members: Vec<WorkloadMember> = Vec::new();
-    let mut placed: HashSet<String> = HashSet::new();
+    let mut placed: HashSet<Arn> = HashSet::new();
 
     // Instances first.
     for r in
@@ -418,12 +429,12 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
             members
                 .iter()
                 .filter(|m| m.signal != GroupingSignal::Unassigned)
-                .map(|m| m.workload.clone()),
+                .map(|m| m.pair.workload.to_string()),
         )
         .collect();
     strong_names.sort();
     strong_names.dedup();
-    strong_names.retain(|n| *n != index.platform_workload);
+    strong_names.retain(|n| index.platform_workload != n.as_str());
 
     // Roots shared among managed services themselves: each resource's own
     // name with its environment token removed. A name only counts as a
@@ -448,13 +459,15 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
         })
         .collect();
 
-    let mut workload_envs: HashMap<String, std::collections::BTreeSet<String>> =
-        HashMap::new();
+    let mut workload_envs: HashMap<
+        String,
+        std::collections::BTreeSet<EnvName>,
+    > = HashMap::new();
     for m in &members {
         workload_envs
-            .entry(m.workload.clone())
+            .entry(m.pair.workload.to_string())
             .or_default()
-            .insert(m.environment.clone());
+            .insert(m.pair.environment.clone());
     }
 
     for (i, r) in managed.iter().enumerate() {
@@ -482,24 +495,19 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
     }
 
     // Inheritance. A resource follows its instances when they all agree.
-    let by_arn: HashMap<&str, (&str, &str)> = members
-        .iter()
-        .map(|m| {
-            (m.arn.as_str(), (m.workload.as_str(), m.environment.as_str()))
-        })
-        .collect();
+    let by_arn: HashMap<&str, &PairKey> =
+        members.iter().map(|m| (m.arn.as_str(), &m.pair)).collect();
     let mut inherited: Vec<WorkloadMember> = Vec::new();
-    let mut inherit = |arn: &str, owners: Vec<(&str, &str)>| {
-        if placed.contains(arn) || owners.is_empty() {
+    let mut inherit = |arn: &Arn, owners: Vec<&PairKey>| {
+        if placed.contains(arn) {
             return;
         }
-        let first = owners[0];
+        let Some(first) = owners.first().copied() else { return };
         if owners.iter().all(|o| *o == first) {
-            placed.insert(arn.to_string());
+            placed.insert(arn.clone());
             inherited.push(WorkloadMember {
-                arn: arn.to_string(),
-                workload: first.0.to_string(),
-                environment: first.1.to_string(),
+                arn: arn.clone(),
+                pair: first.clone(),
                 signal: GroupingSignal::Attached,
             });
         }
@@ -510,7 +518,7 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
             // Attached to an instance: volumes, Elastic IPs.
             ResourceKind::EbsVolume | ResourceKind::ElasticIp => {
                 let owners: Vec<_> = index
-                    .edges_from(&r.arn, Edge::AttachedTo)
+                    .edges_from(r.arn.as_str(), Edge::AttachedTo)
                     .filter_map(|to| by_arn.get(to).copied())
                     .collect();
                 inherit(&r.arn, owners);
@@ -518,21 +526,21 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
             // Instances point at these.
             ResourceKind::AutoScalingGroup => {
                 let owners: Vec<_> = index
-                    .edges_to(&r.arn, Edge::MemberOfAsg)
+                    .edges_to(r.arn.as_str(), Edge::MemberOfAsg)
                     .filter_map(|from| by_arn.get(from).copied())
                     .collect();
                 inherit(&r.arn, owners);
             }
             ResourceKind::TargetGroup => {
                 let owners: Vec<_> = index
-                    .edges_to(&r.arn, Edge::TargetOf)
+                    .edges_to(r.arn.as_str(), Edge::TargetOf)
                     .filter_map(|from| by_arn.get(from).copied())
                     .collect();
                 inherit(&r.arn, owners);
             }
             ResourceKind::SecurityGroup => {
                 let owners: Vec<_> = index
-                    .edges_to(&r.arn, Edge::HasSecurityGroup)
+                    .edges_to(r.arn.as_str(), Edge::HasSecurityGroup)
                     .filter_map(|from| by_arn.get(from).copied())
                     .collect();
                 inherit(&r.arn, owners);
@@ -560,12 +568,8 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
     members.extend(inherited);
 
     // Load balancers follow their target groups, which were just placed.
-    let by_arn: HashMap<&str, (&str, &str)> = members
-        .iter()
-        .map(|m| {
-            (m.arn.as_str(), (m.workload.as_str(), m.environment.as_str()))
-        })
-        .collect();
+    let by_arn: HashMap<&str, &PairKey> =
+        members.iter().map(|m| (m.arn.as_str(), &m.pair)).collect();
     let mut lbs = Vec::new();
     for r in
         input.resources.iter().filter(|r| r.kind == ResourceKind::LoadBalancer)
@@ -574,7 +578,7 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
             continue;
         }
         let owners: Vec<_> = index
-            .edges_to(&r.arn, Edge::AttachedTo)
+            .edges_to(r.arn.as_str(), Edge::AttachedTo)
             .filter(|from| {
                 index
                     .by_arn
@@ -587,8 +591,7 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
             if owners.iter().all(|o| *o == first) {
                 lbs.push(WorkloadMember {
                     arn: r.arn.clone(),
-                    workload: first.0.to_string(),
-                    environment: first.1.to_string(),
+                    pair: first.clone(),
                     signal: GroupingSignal::Attached,
                 });
             }
@@ -637,13 +640,11 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
     // Last resort: an account that hosts exactly one workload claims the
     // unassigned managed services in it. Platform resources never count
     // as that workload.
-    let mut per_account: HashMap<
-        &str,
-        std::collections::BTreeSet<(String, String)>,
-    > = HashMap::new();
+    let mut per_account: HashMap<&str, std::collections::BTreeSet<PairKey>> =
+        HashMap::new();
     for m in &members {
         if m.signal == GroupingSignal::Unassigned
-            || m.workload == index.platform_workload
+            || m.pair.workload == index.platform_workload
         {
             continue;
         }
@@ -651,7 +652,7 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
         per_account
             .entry(r.account_id.as_str())
             .or_default()
-            .insert((m.workload.clone(), m.environment.clone()));
+            .insert(m.pair.clone());
     }
     for m in members.iter_mut() {
         if m.signal != GroupingSignal::Unassigned {
@@ -661,29 +662,22 @@ pub fn group(input: &Input<'_>, cfg: &GroupingConfig) -> Vec<WorkloadMember> {
         let Some(pairs) = per_account.get(r.account_id.as_str()) else {
             continue;
         };
-        let workloads: std::collections::BTreeSet<&str> =
-            pairs.iter().map(|(w, _)| w.as_str()).collect();
+        let workloads: std::collections::BTreeSet<&WorkloadName> =
+            pairs.iter().map(|p| &p.workload).collect();
         if workloads.len() != 1 {
             continue;
         }
-        let (workload, environment) =
-            pairs.iter().next().cloned().unwrap_or_default();
-        m.workload = workload;
+        let Some(only) = pairs.first() else { continue };
+        m.pair.workload = only.workload.clone();
         // Keep the resource's own environment when it had evidence for one;
         // otherwise take the account's single pair.
-        if m.environment == cfg.default_environment {
-            m.environment = environment;
+        if m.pair.environment == cfg.default_environment {
+            m.pair.environment = only.environment.clone();
         }
         m.signal = GroupingSignal::AccountOnly;
     }
 
-    members.sort_by(|a, b| {
-        (&a.workload, &a.environment, &a.arn).cmp(&(
-            &b.workload,
-            &b.environment,
-            &b.arn,
-        ))
-    });
+    members.sort_by(|a, b| (&a.pair, &a.arn).cmp(&(&b.pair, &b.arn)));
     members
 }
 

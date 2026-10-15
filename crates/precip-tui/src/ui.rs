@@ -3,8 +3,8 @@
 
 use crate::{
     ALL_WEEKDAYS, App, DISPOSITIONS, Fields, PairRow, RuleRow, ScheduleView,
-    Screen, Tab, WEEKDAY_ROWS, disposition_help, disposition_name, logo,
-    next_step, weekday_rule_label,
+    Screen, Tab, WEEKDAY_ROWS, disposition_help, logo, next_step,
+    weekday_rule_label,
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -976,7 +976,7 @@ fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
         }
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
-                format!("{:<12}", disposition_name(*d)),
+                format!("{d:<12}"),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(disposition_help(*d), dim()),
@@ -1241,7 +1241,7 @@ fn draw_accounts(app: &App, frame: &mut Frame, area: Rect) {
             Row::new(vec![
                 match &a.name {
                     Some(n) => format!("{n} ({id})"),
-                    None => app.account_label(id),
+                    None => app.account_label(id.as_str()),
                 },
                 format!("{}/{}", a.done, a.planned),
                 a.skipped.to_string(),
@@ -1545,12 +1545,10 @@ fn draw_expanded(app: &mut App, frame: &mut Frame, area: Rect) {
         .take(4)
         .map(|c| {
             let change = match c.previous {
-                Some(prev) => format!(
-                    "{} → {}",
-                    disposition_name(prev),
-                    disposition_name(c.disposition)
-                ),
-                None => disposition_name(c.disposition),
+                Some(prev) => {
+                    format!("{prev} → {}", c.disposition)
+                }
+                None => c.disposition.to_string(),
             };
             let mut spans = vec![
                 Span::styled(
@@ -1644,10 +1642,7 @@ fn draw_workload_table(app: &mut App, frame: &mut Frame, area: Rect) {
         .workloads
         .iter()
         .map(|w| {
-            let disposition = serde_json::to_value(w.disposition)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default();
+            let disposition = w.disposition.to_string();
             let style = if w.workload == "unassigned" {
                 Style::default().fg(logo::OX_YELLOW)
             } else {
@@ -1875,7 +1870,7 @@ fn draw_sizing(app: &App, frame: &mut Frame, area: Rect) {
     let widest = v
         .demand
         .iter()
-        .map(|d| d.workload.len())
+        .map(|d| d.pair.workload.as_str().len())
         .max()
         .unwrap_or(8)
         .clamp(8, 48);
@@ -1884,8 +1879,8 @@ fn draw_sizing(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|d| {
             Row::new(vec![
-                d.workload.clone(),
-                d.environment.clone(),
+                d.pair.workload.to_string(),
+                d.pair.environment.to_string(),
                 d.instances.to_string(),
                 d.vcpus.to_string(),
                 d.memory_gib.to_string(),

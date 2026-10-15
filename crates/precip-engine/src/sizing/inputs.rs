@@ -3,7 +3,9 @@
 
 use crate::sizing::{Fit, Instance};
 use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
-use precip_types::{Disposition, Profile, WorkloadMember};
+use precip_types::{
+    AccountId, Arn, Disposition, PairKey, Profile, Region, WorkloadMember,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -11,13 +13,13 @@ use std::collections::{BTreeMap, HashMap};
 /// or does not.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SizedInstance {
-    pub arn: String,
+    pub arn: Arn,
     pub name: String,
-    pub workload: String,
-    pub environment: String,
+    #[serde(flatten)]
+    pub pair: PairKey,
     pub disposition: Disposition,
-    pub account_id: String,
-    pub region: String,
+    pub account_id: AccountId,
+    pub region: Region,
     pub instance_type: String,
     pub architecture: String,
     pub vcpus: u32,
@@ -34,7 +36,7 @@ pub struct SizedInstance {
 impl SizedInstance {
     pub fn to_instance(&self) -> Instance {
         Instance {
-            id: self.arn.clone(),
+            arn: self.arn.clone(),
             disposition: self.disposition,
             vcpus: self.vcpus,
             memory_gib: self.memory_gib,
@@ -58,7 +60,7 @@ pub fn sized_instances(
     resources: &[Resource],
     relationships: &[Relationship],
     members: &[WorkloadMember],
-    dispositions: &BTreeMap<(String, String), Disposition>,
+    dispositions: &BTreeMap<PairKey, Disposition>,
     profile: &Profile,
 ) -> Vec<SizedInstance> {
     let by_arn: HashMap<&str, &Resource> =
@@ -86,10 +88,8 @@ pub fn sized_instances(
     let mut out = Vec::new();
     for r in resources.iter().filter(|r| r.kind == ResourceKind::Ec2Instance) {
         let Some(m) = placement.get(r.arn.as_str()) else { continue };
-        let Some(disposition) = dispositions
-            .get(&(m.workload.clone(), m.environment.clone()))
-            .copied()
-            .filter(|d| d.is_sized())
+        let Some(disposition) =
+            dispositions.get(&m.pair).copied().filter(|d| d.is_sized())
         else {
             continue;
         };
@@ -147,9 +147,8 @@ pub fn sized_instances(
                 .get("Name")
                 .cloned()
                 .or_else(|| body_str(r, "instance_id").map(str::to_string))
-                .unwrap_or_else(|| r.arn.clone()),
-            workload: m.workload.clone(),
-            environment: m.environment.clone(),
+                .unwrap_or_else(|| r.arn.to_string()),
+            pair: m.pair.clone(),
             disposition,
             account_id: r.account_id.clone(),
             region: r.region.clone(),
@@ -164,13 +163,7 @@ pub fn sized_instances(
             findings,
         });
     }
-    out.sort_by(|a, b| {
-        (&a.workload, &a.environment, &a.name).cmp(&(
-            &b.workload,
-            &b.environment,
-            &b.name,
-        ))
-    });
+    out.sort_by(|a, b| (&a.pair, &a.name).cmp(&(&b.pair, &b.name)));
     out
 }
 

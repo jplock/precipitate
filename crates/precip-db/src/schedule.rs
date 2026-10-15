@@ -341,7 +341,7 @@ impl PlanEvent {
             } => {
                 format!(
                     "{workload} / {environment}: {}{}{}",
-                    disposition_name(*disposition),
+                    disposition.as_str(),
                     if source == "bulk" { " (default applied)" } else { "" },
                     note.as_ref().map(|n| format!(", {n}")).unwrap_or_default()
                 )
@@ -351,7 +351,7 @@ impl PlanEvent {
                 apply_to_existing,
             } => format!(
                 "new pairs start as {}{}",
-                disposition_name(*disposition),
+                disposition.as_str(),
                 if *apply_to_existing {
                     ", applied to untouched pairs"
                 } else {
@@ -363,13 +363,6 @@ impl PlanEvent {
             }
         }
     }
-}
-
-fn disposition_name(d: precip_types::Disposition) -> String {
-    serde_json::to_value(d)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_default()
 }
 
 /// An event as stored, with the schedule version it produced.
@@ -964,7 +957,7 @@ impl Store {
         let confirmed: Option<String> = r.get("confirmed_date");
         let migrated: Option<String> = r.get("migrated_date");
         Ok(PairStatus {
-            status: serde_json::from_value(serde_json::Value::String(status))?,
+            status: status.parse()?,
             confirmed_date: confirmed.as_deref().map(parse_date).transpose()?,
             migrated_date: migrated.as_deref().map(parse_date).transpose()?,
         })
@@ -1069,10 +1062,7 @@ impl Store {
                 }
             }
         }
-        let name = serde_json::to_value(status)?
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
+        let name = status.as_str();
         let (confirmed, migrated) = match status {
             Status::Confirmed => (date, None),
             Status::Migrated => (None, date.or(Some(today))),
@@ -1093,7 +1083,7 @@ impl Store {
                 .values_panic([
                     workload.into(),
                     environment.into(),
-                    name.clone().into(),
+                    name.into(),
                     confirmed.map(|d| d.to_string()).into(),
                     migrated.map(|d| d.to_string()).into(),
                 ])
@@ -1238,14 +1228,12 @@ impl Store {
     ) -> Result<Vec<PairInput>, DbError> {
         let dispositions = Self::pair_dispositions_in(conn).await?;
         let mut out = Vec::new();
-        for ((workload, environment), d) in dispositions {
-            if matches!(
-                d,
-                precip_types::Disposition::Retire
-                    | precip_types::Disposition::Retain
-            ) {
+        for (pair, d) in dispositions {
+            if !d.is_migrating() {
                 continue;
             }
+            let (workload, environment) =
+                (pair.workload.into_string(), pair.environment.into_string());
             let rule = bound!(
                 Query::select()
                     .columns([
@@ -1798,11 +1786,11 @@ impl Store {
     async fn reset_dispositions(
         conn: &mut SqliteConnection,
     ) -> Result<(), DbError> {
-        let builtin = disposition_name(precip_types::Disposition::Rehost);
+        let builtin = precip_types::Disposition::Rehost.as_str();
         bound!(
             Query::update()
                 .table(Settings::Table)
-                .value(Settings::Value, builtin.clone())
+                .value(Settings::Value, builtin)
                 .and_where(
                     Expr::col(Settings::Key).eq(crate::DEFAULT_DISPOSITION_KEY)
                 )

@@ -1,6 +1,7 @@
 //! Auto Scaling groups. The group is the resource; its instances are
 //! observed counts, not tracked by id.
 
+use precip_types::Arn;
 use precip_types::scan::{Edge, Relationship, Resource, ResourceKind};
 
 use crate::collect::{
@@ -52,13 +53,13 @@ impl Collector for Groups {
                                 from_arn: ctx
                                     .arn("ec2", &format!("instance/{id}")),
                                 edge: Edge::MemberOfAsg,
-                                to_arn: arn.to_string(),
+                                to_arn: Arn::from(arn),
                             });
                         }
                     }
 
                     out.resources.push(Resource {
-                        arn: arn.to_string(),
+                        arn: Arn::from(arn),
                         kind: ResourceKind::AutoScalingGroup,
                         account_id: ctx.identity.account_id.clone(),
                         region: ctx.region.clone(),
@@ -221,7 +222,7 @@ impl Collector for LaunchConfigurations {
                             continue;
                         };
                         out.resources.push(ctx.resource(
-                            arn.to_string(),
+                            Arn::from(arn),
                             ResourceKind::LaunchConfiguration,
                             Default::default(),
                             serde_json::json!({

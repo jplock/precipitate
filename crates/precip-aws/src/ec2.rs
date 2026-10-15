@@ -1,6 +1,7 @@
 //! EC2 instances, the instance types they use, their volumes and images.
 
 use aws_config::SdkConfig;
+use precip_types::Arn;
 use precip_types::scan::{Edge, Relationship, ResourceKind};
 
 use crate::ScanError;
@@ -10,7 +11,7 @@ use crate::collect::{
 
 pub async fn enabled_regions(
     config: &SdkConfig,
-) -> Result<Vec<String>, ScanError> {
+) -> Result<Vec<precip_types::Region>, ScanError> {
     let ec2 = aws_sdk_ec2::Client::new(config);
     let out = ec2
         .describe_regions()
@@ -21,7 +22,7 @@ pub async fn enabled_regions(
     Ok(out
         .regions()
         .iter()
-        .filter_map(|r| r.region_name().map(str::to_string))
+        .filter_map(|r| r.region_name().map(precip_types::Region::from))
         .collect())
 }
 
@@ -195,10 +196,10 @@ impl Collector for InstanceTypes {
                     else {
                         continue;
                     };
-                    let arn = format!(
+                    let arn = Arn::from(format!(
                         "arn:{}:ec2:{}::instance-type/{name}",
                         ctx.identity.partition, ctx.region
-                    );
+                    ));
                     out.resources.push(ctx.resource(
                         arn,
                         ResourceKind::InstanceType,
