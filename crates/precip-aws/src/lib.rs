@@ -82,7 +82,7 @@ impl Default for Options {
 }
 
 use precip_collect::ProgressSender;
-use precip_collect::emit;
+use precip_collect::{emit, selected};
 
 /// Loads the default AWS credential chain, the same one the AWS CLI uses.
 pub async fn load_config(profile: Option<&str>) -> SdkConfig {
@@ -137,8 +137,13 @@ pub async fn scan_estate(
     let selected: Vec<accounts::MemberAccount> = members
         .into_iter()
         .filter(|a| a.id != identity.account_id)
-        .filter(|a| opts.accounts.is_empty() || opts.accounts.contains(&a.id))
-        .filter(|a| !opts.exclude_accounts.contains(&a.id))
+        .filter(|a| {
+            selected(
+                &[a.id.as_str(), a.name.as_str()],
+                &opts.accounts,
+                &opts.exclude_accounts,
+            )
+        })
         .collect();
 
     tracing::info!(

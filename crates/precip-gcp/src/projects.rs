@@ -3,9 +3,10 @@
 //! otherwise from Resource Manager's search, which returns every project
 //! the caller can see.
 
-use crate::api::{ApiError, Gcp};
+use crate::api::Gcp;
 use crate::assets::{self, Asset, FOLDER, ORGANIZATION, PROJECT};
 use crate::id::{str_at, text};
+use precip_collect::http::HttpError;
 use precip_types::scan::Resource;
 use precip_types::{AccountId, Arn, Body, Region, body};
 use serde::Deserialize;
@@ -67,7 +68,7 @@ fn partial(full: &str) -> Option<String> {
 pub(crate) async fn under(
     gcp: &Gcp,
     scope: &str,
-) -> Result<Vec<Project>, ApiError> {
+) -> Result<Vec<Project>, HttpError> {
     let got =
         assets::list(gcp, scope, &[PROJECT, FOLDER, ORGANIZATION]).await?;
     Ok(from_assets(&got))
@@ -133,7 +134,7 @@ struct Container {
 
 /// Every project the caller can see. Parent names need read access to
 /// the folders and organization; without it they are left out.
-pub(crate) async fn search(gcp: &Gcp) -> Result<Vec<Project>, ApiError> {
+pub(crate) async fn search(gcp: &Gcp) -> Result<Vec<Project>, HttpError> {
     let pages: Vec<SearchPage> = gcp
         .pages(gcp.url("cloudresourcemanager", "/v3/projects:search")?)
         .await?;
@@ -181,7 +182,7 @@ pub(crate) async fn search(gcp: &Gcp) -> Result<Vec<Project>, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::fake::{Script, ok, status};
+    use precip_collect::http::fake::{Script, ok, status};
     use std::sync::Arc;
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {

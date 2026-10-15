@@ -7,14 +7,22 @@ rust-version.workspace = true
 repository.workspace = true
 description = "The collector runner shared by precip's cloud scanners"
 
+[features]
+# The scripted HTTP transport, for the scanners' tests.
+fake = []
+
 [dependencies]
+http = { workspace = true, features = ["std"] }
 precip-types.workspace = true
+reqwest = { workspace = true, features = ["rustls", "gzip"] }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 thiserror = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true

@@ -17,14 +17,16 @@ mod managed;
 mod network;
 mod projects;
 
-pub use api::ApiError;
 use api::Gcp;
 use assets::Inventory;
 use google_cloud_auth::build_errors::Error as BuildError;
 use google_cloud_auth::credentials::{Builder, Credentials};
-use precip_collect::{Collected, ProgressSender, emit, error_chain};
+use precip_collect::http::{HttpError, Request};
+use precip_collect::{
+    Collected, ProgressSender, emit, error_chain, finish_batch, selected,
+};
 use precip_types::scan::{ScanTarget, TargetStatus};
-use precip_types::{AccountId, Provider, Region, Scan, ScanEvent};
+use precip_types::{AccountId, Provider, Scan, ScanEvent};
 use projects::Project;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -41,9 +43,9 @@ pub enum ScanError {
     #[error("loading Google Cloud credentials")]
     Credential(#[source] BuildError),
     #[error("starting the HTTP client")]
-    Client(#[source] ApiError),
+    Client(#[source] HttpError),
     #[error("listing projects")]
-    Projects(#[source] ApiError),
+    Projects(#[source] HttpError),
     #[error("no active projects match the selection")]
     NoProjects,
 }
@@ -225,55 +227,23 @@ async fn scan_batch(
             )
         }
     };
-    let mut per_project: HashMap<&str, usize> = HashMap::new();
-    for r in &got.resources {
-        *per_project.entry(r.account_id.as_str()).or_default() += 1;
-    }
-    let mut targets = Vec::new();
-    for p in projects {
-        let id = p.account_id();
-        let resources = per_project.get(p.id.as_str()).copied().unwrap_or(0);
-        emit(
-            progress,
-            ScanEvent::RegionsPlanned {
-                account_id: id.clone(),
-                regions: 1,
-                skipped: 0,
-            },
-        );
-        emit(
-            progress,
-            ScanEvent::RegionFinished {
-                account_id: id.clone(),
-                region: Region::every(),
-                status: status.clone(),
-                resources,
-            },
-        );
-        emit(
-            progress,
-            ScanEvent::AccountFinished { account_id: id.clone(), resources },
-        );
-        targets.push(ScanTarget {
-            account_id: id,
-            region: Region::every(),
-            status: status.clone(),
-        });
-    }
+    let accounts: Vec<AccountId> =
+        projects.iter().map(Project::account_id).collect();
+    let targets = finish_batch(progress, &accounts, &got, &status);
     (targets, got)
 }
 
 /// The active projects `opts` selects, sorted by id.
 fn select(all: Vec<Project>, opts: &Options) -> Vec<Project> {
-    let has = |ids: &[AccountId], p: &Project| {
-        ids.iter().any(|i| i.as_str() == p.id || i.as_str() == p.number)
-    };
     let mut out: Vec<Project> = all
         .into_iter()
         .filter(|p| {
             p.is_active()
-                && (opts.projects.is_empty() || has(&opts.projects, p))
-                && !has(&opts.exclude_projects, p)
+                && selected(
+                    &[p.id.as_str(), p.number.as_str()],
+                    &opts.projects,
+                    &opts.exclude_projects,
+                )
         })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -301,8 +271,14 @@ async fn caller(gcp: &Gcp) -> String {
             .unwrap_or_default()
             .to_string();
         url.set_query(None);
-        let body = gcp.send(&api::Request { url, form: Some(form) }).await?;
-        Ok::<Info, ApiError>(serde_json::from_slice(&body)?)
+        let body = gcp
+            .send(&Request::post(
+                url,
+                form.into_bytes(),
+                "application/x-www-form-urlencoded",
+            ))
+            .await?;
+        Ok::<Info, HttpError>(serde_json::from_slice(&body)?)
     }
     .await;
     match info {
@@ -319,7 +295,7 @@ async fn caller(gcp: &Gcp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::fake::{Canned, Script, ok, status};
+    use precip_collect::http::fake::{Canned, Script, ok, status};
 
     fn project(id: &str, number: &str, state: &str) -> Project {
         Project {
@@ -481,17 +457,18 @@ mod tests {
         );
 
         let listings =
-            script.sent().iter().filter(|u| u.contains("/assets?")).count();
+            script.urls().iter().filter(|u| u.contains("/assets?")).count();
         assert_eq!(listings, 2, "the hierarchy, then every resource at once");
         let tokeninfo = script
             .sent()
             .into_iter()
-            .find(|u| u.contains("tokeninfo"))
+            .find(|s| s.url.contains("tokeninfo"))
             .unwrap();
         assert!(
-            !tokeninfo.contains("access_token"),
+            !tokeninfo.url.contains("access_token"),
             "the token goes in the body"
         );
+        assert_eq!(tokeninfo.body.as_deref(), Some("access_token=token"));
 
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {

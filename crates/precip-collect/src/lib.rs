@@ -4,10 +4,12 @@
 //! organization. The runner runs each collector, records
 //! failures by API name, logs what came back, and merges it.
 
+pub mod http;
+
 use precip_types::scan::{
-    Edge, Relationship, Resource, ResourceKind, TargetStatus,
+    Edge, Relationship, Resource, ResourceKind, ScanTarget, TargetStatus,
 };
-use precip_types::{Arn, Body, ScanEvent};
+use precip_types::{AccountId, Arn, Body, Region, ScanEvent};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -24,6 +26,68 @@ pub fn emit(progress: &Option<ProgressSender>, event: ScanEvent) {
         // A closed receiver means nobody is watching; the scan goes on.
         let _ = tx.send(event);
     }
+}
+
+/// Whether an account passes an include list (empty means every account)
+/// and an exclude list, matched on any of its keys (an id, a number, a
+/// name) without regard to case.
+pub fn selected<S: AsRef<str>>(
+    keys: &[&str],
+    only: &[S],
+    except: &[S],
+) -> bool {
+    let named = |list: &[S]| {
+        list.iter()
+            .any(|x| keys.iter().any(|k| k.eq_ignore_ascii_case(x.as_ref())))
+    };
+    (only.is_empty() || named(only)) && !named(except)
+}
+
+/// Report accounts scanned together in one pass over every region, as
+/// Azure and Google Cloud scan them: each gets one target with the
+/// batch's status and the progress events an account and region scan
+/// would send.
+pub fn finish_batch(
+    progress: &Option<ProgressSender>,
+    accounts: &[AccountId],
+    got: &Collected,
+    status: &TargetStatus,
+) -> Vec<ScanTarget> {
+    let mut per_account: HashMap<&str, usize> = HashMap::new();
+    for r in &got.resources {
+        *per_account.entry(r.account_id.as_str()).or_default() += 1;
+    }
+    let mut targets = Vec::new();
+    for id in accounts {
+        let resources = per_account.get(id.as_str()).copied().unwrap_or(0);
+        emit(
+            progress,
+            ScanEvent::RegionsPlanned {
+                account_id: id.clone(),
+                regions: 1,
+                skipped: 0,
+            },
+        );
+        emit(
+            progress,
+            ScanEvent::RegionFinished {
+                account_id: id.clone(),
+                region: Region::every(),
+                status: status.clone(),
+                resources,
+            },
+        );
+        emit(
+            progress,
+            ScanEvent::AccountFinished { account_id: id.clone(), resources },
+        );
+        targets.push(ScanTarget {
+            account_id: id.clone(),
+            region: Region::every(),
+            status: status.clone(),
+        });
+    }
+    targets
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -461,5 +525,35 @@ mod tests {
         a.absorb(b);
         assert_eq!(a.resources[0].tags["Name"], "web");
         assert_eq!(a.resources[0].tags["App"], "shop");
+    }
+
+    #[test]
+    fn selection_matches_any_key_ignoring_case() {
+        let none: [&str; 0] = [];
+        assert!(selected(&["a", "1"], &none, &none));
+        assert!(selected(&["shop", "123"], &["123"], &none));
+        assert!(selected(&["Shop"], &["SHOP"], &none));
+        assert!(!selected(&["shop"], &["other"], &none));
+        assert!(!selected(&["shop", "123"], &none, &["123"]));
+        assert!(!selected(&["shop"], &["shop"], &["shop"]), "exclusion wins");
+    }
+
+    #[test]
+    fn a_batch_reports_each_account_with_its_own_count() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut got = Collected::default();
+        got.resources.push(instance("i-1"));
+        let accounts = [AccountId::from("1"), AccountId::from("2")];
+        let targets =
+            finish_batch(&Some(tx), &accounts, &got, &TargetStatus::Scanned);
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|t| t.region == Region::every()));
+        let mut finished = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let ScanEvent::AccountFinished { account_id, resources } = e {
+                finished.push((account_id.to_string(), resources));
+            }
+        }
+        assert_eq!(finished, [("1".to_string(), 1), ("2".to_string(), 0)]);
     }
 }

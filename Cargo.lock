@@ -3120,7 +3120,11 @@ dependencies = [
 name = "precip-collect"
 version = "0.1.0"
 dependencies = [
+ "http",
  "precip-types",
+ "reqwest",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -3166,7 +3170,6 @@ dependencies = [
  "jiff",
  "precip-collect",
  "precip-types",
- "reqwest",
  "serde",
  "serde_json",
  "thiserror",
