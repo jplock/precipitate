@@ -1,5 +1,9 @@
 //! Schedule persistence: rules, blackouts, status, events and versions.
 
+use crate::kinds::{
+    DispositionSource, EventKind, MigrationEventKind, Setting, Trigger,
+};
+use crate::query::{Bound, RowExt};
 use crate::schema::{
     DispositionHistory, MigrationEvents, MigrationStatus, PlanEvents,
     ResourceVersions, ScheduleBlackouts, ScheduleDependencies, ScheduleRules,
@@ -14,21 +18,13 @@ use precip_engine::schedule::{
 };
 use precip_types::PairKey;
 use sea_query::{
-    Alias, Expr, ExprTrait, Func, OnConflict, Order, Query, SqliteQueryBuilder,
-    UnionType,
+    Alias, Expr, ExprTrait, Func, OnConflict, Order, Query, UnionType,
 };
-use sea_query_sqlx::SqlxBinder;
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqliteConnection};
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroU32;
-
-/// Build a query and bind it, the one way every statement here runs.
-macro_rules! bound {
-    ($stmt:expr) => {{
-        let (sql, values) = $stmt.build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-    }};
-}
 
 /// A pair's stored weekday rule: empty follows the global rule.
 fn pair_weekdays(spec: &str) -> Result<Option<Weekdays>, DbError> {
@@ -36,6 +32,18 @@ fn pair_weekdays(spec: &str) -> Result<Option<Weekdays>, DbError> {
         return Ok(None);
     }
     Ok(Some(spec.parse()?))
+}
+
+/// A pair from two of a row's columns.
+fn pair_of(
+    r: &SqliteRow,
+    workload: &str,
+    environment: &str,
+) -> Result<PairKey, DbError> {
+    Ok(PairKey::new(
+        r.try_get::<String, _>(workload)?,
+        r.try_get::<String, _>(environment)?,
+    ))
 }
 
 fn parse_date(s: &str) -> Result<Date, DbError> {
@@ -117,9 +125,7 @@ pub enum PlanEvent {
         workload: String,
         environment: String,
         disposition: precip_types::Disposition,
-        /// `user` for a direct change, `bulk` for a default applied to
-        /// every pair.
-        source: String,
+        source: DispositionSource,
         note: Option<String>,
     },
     DefaultDispositionSet {
@@ -172,23 +178,23 @@ impl PlanEvent {
         }
     }
 
-    pub fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> EventKind {
         match self {
-            PlanEvent::RulesSet { .. } => "rules_set",
-            PlanEvent::BlackoutAdded { .. } => "blackout_added",
-            PlanEvent::BlackoutRemoved { .. } => "blackout_removed",
-            PlanEvent::PairRuleSet { .. } => "pair_rule_set",
-            PlanEvent::PairPlanSet { .. } => "pair_plan_set",
-            PlanEvent::WaveSet { .. } => "wave_set",
-            PlanEvent::WaveRemoved { .. } => "wave_removed",
-            PlanEvent::DependencyAdded { .. } => "dependency_added",
-            PlanEvent::DependencyRemoved { .. } => "dependency_removed",
-            PlanEvent::StatusChanged { .. } => "status_changed",
-            PlanEvent::DispositionSet { .. } => "disposition_set",
+            PlanEvent::RulesSet { .. } => EventKind::RulesSet,
+            PlanEvent::BlackoutAdded { .. } => EventKind::BlackoutAdded,
+            PlanEvent::BlackoutRemoved { .. } => EventKind::BlackoutRemoved,
+            PlanEvent::PairRuleSet { .. } => EventKind::PairRuleSet,
+            PlanEvent::PairPlanSet { .. } => EventKind::PairPlanSet,
+            PlanEvent::WaveSet { .. } => EventKind::WaveSet,
+            PlanEvent::WaveRemoved { .. } => EventKind::WaveRemoved,
+            PlanEvent::DependencyAdded { .. } => EventKind::DependencyAdded,
+            PlanEvent::DependencyRemoved { .. } => EventKind::DependencyRemoved,
+            PlanEvent::StatusChanged { .. } => EventKind::StatusChanged,
+            PlanEvent::DispositionSet { .. } => EventKind::DispositionSet,
             PlanEvent::DefaultDispositionSet { .. } => {
-                "default_disposition_set"
+                EventKind::DefaultDispositionSet
             }
-            PlanEvent::WorkloadMerged { .. } => "workload_merged",
+            PlanEvent::WorkloadMerged { .. } => EventKind::WorkloadMerged,
         }
     }
 
@@ -326,7 +332,11 @@ impl PlanEvent {
                 format!(
                     "{workload} / {environment}: {}{}{}",
                     disposition.as_str(),
-                    if source == "bulk" { " (default applied)" } else { "" },
+                    if *source == DispositionSource::Bulk {
+                        " (default applied)"
+                    } else {
+                        ""
+                    },
                     note.as_ref().map(|n| format!(", {n}")).unwrap_or_default()
                 )
             }
@@ -369,6 +379,21 @@ pub struct PairStatus {
 }
 
 impl PairStatus {
+    /// A pair with no stored status.
+    const PROPOSED: Self = Self {
+        status: Status::Proposed,
+        confirmed_date: None,
+        migrated_date: None,
+    };
+
+    fn from_row(r: &SqliteRow) -> Result<Self, DbError> {
+        Ok(Self {
+            status: r.parsed("status")?,
+            confirmed_date: r.parsed_opt("confirmed_date")?,
+            migrated_date: r.parsed_opt("migrated_date")?,
+        })
+    }
+
     /// The scheduler's view. An agreed status is always written with its
     /// date; one read without a date has nothing to hold and is proposed.
     pub fn state(&self) -> PairState {
@@ -384,10 +409,21 @@ impl PairStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationEvent {
-    pub event: String,
+    pub event: MigrationEventKind,
     pub date: Option<Date>,
     pub at: jiff::Timestamp,
     pub note: Option<String>,
+}
+
+impl MigrationEvent {
+    fn from_row(r: &sqlx::sqlite::SqliteRow) -> Result<Self, DbError> {
+        Ok(Self {
+            event: r.parsed("event")?,
+            date: r.parsed_opt("date")?,
+            at: r.parsed("at")?,
+            note: r.try_get("note")?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,46 +434,44 @@ pub struct ScheduleVersion {
     pub target_end: Option<Date>,
     pub ends: Option<Date>,
     pub late: i64,
-    pub trigger: String,
+    pub trigger: Trigger,
 }
 
 impl Store {
-    async fn setting(&self, key: &str) -> Result<Option<String>, DbError> {
+    async fn setting(&self, key: Setting) -> Result<Option<String>, DbError> {
         let mut conn = self.pool.acquire().await?;
         Self::setting_in(&mut conn, key).await
     }
 
     async fn setting_in(
         conn: &mut SqliteConnection,
-        key: &str,
+        key: Setting,
     ) -> Result<Option<String>, DbError> {
-        let row = bound!(
-            Query::select()
-                .column(Settings::Value)
-                .from(Settings::Table)
-                .and_where(Expr::col(Settings::Key).eq(key))
-        )
+        let row = (Query::select()
+            .column(Settings::Value)
+            .from(Settings::Table)
+            .and_where(Expr::col(Settings::Key).eq(key.as_str())))
+        .bound()
         .fetch_optional(&mut *conn)
         .await?;
-        Ok(row.map(|r| r.get::<String, _>("value")))
+        Ok(row.map(|r| r.try_get::<String, _>("value")).transpose()?)
     }
 
     async fn set_setting(
         conn: &mut SqliteConnection,
-        key: &str,
+        key: Setting,
         value: &str,
     ) -> Result<(), DbError> {
-        bound!(
-            Query::insert()
-                .into_table(Settings::Table)
-                .columns([Settings::Key, Settings::Value])
-                .values_panic([key.into(), value.into()])
-                .on_conflict(
-                    OnConflict::column(Settings::Key)
-                        .update_column(Settings::Value)
-                        .to_owned(),
-                )
-        )
+        (Query::insert()
+            .into_table(Settings::Table)
+            .columns([Settings::Key, Settings::Value])
+            .values_panic([key.as_str().into(), value.into()])
+            .on_conflict(
+                OnConflict::column(Settings::Key)
+                    .update_column(Settings::Value)
+                    .to_owned(),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -446,22 +480,22 @@ impl Store {
     /// The scan selection last used, as JSON of the scanner's options,
     /// so a headless rescan repeats what was chosen in the interface.
     pub async fn saved_scan_options(&self) -> Result<Option<String>, DbError> {
-        self.setting("scan.options").await
+        self.setting(Setting::ScanOptions).await
     }
 
     pub async fn save_scan_options(&self, json: &str) -> Result<(), DbError> {
         let mut conn = self.pool.acquire().await?;
-        Self::set_setting(&mut conn, "scan.options", json).await
+        Self::set_setting(&mut conn, Setting::ScanOptions, json).await
     }
 
     /// The sizing profile the workspace sizes with.
     pub async fn sizing_profile(&self) -> Result<Option<String>, DbError> {
-        self.setting("sizing.profile").await
+        self.setting(Setting::SizingProfile).await
     }
 
     pub async fn set_sizing_profile(&self, name: &str) -> Result<(), DbError> {
         let mut conn = self.pool.acquire().await?;
-        Self::set_setting(&mut conn, "sizing.profile", name).await
+        Self::set_setting(&mut conn, Setting::SizingProfile, name).await
     }
 
     pub async fn global_rules(&self) -> Result<GlobalRules, DbError> {
@@ -477,31 +511,31 @@ impl Store {
             v.and_then(|s| s.parse().ok()).unwrap_or(default)
         };
         let target_end =
-            match Self::setting_in(conn, "schedule.target_end").await? {
+            match Self::setting_in(conn, Setting::TargetEnd).await? {
                 Some(s) if !s.is_empty() => Some(parse_date(&s)?),
                 _ => None,
             };
         Ok(GlobalRules {
             per_day: num(
-                Self::setting_in(conn, "schedule.per_day").await?,
+                Self::setting_in(conn, Setting::PerDay).await?,
                 d.per_day,
             ),
             per_week: num(
-                Self::setting_in(conn, "schedule.per_week").await?,
+                Self::setting_in(conn, Setting::PerWeek).await?,
                 d.per_week,
             ),
             per_month: num(
-                Self::setting_in(conn, "schedule.per_month").await?,
+                Self::setting_in(conn, Setting::PerMonth).await?,
                 d.per_month,
             ),
-            weekdays: Self::setting_in(conn, "schedule.weekdays")
+            weekdays: Self::setting_in(conn, Setting::Weekdays)
                 .await?
                 .unwrap_or_default()
                 .parse()?,
             target_end,
             nonprod_before_prod: Self::setting_in(
                 conn,
-                "schedule.nonprod_before_prod",
+                Setting::NonprodBeforeProd,
             )
             .await?
             .is_none_or(|v| v == "true"),
@@ -512,31 +546,27 @@ impl Store {
         conn: &mut SqliteConnection,
         rules: &GlobalRules,
     ) -> Result<(), DbError> {
-        Self::set_setting(conn, "schedule.per_day", &rules.per_day.to_string())
+        Self::set_setting(conn, Setting::PerDay, &rules.per_day.to_string())
+            .await?;
+        Self::set_setting(conn, Setting::PerWeek, &rules.per_week.to_string())
             .await?;
         Self::set_setting(
             conn,
-            "schedule.per_week",
-            &rules.per_week.to_string(),
-        )
-        .await?;
-        Self::set_setting(
-            conn,
-            "schedule.per_month",
+            Setting::PerMonth,
             &rules.per_month.to_string(),
         )
         .await?;
-        Self::set_setting(conn, "schedule.weekdays", &rules.weekdays.to_spec())
+        Self::set_setting(conn, Setting::Weekdays, &rules.weekdays.to_spec())
             .await?;
         Self::set_setting(
             conn,
-            "schedule.target_end",
+            Setting::TargetEnd,
             &rules.target_end.map(|d| d.to_string()).unwrap_or_default(),
         )
         .await?;
         Self::set_setting(
             conn,
-            "schedule.nonprod_before_prod",
+            Setting::NonprodBeforeProd,
             &rules.nonprod_before_prod.to_string(),
         )
         .await?;
@@ -547,24 +577,23 @@ impl Store {
         conn: &mut SqliteConnection,
         b: &Blackout,
     ) -> Result<(), DbError> {
-        bound!(
-            Query::insert()
-                .into_table(ScheduleBlackouts::Table)
-                .columns([
-                    ScheduleBlackouts::Name,
-                    ScheduleBlackouts::StartDate,
-                    ScheduleBlackouts::EndDate,
-                    ScheduleBlackouts::Workload,
-                    ScheduleBlackouts::Environment,
-                ])
-                .values_panic([
-                    b.name.clone().into(),
-                    b.start.to_string().into(),
-                    b.end.to_string().into(),
-                    b.pair.as_ref().map(|p| p.workload.to_string()).into(),
-                    b.pair.as_ref().map(|p| p.environment.to_string()).into(),
-                ])
-        )
+        (Query::insert()
+            .into_table(ScheduleBlackouts::Table)
+            .columns([
+                ScheduleBlackouts::Name,
+                ScheduleBlackouts::StartDate,
+                ScheduleBlackouts::EndDate,
+                ScheduleBlackouts::Workload,
+                ScheduleBlackouts::Environment,
+            ])
+            .values_panic([
+                b.name.clone().into(),
+                b.start.to_string().into(),
+                b.end.to_string().into(),
+                b.pair.as_ref().map(|p| p.workload.to_string()).into(),
+                b.pair.as_ref().map(|p| p.environment.to_string()).into(),
+            ]))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -599,7 +628,7 @@ impl Store {
                     );
             }
         }
-        bound!(q).execute(&mut *conn).await?;
+        (q).bound().execute(&mut *conn).await?;
         Ok(())
     }
 
@@ -611,19 +640,18 @@ impl Store {
     async fn blackouts_in(
         conn: &mut SqliteConnection,
     ) -> Result<Vec<Blackout>, DbError> {
-        let rows = bound!(
-            Query::select()
-                .columns([
-                    ScheduleBlackouts::Name,
-                    ScheduleBlackouts::StartDate,
-                    ScheduleBlackouts::EndDate,
-                    ScheduleBlackouts::Workload,
-                    ScheduleBlackouts::Environment,
-                ])
-                .from(ScheduleBlackouts::Table)
-                .order_by(ScheduleBlackouts::StartDate, Order::Asc)
-                .order_by(ScheduleBlackouts::Name, Order::Asc)
-        )
+        let rows = (Query::select()
+            .columns([
+                ScheduleBlackouts::Name,
+                ScheduleBlackouts::StartDate,
+                ScheduleBlackouts::EndDate,
+                ScheduleBlackouts::Workload,
+                ScheduleBlackouts::Environment,
+            ])
+            .from(ScheduleBlackouts::Table)
+            .order_by(ScheduleBlackouts::StartDate, Order::Asc)
+            .order_by(ScheduleBlackouts::Name, Order::Asc))
+        .bound()
         .fetch_all(&mut *conn)
         .await?;
         rows.into_iter()
@@ -632,8 +660,8 @@ impl Store {
                 let e: Option<String> = r.get("environment");
                 Ok(Blackout {
                     name: r.get("name"),
-                    start: parse_date(&r.get::<String, _>("start_date"))?,
-                    end: parse_date(&r.get::<String, _>("end_date"))?,
+                    start: r.parsed::<Date>("start_date")?,
+                    end: r.parsed::<Date>("end_date")?,
                     pair: w.zip(e).map(|(w, e)| PairKey::new(w, e)),
                 })
             })
@@ -650,36 +678,35 @@ impl Store {
     ) -> Result<(), DbError> {
         // An empty list stored means the pair follows the global rule.
         let days = weekdays.map(Weekdays::to_spec).unwrap_or_default();
-        bound!(
-            Query::insert()
-                .into_table(ScheduleRules::Table)
-                .columns([
+        (Query::insert()
+            .into_table(ScheduleRules::Table)
+            .columns([
+                ScheduleRules::Workload,
+                ScheduleRules::Environment,
+                ScheduleRules::Weekdays,
+                ScheduleRules::Earliest,
+                ScheduleRules::Priority,
+            ])
+            .values_panic([
+                workload.into(),
+                environment.into(),
+                days.into(),
+                earliest.map(|d| d.to_string()).into(),
+                priority.into(),
+            ])
+            .on_conflict(
+                OnConflict::columns([
                     ScheduleRules::Workload,
                     ScheduleRules::Environment,
+                ])
+                .update_columns([
                     ScheduleRules::Weekdays,
                     ScheduleRules::Earliest,
                     ScheduleRules::Priority,
                 ])
-                .values_panic([
-                    workload.into(),
-                    environment.into(),
-                    days.into(),
-                    earliest.map(|d| d.to_string()).into(),
-                    priority.into(),
-                ])
-                .on_conflict(
-                    OnConflict::columns([
-                        ScheduleRules::Workload,
-                        ScheduleRules::Environment,
-                    ])
-                    .update_columns([
-                        ScheduleRules::Weekdays,
-                        ScheduleRules::Earliest,
-                        ScheduleRules::Priority,
-                    ])
-                    .to_owned(),
-                )
-        )
+                .to_owned(),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -700,36 +727,35 @@ impl Store {
                 "wave, duration and weight must be at least 1".into(),
             ));
         }
-        bound!(
-            Query::insert()
-                .into_table(ScheduleRules::Table)
-                .columns([
+        (Query::insert()
+            .into_table(ScheduleRules::Table)
+            .columns([
+                ScheduleRules::Workload,
+                ScheduleRules::Environment,
+                ScheduleRules::Wave,
+                ScheduleRules::DurationDays,
+                ScheduleRules::Weight,
+            ])
+            .values_panic([
+                workload.into(),
+                environment.into(),
+                wave.into(),
+                duration_days.into(),
+                weight.into(),
+            ])
+            .on_conflict(
+                OnConflict::columns([
                     ScheduleRules::Workload,
                     ScheduleRules::Environment,
+                ])
+                .update_columns([
                     ScheduleRules::Wave,
                     ScheduleRules::DurationDays,
                     ScheduleRules::Weight,
                 ])
-                .values_panic([
-                    workload.into(),
-                    environment.into(),
-                    wave.into(),
-                    duration_days.into(),
-                    weight.into(),
-                ])
-                .on_conflict(
-                    OnConflict::columns([
-                        ScheduleRules::Workload,
-                        ScheduleRules::Environment,
-                    ])
-                    .update_columns([
-                        ScheduleRules::Wave,
-                        ScheduleRules::DurationDays,
-                        ScheduleRules::Weight,
-                    ])
-                    .to_owned(),
-                )
-        )
+                .to_owned(),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -744,28 +770,27 @@ impl Store {
         if number == 0 {
             return Err(DbError::Invalid("waves start at 1".into()));
         }
-        bound!(
-            Query::insert()
-                .into_table(ScheduleWaves::Table)
-                .columns([
-                    ScheduleWaves::Wave,
-                    ScheduleWaves::Name,
-                    ScheduleWaves::TargetEnd,
-                ])
-                .values_panic([
-                    number.into(),
-                    name.into(),
-                    target_end.map(|d| d.to_string()).into(),
-                ])
-                .on_conflict(
-                    OnConflict::column(ScheduleWaves::Wave)
-                        .update_columns([
-                            ScheduleWaves::Name,
-                            ScheduleWaves::TargetEnd,
-                        ])
-                        .to_owned(),
-                )
-        )
+        (Query::insert()
+            .into_table(ScheduleWaves::Table)
+            .columns([
+                ScheduleWaves::Wave,
+                ScheduleWaves::Name,
+                ScheduleWaves::TargetEnd,
+            ])
+            .values_panic([
+                number.into(),
+                name.into(),
+                target_end.map(|d| d.to_string()).into(),
+            ])
+            .on_conflict(
+                OnConflict::column(ScheduleWaves::Wave)
+                    .update_columns([
+                        ScheduleWaves::Name,
+                        ScheduleWaves::TargetEnd,
+                    ])
+                    .to_owned(),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -775,19 +800,17 @@ impl Store {
         conn: &mut SqliteConnection,
         number: u32,
     ) -> Result<(), DbError> {
-        bound!(
-            Query::update()
-                .table(ScheduleRules::Table)
-                .value(ScheduleRules::Wave, 1)
-                .and_where(Expr::col(ScheduleRules::Wave).eq(number))
-        )
+        (Query::update()
+            .table(ScheduleRules::Table)
+            .value(ScheduleRules::Wave, 1)
+            .and_where(Expr::col(ScheduleRules::Wave).eq(number)))
+        .bound()
         .execute(&mut *conn)
         .await?;
-        bound!(
-            Query::delete()
-                .from_table(ScheduleWaves::Table)
-                .and_where(Expr::col(ScheduleWaves::Wave).eq(number))
-        )
+        (Query::delete()
+            .from_table(ScheduleWaves::Table)
+            .and_where(Expr::col(ScheduleWaves::Wave).eq(number)))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -814,32 +837,27 @@ impl Store {
                 Query::select().expr(Expr::val(1)).to_owned(),
             )
             .to_owned();
-        let rows = bound!(
-            Query::select()
-                .column((in_use.clone(), ScheduleWaves::Wave))
-                .column((ScheduleWaves::Table, ScheduleWaves::Name))
-                .column((ScheduleWaves::Table, ScheduleWaves::TargetEnd))
-                .from_subquery(numbers, in_use.clone())
-                .left_join(
-                    ScheduleWaves::Table,
-                    Expr::col((ScheduleWaves::Table, ScheduleWaves::Wave))
-                        .equals((in_use.clone(), ScheduleWaves::Wave)),
-                )
-                .order_by((in_use.clone(), ScheduleWaves::Wave), Order::Asc)
-        )
+        let rows = (Query::select()
+            .column((in_use.clone(), ScheduleWaves::Wave))
+            .column((ScheduleWaves::Table, ScheduleWaves::Name))
+            .column((ScheduleWaves::Table, ScheduleWaves::TargetEnd))
+            .from_subquery(numbers, in_use.clone())
+            .left_join(
+                ScheduleWaves::Table,
+                Expr::col((ScheduleWaves::Table, ScheduleWaves::Wave))
+                    .equals((in_use.clone(), ScheduleWaves::Wave)),
+            )
+            .order_by((in_use.clone(), ScheduleWaves::Wave), Order::Asc))
+        .bound()
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
             .map(|r| {
-                let target: Option<String> = r.get("target_end");
                 let name: Option<String> = r.get("name");
                 Ok(Wave {
                     number: r.get::<i64, _>("wave").try_into().unwrap_or(1),
                     name: name.unwrap_or_default(),
-                    target_end: target
-                        .as_deref()
-                        .map(parse_date)
-                        .transpose()?,
+                    target_end: r.parsed_opt("target_end")?,
                 })
             })
             .collect()
@@ -852,32 +870,31 @@ impl Store {
         on_workload: &str,
         on_environment: &str,
     ) -> Result<(), DbError> {
-        bound!(
-            Query::insert()
-                .into_table(ScheduleDependencies::Table)
-                .columns([
+        (Query::insert()
+            .into_table(ScheduleDependencies::Table)
+            .columns([
+                ScheduleDependencies::Workload,
+                ScheduleDependencies::Environment,
+                ScheduleDependencies::OnWorkload,
+                ScheduleDependencies::OnEnvironment,
+            ])
+            .values_panic([
+                workload.into(),
+                environment.into(),
+                on_workload.into(),
+                on_environment.into(),
+            ])
+            .on_conflict(
+                OnConflict::columns([
                     ScheduleDependencies::Workload,
                     ScheduleDependencies::Environment,
                     ScheduleDependencies::OnWorkload,
                     ScheduleDependencies::OnEnvironment,
                 ])
-                .values_panic([
-                    workload.into(),
-                    environment.into(),
-                    on_workload.into(),
-                    on_environment.into(),
-                ])
-                .on_conflict(
-                    OnConflict::columns([
-                        ScheduleDependencies::Workload,
-                        ScheduleDependencies::Environment,
-                        ScheduleDependencies::OnWorkload,
-                        ScheduleDependencies::OnEnvironment,
-                    ])
-                    .do_nothing()
-                    .to_owned(),
-                )
-        )
+                .do_nothing()
+                .to_owned(),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -890,24 +907,20 @@ impl Store {
         on_workload: &str,
         on_environment: &str,
     ) -> Result<(), DbError> {
-        bound!(
-            Query::delete()
-                .from_table(ScheduleDependencies::Table)
-                .and_where(
-                    Expr::col(ScheduleDependencies::Workload).eq(workload),
-                )
-                .and_where(
-                    Expr::col(ScheduleDependencies::Environment)
-                        .eq(environment),
-                )
-                .and_where(
-                    Expr::col(ScheduleDependencies::OnWorkload).eq(on_workload),
-                )
-                .and_where(
-                    Expr::col(ScheduleDependencies::OnEnvironment)
-                        .eq(on_environment),
-                )
-        )
+        (Query::delete()
+            .from_table(ScheduleDependencies::Table)
+            .and_where(Expr::col(ScheduleDependencies::Workload).eq(workload))
+            .and_where(
+                Expr::col(ScheduleDependencies::Environment).eq(environment),
+            )
+            .and_where(
+                Expr::col(ScheduleDependencies::OnWorkload).eq(on_workload),
+            )
+            .and_where(
+                Expr::col(ScheduleDependencies::OnEnvironment)
+                    .eq(on_environment),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -927,36 +940,47 @@ impl Store {
         workload: &str,
         environment: &str,
     ) -> Result<PairStatus, DbError> {
-        let row = bound!(
-            Query::select()
-                .columns([
-                    MigrationStatus::Status,
-                    MigrationStatus::ConfirmedDate,
-                    MigrationStatus::MigratedDate,
-                ])
-                .from(MigrationStatus::Table)
-                .and_where(Expr::col(MigrationStatus::Workload).eq(workload))
-                .and_where(
-                    Expr::col(MigrationStatus::Environment).eq(environment),
-                )
-        )
+        let row = (Query::select()
+            .columns([
+                MigrationStatus::Status,
+                MigrationStatus::ConfirmedDate,
+                MigrationStatus::MigratedDate,
+            ])
+            .from(MigrationStatus::Table)
+            .and_where(Expr::col(MigrationStatus::Workload).eq(workload))
+            .and_where(
+                Expr::col(MigrationStatus::Environment).eq(environment),
+            ))
+        .bound()
         .fetch_optional(&mut *conn)
         .await?;
-        let Some(r) = row else {
-            return Ok(PairStatus {
-                status: Status::Proposed,
-                confirmed_date: None,
-                migrated_date: None,
-            });
-        };
-        let status: String = r.get("status");
-        let confirmed: Option<String> = r.get("confirmed_date");
-        let migrated: Option<String> = r.get("migrated_date");
-        Ok(PairStatus {
-            status: status.parse()?,
-            confirmed_date: confirmed.as_deref().map(parse_date).transpose()?,
-            migrated_date: migrated.as_deref().map(parse_date).transpose()?,
+        row.as_ref().map_or(Ok(PairStatus::PROPOSED), PairStatus::from_row)
+    }
+
+    /// Every pair with a stored status, in one query.
+    async fn pair_statuses_in(
+        conn: &mut SqliteConnection,
+    ) -> Result<HashMap<PairKey, PairStatus>, DbError> {
+        (Query::select()
+            .columns([
+                MigrationStatus::Workload,
+                MigrationStatus::Environment,
+                MigrationStatus::Status,
+                MigrationStatus::ConfirmedDate,
+                MigrationStatus::MigratedDate,
+            ])
+            .from(MigrationStatus::Table))
+        .bound()
+        .fetch_all(&mut *conn)
+        .await?
+        .iter()
+        .map(|r| {
+            Ok((
+                pair_of(r, "workload", "environment")?,
+                PairStatus::from_row(r)?,
+            ))
         })
+        .collect()
     }
 
     /// Record a status change and its event. Confirming requires a date
@@ -1063,36 +1087,35 @@ impl Store {
                 (None, None)
             }
         };
-        bound!(
-            Query::insert()
-                .into_table(MigrationStatus::Table)
-                .columns([
+        (Query::insert()
+            .into_table(MigrationStatus::Table)
+            .columns([
+                MigrationStatus::Workload,
+                MigrationStatus::Environment,
+                MigrationStatus::Status,
+                MigrationStatus::ConfirmedDate,
+                MigrationStatus::MigratedDate,
+            ])
+            .values_panic([
+                workload.into(),
+                environment.into(),
+                name.into(),
+                confirmed.map(|d| d.to_string()).into(),
+                migrated.map(|d| d.to_string()).into(),
+            ])
+            .on_conflict(
+                OnConflict::columns([
                     MigrationStatus::Workload,
                     MigrationStatus::Environment,
+                ])
+                .update_columns([
                     MigrationStatus::Status,
                     MigrationStatus::ConfirmedDate,
                     MigrationStatus::MigratedDate,
                 ])
-                .values_panic([
-                    workload.into(),
-                    environment.into(),
-                    name.into(),
-                    confirmed.map(|d| d.to_string()).into(),
-                    migrated.map(|d| d.to_string()).into(),
-                ])
-                .on_conflict(
-                    OnConflict::columns([
-                        MigrationStatus::Workload,
-                        MigrationStatus::Environment,
-                    ])
-                    .update_columns([
-                        MigrationStatus::Status,
-                        MigrationStatus::ConfirmedDate,
-                        MigrationStatus::MigratedDate,
-                    ])
-                    .to_owned(),
-                )
-        )
+                .to_owned(),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
         // A confirmed date never moves: a second confirmation replaces it
@@ -1110,30 +1133,25 @@ impl Store {
             Status::Migrated => "migrated",
             Status::RolledBack => "rolled_back",
         };
-        bound!(
-            Query::insert()
-                .into_table(MigrationEvents::Table)
-                .columns([
-                    MigrationEvents::Workload,
-                    MigrationEvents::Environment,
-                    MigrationEvents::Event,
-                    MigrationEvents::Date,
-                    MigrationEvents::At,
-                    MigrationEvents::Note,
-                ])
-                .values_panic([
-                    workload.into(),
-                    environment.into(),
-                    event.into(),
-                    confirmed
-                        .or(migrated)
-                        .or(date)
-                        .map(|d| d.to_string())
-                        .into(),
-                    at.to_string().into(),
-                    note.into(),
-                ])
-        )
+        (Query::insert()
+            .into_table(MigrationEvents::Table)
+            .columns([
+                MigrationEvents::Workload,
+                MigrationEvents::Environment,
+                MigrationEvents::Event,
+                MigrationEvents::Date,
+                MigrationEvents::At,
+                MigrationEvents::Note,
+            ])
+            .values_panic([
+                workload.into(),
+                environment.into(),
+                event.into(),
+                confirmed.or(migrated).or(date).map(|d| d.to_string()).into(),
+                at.to_string().into(),
+                note.into(),
+            ]))
+        .bound()
         .execute(&mut *conn)
         .await?;
         Ok(())
@@ -1144,34 +1162,51 @@ impl Store {
         workload: &str,
         environment: &str,
     ) -> Result<Vec<MigrationEvent>, DbError> {
-        let rows = bound!(
-            Query::select()
-                .columns([
-                    MigrationEvents::Event,
-                    MigrationEvents::Date,
-                    MigrationEvents::At,
-                    MigrationEvents::Note,
-                ])
-                .from(MigrationEvents::Table)
-                .and_where(Expr::col(MigrationEvents::Workload).eq(workload))
-                .and_where(
-                    Expr::col(MigrationEvents::Environment).eq(environment),
-                )
-                .order_by(MigrationEvents::Id, Order::Asc)
-        )
+        let rows = (Query::select()
+            .columns([
+                MigrationEvents::Event,
+                MigrationEvents::Date,
+                MigrationEvents::At,
+                MigrationEvents::Note,
+            ])
+            .from(MigrationEvents::Table)
+            .and_where(Expr::col(MigrationEvents::Workload).eq(workload))
+            .and_where(Expr::col(MigrationEvents::Environment).eq(environment))
+            .order_by(MigrationEvents::Id, Order::Asc))
+        .bound()
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|r| {
-                let date: Option<String> = r.get("date");
-                Ok(MigrationEvent {
-                    event: r.get("event"),
-                    date: date.as_deref().map(parse_date).transpose()?,
-                    at: r.get::<String, _>("at").parse()?,
-                    note: r.get("note"),
-                })
-            })
-            .collect()
+        rows.iter().map(MigrationEvent::from_row).collect()
+    }
+
+    /// Every pair's migration history in one query, oldest first.
+    async fn migration_events_by_pair(
+        &self,
+    ) -> Result<BTreeMap<PairKey, Vec<MigrationEvent>>, DbError> {
+        let rows = (Query::select()
+            .columns([
+                MigrationEvents::Workload,
+                MigrationEvents::Environment,
+                MigrationEvents::Event,
+                MigrationEvents::Date,
+                MigrationEvents::At,
+                MigrationEvents::Note,
+            ])
+            .from(MigrationEvents::Table)
+            .order_by(MigrationEvents::Id, Order::Asc))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
+        let mut out: BTreeMap<PairKey, Vec<MigrationEvent>> = BTreeMap::new();
+        for r in rows {
+            out.entry(PairKey::new(
+                r.try_get::<String, _>("workload")?,
+                r.try_get::<String, _>("environment")?,
+            ))
+            .or_default()
+            .push(MigrationEvent::from_row(&r)?);
+        }
+        Ok(out)
     }
 
     /// The pairs this one waits for that have not migrated yet.
@@ -1210,85 +1245,72 @@ impl Store {
         conn: &mut SqliteConnection,
     ) -> Result<Vec<PairInput>, DbError> {
         let dispositions = Self::pair_dispositions_in(conn).await?;
+        let rules: HashMap<PairKey, SqliteRow> = (Query::select()
+            .columns([
+                ScheduleRules::Workload,
+                ScheduleRules::Environment,
+                ScheduleRules::Weekdays,
+                ScheduleRules::Earliest,
+                ScheduleRules::Priority,
+                ScheduleRules::Wave,
+                ScheduleRules::DurationDays,
+                ScheduleRules::Weight,
+            ])
+            .from(ScheduleRules::Table))
+        .bound()
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|r| Ok((pair_of(&r, "workload", "environment")?, r)))
+        .collect::<Result<_, DbError>>()?;
+        let mut deps: HashMap<PairKey, Vec<PairKey>> = HashMap::new();
+        for r in (Query::select()
+            .columns([
+                ScheduleDependencies::Workload,
+                ScheduleDependencies::Environment,
+                ScheduleDependencies::OnWorkload,
+                ScheduleDependencies::OnEnvironment,
+            ])
+            .from(ScheduleDependencies::Table))
+        .bound()
+        .fetch_all(&mut *conn)
+        .await?
+        {
+            deps.entry(pair_of(&r, "workload", "environment")?)
+                .or_default()
+                .push(pair_of(&r, "on_workload", "on_environment")?);
+        }
+        let mut statuses = Self::pair_statuses_in(conn).await?;
+
         let mut out = Vec::new();
         for (pair, d) in dispositions {
             if !d.is_migrating() {
                 continue;
             }
-            let (workload, environment) =
-                (pair.workload.to_string(), pair.environment.to_string());
-            let rule = bound!(
-                Query::select()
-                    .columns([
-                        ScheduleRules::Weekdays,
-                        ScheduleRules::Earliest,
-                        ScheduleRules::Priority,
-                        ScheduleRules::Wave,
-                        ScheduleRules::DurationDays,
-                        ScheduleRules::Weight,
-                    ])
-                    .from(ScheduleRules::Table)
-                    .and_where(
-                        Expr::col(ScheduleRules::Workload).eq(workload.clone()),
-                    )
-                    .and_where(
-                        Expr::col(ScheduleRules::Environment)
-                            .eq(environment.clone()),
-                    )
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
             let mut input = PairInput::new(pair);
-            if let Some(r) = rule {
+            if let Some(r) = rules.get(&input.key) {
                 // Stored as at least 1 by set_pair_plan; anything else
                 // reads as 1.
-                let count = |col: &str| {
-                    u32::try_from(r.get::<i64, _>(col))
+                let count = |col: &str| -> Result<NonZeroU32, DbError> {
+                    Ok(u32::try_from(r.try_get::<i64, _>(col)?)
                         .ok()
                         .and_then(NonZeroU32::new)
-                        .unwrap_or(NonZeroU32::MIN)
+                        .unwrap_or(NonZeroU32::MIN))
                 };
-                let earliest: Option<String> = r.get("earliest");
                 input.weekdays =
-                    pair_weekdays(&r.get::<String, _>("weekdays"))?;
-                input.earliest =
-                    earliest.as_deref().map(parse_date).transpose()?;
+                    pair_weekdays(&r.try_get::<String, _>("weekdays")?)?;
+                input.earliest = r.parsed_opt("earliest")?;
                 input.priority =
-                    i32::try_from(r.get::<i64, _>("priority")).unwrap_or(0);
-                input.wave = count("wave").get();
-                input.duration = count("duration_days");
-                input.weight = count("weight");
+                    i32::try_from(r.try_get::<i64, _>("priority")?)
+                        .unwrap_or(0);
+                input.wave = count("wave")?.get();
+                input.duration = count("duration_days")?;
+                input.weight = count("weight")?;
             }
-            let deps: Vec<PairKey> = bound!(
-                Query::select()
-                    .columns([
-                        ScheduleDependencies::OnWorkload,
-                        ScheduleDependencies::OnEnvironment,
-                    ])
-                    .from(ScheduleDependencies::Table)
-                    .and_where(
-                        Expr::col(ScheduleDependencies::Workload)
-                            .eq(workload.clone()),
-                    )
-                    .and_where(
-                        Expr::col(ScheduleDependencies::Environment)
-                            .eq(environment.clone()),
-                    )
-            )
-            .fetch_all(&mut *conn)
-            .await?
-            .into_iter()
-            .map(|r| {
-                PairKey::new(
-                    r.get::<String, _>("on_workload"),
-                    r.get::<String, _>("on_environment"),
-                )
-            })
-            .collect();
-            input.depends_on = deps;
-            input.state = Self::pair_status_in(conn, &workload, &environment)
-                .await?
-                .state();
+            input.depends_on = deps.remove(&input.key).unwrap_or_default();
+            input.state = statuses
+                .remove(&input.key)
+                .map_or(PairState::Proposed, |s| s.state());
             out.push(input);
         }
         Ok(out)
@@ -1299,7 +1321,7 @@ impl Store {
     pub async fn compute_schedule(
         &self,
         today: Date,
-        trigger: &str,
+        trigger: Trigger,
     ) -> Result<(i64, Schedule), DbError> {
         let mut tx = self.pool.begin().await?;
         let out = self.compute_version(&mut tx, today, trigger, None).await?;
@@ -1311,7 +1333,7 @@ impl Store {
         &self,
         conn: &mut SqliteConnection,
         today: Date,
-        trigger: &str,
+        trigger: Trigger,
         event_id: Option<i64>,
     ) -> Result<(i64, Schedule), DbError> {
         let pairs = Self::schedule_inputs_in(conn).await?;
@@ -1347,75 +1369,70 @@ impl Store {
             .await?;
         }
 
-        let id: i64 = bound!(
-            Query::insert()
-                .into_table(ScheduleVersions::Table)
-                .columns([
-                    ScheduleVersions::ComputedAt,
-                    ScheduleVersions::AsOf,
-                    ScheduleVersions::TargetEnd,
-                    ScheduleVersions::Ends,
-                    ScheduleVersions::Late,
-                    ScheduleVersions::Trigger,
-                    ScheduleVersions::Schedule,
-                    ScheduleVersions::EventId,
-                ])
-                .values_panic([
-                    jiff::Timestamp::now().to_string().into(),
-                    today.to_string().into(),
-                    rules.target_end.map(|d| d.to_string()).into(),
-                    schedule.ends.map(|d| d.to_string()).into(),
-                    i64::try_from(schedule.late.len())
-                        .unwrap_or(i64::MAX)
-                        .into(),
-                    trigger.into(),
-                    serde_json::to_string(&schedule)?.into(),
-                    event_id.into(),
-                ])
-                .returning_col(ScheduleVersions::Id)
-        )
+        let id: i64 = (Query::insert()
+            .into_table(ScheduleVersions::Table)
+            .columns([
+                ScheduleVersions::ComputedAt,
+                ScheduleVersions::AsOf,
+                ScheduleVersions::TargetEnd,
+                ScheduleVersions::Ends,
+                ScheduleVersions::Late,
+                ScheduleVersions::Trigger,
+                ScheduleVersions::Schedule,
+                ScheduleVersions::EventId,
+            ])
+            .values_panic([
+                jiff::Timestamp::now().to_string().into(),
+                today.to_string().into(),
+                rules.target_end.map(|d| d.to_string()).into(),
+                schedule.ends.map(|d| d.to_string()).into(),
+                i64::try_from(schedule.late.len()).unwrap_or(i64::MAX).into(),
+                trigger.as_str().into(),
+                serde_json::to_string(&schedule)?.into(),
+                event_id.into(),
+            ])
+            .returning_col(ScheduleVersions::Id))
+        .bound()
         .fetch_one(&mut *conn)
         .await?
         .get("id");
         for s in &schedule.slots {
             let alts: Vec<String> =
                 s.alternatives.iter().map(|d| d.to_string()).collect();
-            bound!(
-                Query::insert()
-                    .into_table(ScheduleSlots::Table)
-                    .columns([
-                        ScheduleSlots::VersionId,
-                        ScheduleSlots::Workload,
-                        ScheduleSlots::Environment,
-                        ScheduleSlots::Date,
-                        ScheduleSlots::EndDate,
-                        ScheduleSlots::Wave,
-                        ScheduleSlots::Locked,
-                        ScheduleSlots::Reason,
-                        ScheduleSlots::Alternatives,
-                    ])
-                    .values_panic([
-                        id.into(),
-                        s.pair.workload.as_str().into(),
-                        s.pair.environment.as_str().into(),
-                        s.date.to_string().into(),
-                        s.end.to_string().into(),
-                        s.wave.into(),
-                        i32::from(s.agreed).into(),
-                        s.reason().into(),
-                        alts.join(",").into(),
-                    ])
-            )
+            (Query::insert()
+                .into_table(ScheduleSlots::Table)
+                .columns([
+                    ScheduleSlots::VersionId,
+                    ScheduleSlots::Workload,
+                    ScheduleSlots::Environment,
+                    ScheduleSlots::Date,
+                    ScheduleSlots::EndDate,
+                    ScheduleSlots::Wave,
+                    ScheduleSlots::Locked,
+                    ScheduleSlots::Reason,
+                    ScheduleSlots::Alternatives,
+                ])
+                .values_panic([
+                    id.into(),
+                    s.pair.workload.as_str().into(),
+                    s.pair.environment.as_str().into(),
+                    s.date.to_string().into(),
+                    s.end.to_string().into(),
+                    s.wave.into(),
+                    i32::from(s.agreed).into(),
+                    s.reason().into(),
+                    alts.join(",").into(),
+                ]))
+            .bound()
             .execute(&mut *conn)
             .await?;
         }
         if let Some(event_id) = event_id {
-            bound!(
-                Query::update()
-                    .table(PlanEvents::Table)
-                    .value(PlanEvents::VersionId, id)
-                    .and_where(Expr::col(PlanEvents::Id).eq(event_id))
-            )
+            (Query::update()
+                .table(PlanEvents::Table)
+                .value(PlanEvents::VersionId, id)
+                .and_where(Expr::col(PlanEvents::Id).eq(event_id)))
+            .bound()
             .execute(&mut *conn)
             .await?;
         }
@@ -1427,17 +1444,16 @@ impl Store {
     pub async fn latest_schedule(
         &self,
     ) -> Result<Option<(i64, Date, Schedule)>, DbError> {
-        let row = bound!(
-            Query::select()
-                .columns([
-                    ScheduleVersions::Id,
-                    ScheduleVersions::AsOf,
-                    ScheduleVersions::Schedule,
-                ])
-                .from(ScheduleVersions::Table)
-                .order_by(ScheduleVersions::Id, Order::Desc)
-                .limit(1)
-        )
+        let row = (Query::select()
+            .columns([
+                ScheduleVersions::Id,
+                ScheduleVersions::AsOf,
+                ScheduleVersions::Schedule,
+            ])
+            .from(ScheduleVersions::Table)
+            .order_by(ScheduleVersions::Id, Order::Desc)
+            .limit(1))
+        .bound()
         .fetch_optional(&self.pool)
         .await?;
         let Some(r) = row else { return Ok(None) };
@@ -1446,11 +1462,7 @@ impl Store {
         // A version stored before the schedule's shape last changed does
         // not read back; the caller computes a fresh one instead.
         let Ok(schedule) = serde_json::from_str(&json) else { return Ok(None) };
-        Ok(Some((
-            r.get("id"),
-            parse_date(&r.get::<String, _>("as_of"))?,
-            schedule,
-        )))
+        Ok(Some((r.get("id"), r.parsed::<Date>("as_of")?, schedule)))
     }
 
     // ---- the event log ----------------------------------------------
@@ -1463,17 +1475,16 @@ impl Store {
         today: Date,
     ) -> Result<i64, DbError> {
         Self::project(conn, event, at, today, true).await?;
-        let id: i64 = bound!(
-            Query::insert()
-                .into_table(PlanEvents::Table)
-                .columns([PlanEvents::At, PlanEvents::Kind, PlanEvents::Body])
-                .values_panic([
-                    at.to_string().into(),
-                    event.kind().into(),
-                    serde_json::to_string(event)?.into(),
-                ])
-                .returning_col(PlanEvents::Id)
-        )
+        let id: i64 = (Query::insert()
+            .into_table(PlanEvents::Table)
+            .columns([PlanEvents::At, PlanEvents::Kind, PlanEvents::Body])
+            .values_panic([
+                at.to_string().into(),
+                event.kind().as_str().into(),
+                serde_json::to_string(event)?.into(),
+            ])
+            .returning_col(PlanEvents::Id))
+        .bound()
         .fetch_one(&mut *conn)
         .await?
         .get("id");
@@ -1502,7 +1513,12 @@ impl Store {
         let id = Self::record(&mut tx, &event, jiff::Timestamp::now(), today)
             .await?;
         let out = self
-            .compute_version(&mut tx, today, event.kind(), Some(id))
+            .compute_version(
+                &mut tx,
+                today,
+                Trigger::Event(event.kind()),
+                Some(id),
+            )
             .await?;
         tx.commit().await?;
         Ok(out)
@@ -1661,7 +1677,7 @@ impl Store {
                     workload,
                     environment,
                     *disposition,
-                    source,
+                    *source,
                     note.as_deref(),
                     at,
                 )
@@ -1708,32 +1724,32 @@ impl Store {
     /// Every event, oldest first, with the end date of the schedule it
     /// produced.
     pub async fn events(&self) -> Result<Vec<PlanEventRecord>, DbError> {
-        let rows = bound!(
-            Query::select()
-                .column((PlanEvents::Table, PlanEvents::Id))
-                .column((PlanEvents::Table, PlanEvents::At))
-                .column((PlanEvents::Table, PlanEvents::Body))
-                .column((PlanEvents::Table, PlanEvents::VersionId))
-                .column((ScheduleVersions::Table, ScheduleVersions::Ends))
-                .from(PlanEvents::Table)
-                .left_join(
-                    ScheduleVersions::Table,
-                    Expr::col((ScheduleVersions::Table, ScheduleVersions::Id))
-                        .equals((PlanEvents::Table, PlanEvents::VersionId)),
-                )
-                .order_by((PlanEvents::Table, PlanEvents::Id), Order::Asc)
-        )
+        let rows = (Query::select()
+            .column((PlanEvents::Table, PlanEvents::Id))
+            .column((PlanEvents::Table, PlanEvents::At))
+            .column((PlanEvents::Table, PlanEvents::Body))
+            .column((PlanEvents::Table, PlanEvents::VersionId))
+            .column((ScheduleVersions::Table, ScheduleVersions::Ends))
+            .from(PlanEvents::Table)
+            .left_join(
+                ScheduleVersions::Table,
+                Expr::col((ScheduleVersions::Table, ScheduleVersions::Id))
+                    .equals((PlanEvents::Table, PlanEvents::VersionId)),
+            )
+            .order_by((PlanEvents::Table, PlanEvents::Id), Order::Asc))
+        .bound()
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
             .map(|r| {
-                let ends: Option<String> = r.get("ends");
                 Ok(PlanEventRecord {
-                    id: r.get("id"),
-                    at: r.get::<String, _>("at").parse()?,
-                    event: serde_json::from_str(&r.get::<String, _>("body"))?,
-                    version_id: r.get("version_id"),
-                    ends: ends.as_deref().map(parse_date).transpose()?,
+                    id: r.try_get("id")?,
+                    at: r.parsed("at")?,
+                    event: serde_json::from_str(
+                        &r.try_get::<String, _>("body")?,
+                    )?,
+                    version_id: r.try_get("version_id")?,
+                    ends: r.parsed_opt("ends")?,
                 })
             })
             .collect()
@@ -1754,7 +1770,7 @@ impl Store {
             Query::delete().from_table(MigrationStatus::Table).to_owned(),
             Query::delete().from_table(MigrationEvents::Table).to_owned(),
         ] {
-            bound!(stmt).execute(&mut *tx).await?;
+            (stmt).bound().execute(&mut *tx).await?;
         }
         Self::project_rules(&mut tx, &GlobalRules::default()).await?;
         // Dispositions start from the built-in default and the merges
@@ -1774,7 +1790,7 @@ impl Store {
             )
             .await?;
         }
-        self.compute_schedule(self.today(), "replay").await
+        self.compute_schedule(self.today(), Trigger::Replay).await
     }
 
     /// Every pair back to the built-in default, user and bulk history
@@ -1783,31 +1799,31 @@ impl Store {
         conn: &mut SqliteConnection,
     ) -> Result<(), DbError> {
         let builtin = precip_types::Disposition::Rehost.as_str();
-        bound!(
-            Query::update()
-                .table(Settings::Table)
-                .value(Settings::Value, builtin)
-                .and_where(
-                    Expr::col(Settings::Key).eq(crate::DEFAULT_DISPOSITION_KEY)
-                )
-        )
+        (Query::update()
+            .table(Settings::Table)
+            .value(Settings::Value, builtin)
+            .and_where(
+                Expr::col(Settings::Key)
+                    .eq(Setting::DefaultDisposition.as_str()),
+            ))
+        .bound()
         .execute(&mut *conn)
         .await?;
-        bound!(
-            Query::update()
-                .table(WorkloadEnvironments::Table)
-                .value(WorkloadEnvironments::Disposition, builtin)
-        )
+        (Query::update()
+            .table(WorkloadEnvironments::Table)
+            .value(WorkloadEnvironments::Disposition, builtin))
+        .bound()
         .execute(&mut *conn)
         .await?;
-        bound!(
-            Query::delete().from_table(DispositionHistory::Table).and_where(
-                Expr::col(DispositionHistory::Source).ne(crate::SOURCE_DEFAULT)
-            )
-        )
+        (Query::delete().from_table(DispositionHistory::Table).and_where(
+            Expr::col(DispositionHistory::Source)
+                .ne(DispositionSource::Default.as_str()),
+        ))
+        .bound()
         .execute(&mut *conn)
         .await?;
-        bound!(Query::delete().from_table(WorkloadAliases::Table))
+        (Query::delete().from_table(WorkloadAliases::Table))
+            .bound()
             .execute(&mut *conn)
             .await?;
         Ok(())
@@ -1840,7 +1856,7 @@ impl Store {
             workload,
             environment,
             disposition,
-            "user",
+            DispositionSource::User,
             None,
         )
         .await
@@ -1852,7 +1868,7 @@ impl Store {
         workload: &str,
         environment: &str,
         disposition: precip_types::Disposition,
-        source: &str,
+        source: DispositionSource,
         note: Option<&str>,
     ) -> Result<(), DbError> {
         if self.disposition_of(workload, environment).await?
@@ -1864,7 +1880,7 @@ impl Store {
             workload: workload.into(),
             environment: environment.into(),
             disposition,
-            source: source.into(),
+            source,
             note: note.map(str::to_string),
         })
         .await
@@ -2063,37 +2079,31 @@ impl Store {
     pub async fn schedule_versions(
         &self,
     ) -> Result<Vec<ScheduleVersion>, DbError> {
-        let rows = bound!(
-            Query::select()
-                .columns([
-                    ScheduleVersions::Id,
-                    ScheduleVersions::ComputedAt,
-                    ScheduleVersions::AsOf,
-                    ScheduleVersions::TargetEnd,
-                    ScheduleVersions::Ends,
-                    ScheduleVersions::Late,
-                    ScheduleVersions::Trigger,
-                ])
-                .from(ScheduleVersions::Table)
-                .order_by(ScheduleVersions::Id, Order::Asc)
-        )
+        let rows = (Query::select()
+            .columns([
+                ScheduleVersions::Id,
+                ScheduleVersions::ComputedAt,
+                ScheduleVersions::AsOf,
+                ScheduleVersions::TargetEnd,
+                ScheduleVersions::Ends,
+                ScheduleVersions::Late,
+                ScheduleVersions::Trigger,
+            ])
+            .from(ScheduleVersions::Table)
+            .order_by(ScheduleVersions::Id, Order::Asc))
+        .bound()
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
             .map(|r| {
-                let target: Option<String> = r.get("target_end");
-                let ends: Option<String> = r.get("ends");
                 Ok(ScheduleVersion {
-                    id: r.get("id"),
-                    computed_at: r.get::<String, _>("computed_at").parse()?,
-                    as_of: parse_date(&r.get::<String, _>("as_of"))?,
-                    target_end: target
-                        .as_deref()
-                        .map(parse_date)
-                        .transpose()?,
-                    ends: ends.as_deref().map(parse_date).transpose()?,
-                    late: r.get("late"),
-                    trigger: r.get("trigger"),
+                    id: r.try_get("id")?,
+                    computed_at: r.parsed("computed_at")?,
+                    as_of: r.parsed("as_of")?,
+                    target_end: r.parsed_opt("target_end")?,
+                    ends: r.parsed_opt("ends")?,
+                    late: r.try_get("late")?,
+                    trigger: r.parsed("trigger")?,
                 })
             })
             .collect()
@@ -2194,22 +2204,18 @@ impl Store {
         let state = Func::cust(Alias::new("json_extract"))
             .arg(Expr::col((ResourceVersions::Table, ResourceVersions::Body)))
             .arg(Expr::val("$.state"));
-        let rows = bound!(
-            Query::select()
-                .column((WorkloadMembers::Table, WorkloadMembers::Workload))
-                .column((WorkloadMembers::Table, WorkloadMembers::Environment))
-                .expr_as(
-                    Expr::col((WorkloadMembers::Table, WorkloadMembers::Arn))
-                        .count(),
-                    Alias::new("remaining"),
-                )
-                .from(WorkloadMembers::Table)
-                .inner_join(
-                    MigrationStatus::Table,
-                    Expr::col((
-                        MigrationStatus::Table,
-                        MigrationStatus::Workload
-                    ))
+        let rows = (Query::select()
+            .column((WorkloadMembers::Table, WorkloadMembers::Workload))
+            .column((WorkloadMembers::Table, WorkloadMembers::Environment))
+            .expr_as(
+                Expr::col((WorkloadMembers::Table, WorkloadMembers::Arn))
+                    .count(),
+                Alias::new("remaining"),
+            )
+            .from(WorkloadMembers::Table)
+            .inner_join(
+                MigrationStatus::Table,
+                Expr::col((MigrationStatus::Table, MigrationStatus::Workload))
                     .equals((WorkloadMembers::Table, WorkloadMembers::Workload))
                     .and(
                         Expr::col((
@@ -2221,67 +2227,55 @@ impl Store {
                             WorkloadMembers::Environment,
                         )),
                     ),
-                )
-                .inner_join(
-                    ResourceVersions::Table,
-                    Expr::col((ResourceVersions::Table, ResourceVersions::Arn))
-                        .equals((WorkloadMembers::Table, WorkloadMembers::Arn))
-                        .and(
-                            Expr::col((
-                                ResourceVersions::Table,
-                                ResourceVersions::FirstSeenSeq,
-                            ))
-                            .lte(seq),
-                        )
-                        .and(
-                            Expr::col((
-                                ResourceVersions::Table,
-                                ResourceVersions::LastSeenSeq,
-                            ))
-                            .gte(seq),
-                        ),
-                )
-                .and_where(
-                    Expr::col((
-                        WorkloadMembers::Table,
-                        WorkloadMembers::ScanId
-                    ))
+            )
+            .inner_join(
+                ResourceVersions::Table,
+                Expr::col((ResourceVersions::Table, ResourceVersions::Arn))
+                    .equals((WorkloadMembers::Table, WorkloadMembers::Arn))
+                    .and(
+                        Expr::col((
+                            ResourceVersions::Table,
+                            ResourceVersions::FirstSeenSeq,
+                        ))
+                        .lte(seq),
+                    )
+                    .and(
+                        Expr::col((
+                            ResourceVersions::Table,
+                            ResourceVersions::LastSeenSeq,
+                        ))
+                        .gte(seq),
+                    ),
+            )
+            .and_where(
+                Expr::col((WorkloadMembers::Table, WorkloadMembers::ScanId))
                     .eq(scan_id),
-                )
-                .and_where(
-                    Expr::col((
-                        MigrationStatus::Table,
-                        MigrationStatus::Status
-                    ))
-                    .eq("migrated"),
-                )
-                // Every resource still placed in the pair counts, except
-                // an instance that has been terminated and only lingers.
-                .and_where(
-                    Expr::col((
-                        ResourceVersions::Table,
-                        ResourceVersions::Kind
-                    ))
+            )
+            .and_where(
+                Expr::col((MigrationStatus::Table, MigrationStatus::Status))
+                    .eq(Status::Migrated.as_str()),
+            )
+            // Every resource still placed in the pair counts, except
+            // an instance that has been terminated and only lingers.
+            .and_where(
+                Expr::col((ResourceVersions::Table, ResourceVersions::Kind))
                     .ne("ec2_instance")
                     .or(state.if_null("").ne("terminated")),
-                )
-                .group_by_col((
-                    WorkloadMembers::Table,
-                    WorkloadMembers::Workload
-                ))
-                .group_by_col((
-                    WorkloadMembers::Table,
-                    WorkloadMembers::Environment,
-                ))
-                .order_by(
-                    (WorkloadMembers::Table, WorkloadMembers::Workload),
-                    Order::Asc,
-                )
-                .order_by(
-                    (WorkloadMembers::Table, WorkloadMembers::Environment),
-                    Order::Asc,
-                )
-        )
+            )
+            .group_by_col((WorkloadMembers::Table, WorkloadMembers::Workload))
+            .group_by_col((
+                WorkloadMembers::Table,
+                WorkloadMembers::Environment,
+            ))
+            .order_by(
+                (WorkloadMembers::Table, WorkloadMembers::Workload),
+                Order::Asc,
+            )
+            .order_by(
+                (WorkloadMembers::Table, WorkloadMembers::Environment),
+                Order::Asc,
+            ))
+        .bound()
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -2331,30 +2325,22 @@ impl Store {
         let mut reasons: Vec<(String, usize)> = Vec::new();
         let window_start =
             today.checked_sub(jiff::Span::new().days(30)).unwrap_or(today);
+        let all_events = self.migration_events_by_pair().await?;
         for p in &pairs {
-            let events = self
-                .migration_events(
-                    p.key.workload.as_str(),
-                    p.key.environment.as_str(),
-                )
-                .await?;
+            let events =
+                all_events.get(&p.key).map(Vec::as_slice).unwrap_or_default();
             let first_confirmed = events
                 .iter()
-                .find(|e| e.event == "confirmed")
+                .find(|e| e.event == MigrationEventKind::Confirmed)
                 .and_then(|e| e.date);
             if first_confirmed.is_some() {
                 m.scheduled += 1;
             }
-            let moved = events
-                .iter()
-                .any(|e| e.event == "missed" || e.event == "reconfirmed");
+            let moved = events.iter().any(|e| e.event.moved_a_date());
             if moved {
                 m.rescheduled += 1;
             }
-            for e in events
-                .iter()
-                .filter(|e| e.event == "missed" || e.event == "reconfirmed")
-            {
+            for e in events.iter().filter(|e| e.event.moved_a_date()) {
                 let why = e
                     .note
                     .clone()
@@ -2365,8 +2351,10 @@ impl Store {
                     None => reasons.push((why, 1)),
                 }
             }
-            let rolled = events.iter().any(|e| e.event == "rolled_back");
-            if events.iter().any(|e| e.event == "migrated") {
+            let rolled = events
+                .iter()
+                .any(|e| e.event == MigrationEventKind::RolledBack);
+            if events.iter().any(|e| e.event == MigrationEventKind::Migrated) {
                 ever_migrated += 1;
             }
             if rolled {
@@ -2380,7 +2368,7 @@ impl Store {
             }
             let migrated_on = events
                 .iter()
-                .filter(|e| e.event == "migrated")
+                .filter(|e| e.event == MigrationEventKind::Migrated)
                 .filter_map(|e| e.date)
                 .next_back();
             if let Some(done) = migrated_on {
@@ -2432,25 +2420,23 @@ impl Store {
         // given against the day it really moved.
         let mut errors: Vec<i64> = Vec::new();
         if let Some(first_version) = versions.first() {
-            let rows = bound!(
-                Query::select()
-                    .columns([
-                        ScheduleSlots::Workload,
-                        ScheduleSlots::Environment,
-                        ScheduleSlots::Date,
-                    ])
-                    .from(ScheduleSlots::Table)
-                    .and_where(
-                        Expr::col(ScheduleSlots::VersionId)
-                            .eq(first_version.id)
-                    )
-            )
+            let rows = (Query::select()
+                .columns([
+                    ScheduleSlots::Workload,
+                    ScheduleSlots::Environment,
+                    ScheduleSlots::Date,
+                ])
+                .from(ScheduleSlots::Table)
+                .and_where(
+                    Expr::col(ScheduleSlots::VersionId).eq(first_version.id),
+                ))
+            .bound()
             .fetch_all(&self.pool)
             .await?;
             for r in rows {
                 let (w, e): (String, String) =
                     (r.get("workload"), r.get("environment"));
-                let planned = parse_date(&r.get::<String, _>("date"))?;
+                let planned = r.parsed::<Date>("date")?;
                 let done = self.pair_status(&w, &e).await?;
                 if let (Status::Migrated, Some(actual)) =
                     (done.status, done.migrated_date)
@@ -2478,27 +2464,23 @@ impl Store {
         let mut wave_ends: std::collections::BTreeMap<u32, Date> =
             std::collections::BTreeMap::new();
         if let Some(latest) = versions.last() {
-            let rows = bound!(
-                Query::select()
-                    .column(ScheduleSlots::Wave)
-                    .expr_as(
-                        Expr::col(ScheduleSlots::EndDate).max(),
-                        Alias::new("ends"),
-                    )
-                    .from(ScheduleSlots::Table)
-                    .and_where(
-                        Expr::col(ScheduleSlots::VersionId).eq(latest.id)
-                    )
-                    .group_by_col(ScheduleSlots::Wave)
-            )
+            let rows = (Query::select()
+                .column(ScheduleSlots::Wave)
+                .expr_as(
+                    Expr::col(ScheduleSlots::EndDate).max(),
+                    Alias::new("ends"),
+                )
+                .from(ScheduleSlots::Table)
+                .and_where(Expr::col(ScheduleSlots::VersionId).eq(latest.id))
+                .group_by_col(ScheduleSlots::Wave))
+            .bound()
             .fetch_all(&self.pool)
             .await?;
             for r in rows {
-                let ends: Option<String> = r.get("ends");
-                if let Some(e) = ends {
+                if let Some(e) = r.parsed_opt::<Date>("ends")? {
                     wave_ends.insert(
-                        r.get::<i64, _>("wave").try_into().unwrap_or(1),
-                        parse_date(&e)?,
+                        r.try_get::<i64, _>("wave")?.try_into().unwrap_or(1),
+                        e,
                     );
                 }
             }

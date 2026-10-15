@@ -9,6 +9,8 @@
 //! `first_seen_seq <= n <= last_seen_seq`.
 
 pub mod export;
+mod kinds;
+mod query;
 mod schedule;
 mod schema;
 
@@ -18,16 +20,17 @@ pub use schedule::{
 };
 
 use camino::Utf8Path;
+use kinds::Setting;
+pub use kinds::{DispositionSource, EventKind, MigrationEventKind, Trigger};
 use precip_types::scan::{Relationship, Resource, TargetStatus};
 use precip_types::{
-    AccountId, Arn, Disposition, GroupingConfig, PairKey, Region, Scan,
-    WorkloadMember, WorkloadName,
+    Arn, Disposition, GroupingConfig, PairKey, Scan, WorkloadMember,
+    WorkloadName,
 };
+use query::{Bound, RowExt};
 use sea_query::{
     Expr, ExprTrait, Func, IntoColumnRef, OnConflict, Order, Query,
-    SqliteQueryBuilder,
 };
-use sea_query_sqlx::SqlxBinder;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteConnection, SqlitePool, SqlitePoolOptions,
@@ -44,10 +47,7 @@ use schema::{
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// The settings key holding the disposition new pairs get.
-const DEFAULT_DISPOSITION_KEY: &str = "default_disposition";
 /// The history source of a disposition a pair got when first seen.
-const SOURCE_DEFAULT: &str = "default";
-
 /// What grouping produced for one scan.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupStats {
@@ -69,6 +69,8 @@ pub enum DbError {
     Timestamp(#[from] jiff::Error),
     #[error("reading a stored name")]
     Name(#[from] precip_types::UnknownName),
+    #[error(transparent)]
+    Infallible(#[from] std::convert::Infallible),
     #[error("reading a weekday rule")]
     Weekdays(#[from] precip_engine::schedule::UnknownWeekday),
     #[error("{0}")]
@@ -132,7 +134,7 @@ pub struct DispositionChange {
     pub changed_at: jiff::Timestamp,
     /// `default` when the pair was first seen, `user` for a direct change,
     /// `bulk` for a default applied to every pair.
-    pub source: String,
+    pub source: DispositionSource,
     pub note: Option<String>,
 }
 
@@ -206,7 +208,7 @@ impl Store {
     pub async fn record_scan(&self, scan: &Scan) -> Result<ScanStats, DbError> {
         let mut tx = self.pool.begin().await?;
 
-        let (sql, values) = Query::insert()
+        (Query::insert()
             .into_table(Scans::Table)
             .columns([
                 Scans::Id,
@@ -232,21 +234,19 @@ impl Store {
                 scan.started.to_string().into(),
                 scan.finished.map(|t| t.to_string()).into(),
                 scan.caller_arn.as_str().into(),
-            ])
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *tx)
-            .await?;
+            ]))
+        .bound()
+        .execute(&mut *tx)
+        .await?;
 
-        let (sql, values) = Query::select()
+        let seq: i64 = (Query::select()
             .column(Scans::Seq)
             .from(Scans::Table)
-            .and_where(Expr::col(Scans::Id).eq(scan.id.as_str()))
-            .build_sqlx(SqliteQueryBuilder);
-        let seq: i64 = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_one(&mut *tx)
-            .await?
-            .try_get("seq")?;
+            .and_where(Expr::col(Scans::Id).eq(scan.id.as_str())))
+        .bound()
+        .fetch_one(&mut *tx)
+        .await?
+        .try_get("seq")?;
 
         for t in &scan.targets {
             let (status, error) = match &t.status {
@@ -255,7 +255,7 @@ impl Store {
                 TargetStatus::Partial(e) => ("partial", Some(e.clone())),
                 TargetStatus::Failed(e) => ("failed", Some(e.clone())),
             };
-            let (sql, values) = Query::insert()
+            (Query::insert()
                 .into_table(ScanTargets::Table)
                 .columns([
                     ScanTargets::ScanId,
@@ -270,15 +270,14 @@ impl Store {
                     t.region.as_str().into(),
                     status.into(),
                     error.into(),
-                ])
-                .build_sqlx(SqliteQueryBuilder);
-            sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .execute(&mut *tx)
-                .await?;
+                ]))
+            .bound()
+            .execute(&mut *tx)
+            .await?;
         }
 
         // Latest version of every ARN, loaded once.
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 ResourceVersions::Arn,
                 ResourceVersions::Version,
@@ -287,11 +286,10 @@ impl Store {
             ])
             .from(ResourceVersions::Table)
             .order_by(ResourceVersions::Arn, Order::Asc)
-            .order_by(ResourceVersions::Version, Order::Asc)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&mut *tx)
-            .await?;
+            .order_by(ResourceVersions::Version, Order::Asc))
+        .bound()
+        .fetch_all(&mut *tx)
+        .await?;
         let mut current: HashMap<String, Current> = HashMap::new();
         for row in rows {
             let arn: String = row.try_get("arn")?;
@@ -335,7 +333,7 @@ impl Store {
                     if c.content_hash == hash && c.last_seen_seq == seq - 1 =>
                 {
                     stats.unchanged += 1;
-                    let (sql, values) = Query::update()
+                    (Query::update()
                         .table(ResourceVersions::Table)
                         .value(ResourceVersions::LastSeenSeq, seq)
                         .and_where(
@@ -343,11 +341,10 @@ impl Store {
                         )
                         .and_where(
                             Expr::col(ResourceVersions::Version).eq(c.version),
-                        )
-                        .build_sqlx(SqliteQueryBuilder);
-                    sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                        .execute(&mut *tx)
-                        .await?;
+                        ))
+                    .bound()
+                    .execute(&mut *tx)
+                    .await?;
                     continue;
                 }
                 Some(c) if c.content_hash == hash => {
@@ -363,7 +360,7 @@ impl Store {
                     1
                 }
             };
-            let (sql, values) = Query::insert()
+            (Query::insert()
                 .into_table(ResourceVersions::Table)
                 .columns([
                     ResourceVersions::Arn,
@@ -388,16 +385,15 @@ impl Store {
                     hash.into(),
                     seq.into(),
                     seq.into(),
-                ])
-                .build_sqlx(SqliteQueryBuilder);
-            sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .execute(&mut *tx)
-                .await?;
+                ]))
+            .bound()
+            .execute(&mut *tx)
+            .await?;
         }
 
         // Relationships have no content, so a row is either extended or
         // started.
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 RelationshipVersions::FromArn,
                 RelationshipVersions::Edge,
@@ -406,11 +402,12 @@ impl Store {
                 RelationshipVersions::LastSeenSeq,
             ])
             .from(RelationshipVersions::Table)
-            .and_where(Expr::col(RelationshipVersions::LastSeenSeq).eq(seq - 1))
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&mut *tx)
-            .await?;
+            .and_where(
+                Expr::col(RelationshipVersions::LastSeenSeq).eq(seq - 1),
+            ))
+        .bound()
+        .fetch_all(&mut *tx)
+        .await?;
         let mut open: HashMap<(String, String, String), i64> = HashMap::new();
         for row in rows {
             open.insert(
@@ -428,7 +425,7 @@ impl Store {
                 rel.edge.as_str().to_string(),
                 rel.to_arn.to_string(),
             );
-            let (sql, values) = match open.get(&key) {
+            let query = match open.get(&key) {
                 Some(first) => Query::update()
                     .table(RelationshipVersions::Table)
                     .value(RelationshipVersions::LastSeenSeq, seq)
@@ -448,7 +445,7 @@ impl Store {
                         Expr::col(RelationshipVersions::FirstSeenSeq)
                             .eq(*first),
                     )
-                    .build_sqlx(SqliteQueryBuilder),
+                    .bound(),
                 None => Query::insert()
                     .into_table(RelationshipVersions::Table)
                     .columns([
@@ -475,11 +472,9 @@ impl Store {
                         .do_nothing()
                         .to_owned(),
                     )
-                    .build_sqlx(SqliteQueryBuilder),
+                    .bound(),
             };
-            sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .execute(&mut *tx)
-                .await?;
+            query.execute(&mut *tx).await?;
         }
 
         tx.commit().await?;
@@ -488,7 +483,7 @@ impl Store {
 
     /// All scans, newest first.
     pub async fn list_scans(&self) -> Result<Vec<ScanSummary>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 Scans::Id,
                 Scans::Seq,
@@ -497,18 +492,17 @@ impl Store {
                 Scans::CallerArn,
             ])
             .from(Scans::Table)
-            .order_by(Scans::Seq, Order::Desc)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .order_by(Scans::Seq, Order::Desc))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
                 let finished: Option<String> = row.try_get("finished")?;
                 Ok(ScanSummary {
                     id: row.try_get("id")?,
                     seq: row.try_get("seq")?,
-                    started: row.try_get::<String, _>("started")?.parse()?,
+                    started: row.parsed("started")?,
                     finished: finished.map(|s| s.parse()).transpose()?,
                     caller_arn: row.try_get("caller_arn")?,
                 })
@@ -521,15 +515,14 @@ impl Store {
         &self,
         seq: i64,
     ) -> Result<BTreeMap<String, String>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([ResourceVersions::Arn, ResourceVersions::ContentHash])
             .from(ResourceVersions::Table)
             .and_where(Expr::col(ResourceVersions::FirstSeenSeq).lte(seq))
-            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq))
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq)))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| Ok((row.try_get("arn")?, row.try_get("content_hash")?)))
             .collect()
@@ -561,22 +554,21 @@ impl Store {
 
     /// Number of resources present at scan `seq`.
     pub async fn resource_count(&self, seq: i64) -> Result<i64, DbError> {
-        let (sql, values) = Query::select()
+        let row = (Query::select()
             .expr(Expr::col(ResourceVersions::Arn).count())
             .from(ResourceVersions::Table)
             .and_where(Expr::col(ResourceVersions::FirstSeenSeq).lte(seq))
-            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq))
-            .build_sqlx(SqliteQueryBuilder);
-        let row = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_one(&self.pool)
-            .await?;
+            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq)))
+        .bound()
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row.try_get(0)?)
     }
 
     /// Resource counts by kind at scan `seq`, plus distinct accounts and
     /// regions, for the overview.
     pub async fn overview(&self, seq: i64) -> Result<Overview, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .column(ResourceVersions::Kind)
             .expr_as(
                 Expr::col(ResourceVersions::Arn).count(),
@@ -586,11 +578,10 @@ impl Store {
             .and_where(Expr::col(ResourceVersions::FirstSeenSeq).lte(seq))
             .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq))
             .group_by_col(ResourceVersions::Kind)
-            .order_by(ResourceVersions::Kind, Order::Asc)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .order_by(ResourceVersions::Kind, Order::Asc))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         let mut by_kind = BTreeMap::new();
         for row in rows {
             by_kind.insert(
@@ -599,7 +590,7 @@ impl Store {
             );
         }
 
-        let (sql, values) = Query::select()
+        let row = (Query::select()
             .expr_as(
                 Func::count_distinct(Expr::col(ResourceVersions::AccountId)),
                 sea_query::Alias::new("accounts"),
@@ -611,11 +602,10 @@ impl Store {
             .from(ResourceVersions::Table)
             .and_where(Expr::col(ResourceVersions::FirstSeenSeq).lte(seq))
             .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq))
-            .and_where(Expr::col(ResourceVersions::Kind).ne("account"))
-            .build_sqlx(SqliteQueryBuilder);
-        let row = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_one(&self.pool)
-            .await?;
+            .and_where(Expr::col(ResourceVersions::Kind).ne("account")))
+        .bound()
+        .fetch_one(&self.pool)
+        .await?;
         Ok(Overview {
             by_kind,
             accounts: row.try_get("accounts")?,
@@ -628,16 +618,15 @@ impl Store {
         &self,
         seq: i64,
     ) -> Result<BTreeMap<String, String>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([ResourceVersions::AccountId, ResourceVersions::Body])
             .from(ResourceVersions::Table)
             .and_where(Expr::col(ResourceVersions::Kind).eq("account"))
             .and_where(Expr::col(ResourceVersions::FirstSeenSeq).lte(seq))
-            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq))
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq)))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         let mut names = BTreeMap::new();
         for row in rows {
             let id: String = row.try_get("account_id")?;
@@ -656,7 +645,7 @@ impl Store {
         &self,
         arn: &str,
     ) -> Result<Vec<(i64, i64, i64, serde_json::Value)>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 ResourceVersions::Version,
                 ResourceVersions::FirstSeenSeq,
@@ -665,11 +654,10 @@ impl Store {
             ])
             .from(ResourceVersions::Table)
             .and_where(Expr::col(ResourceVersions::Arn).eq(arn))
-            .order_by(ResourceVersions::Version, Order::Asc)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .order_by(ResourceVersions::Version, Order::Asc))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
                 let body: String = row.try_get("body")?;
@@ -685,16 +673,17 @@ impl Store {
 
     /// The disposition given to every new workload and environment pair.
     pub async fn default_disposition(&self) -> Result<Disposition, DbError> {
-        let (sql, values) = Query::select()
+        let row = (Query::select()
             .column(Settings::Value)
             .from(Settings::Table)
-            .and_where(Expr::col(Settings::Key).eq(DEFAULT_DISPOSITION_KEY))
-            .build_sqlx(SqliteQueryBuilder);
-        let row = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_one(&self.pool)
-            .await?;
-        let v: String = row.try_get("value")?;
-        Ok(v.parse()?)
+            .and_where(
+                Expr::col(Settings::Key)
+                    .eq(Setting::DefaultDisposition.as_str()),
+            ))
+        .bound()
+        .fetch_one(&self.pool)
+        .await?;
+        row.parsed("value")
     }
 
     pub(crate) async fn project_default_disposition(
@@ -704,25 +693,26 @@ impl Store {
         at: jiff::Timestamp,
     ) -> Result<(), DbError> {
         let name = disposition.as_str();
-        let (sql, values) = Query::update()
+        (Query::update()
             .table(Settings::Table)
             .value(Settings::Value, name)
-            .and_where(Expr::col(Settings::Key).eq(DEFAULT_DISPOSITION_KEY))
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *conn)
-            .await?;
+            .and_where(
+                Expr::col(Settings::Key)
+                    .eq(Setting::DefaultDisposition.as_str()),
+            ))
+        .bound()
+        .execute(&mut *conn)
+        .await?;
         if apply_to_existing {
-            let (sql, values) = Query::select()
+            let rows = (Query::select()
                 .columns([
                     WorkloadEnvironments::Workload,
                     WorkloadEnvironments::Environment,
                 ])
-                .from(WorkloadEnvironments::Table)
-                .build_sqlx(SqliteQueryBuilder);
-            let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .fetch_all(&mut *conn)
-                .await?;
+                .from(WorkloadEnvironments::Table))
+            .bound()
+            .fetch_all(&mut *conn)
+            .await?;
             for row in rows {
                 let w: String = row.try_get("workload")?;
                 let e: String = row.try_get("environment")?;
@@ -731,7 +721,7 @@ impl Store {
                     &w,
                     &e,
                     disposition,
-                    "bulk",
+                    DispositionSource::Bulk,
                     None,
                     at,
                 )
@@ -766,18 +756,17 @@ impl Store {
 
         let default = self.default_disposition().await?.as_str();
         let mut tx = self.pool.begin().await?;
-        let (sql, values) = Query::delete()
+        (Query::delete()
             .from_table(WorkloadMembers::Table)
-            .and_where(Expr::col(WorkloadMembers::ScanId).eq(scan_id))
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *tx)
-            .await?;
+            .and_where(Expr::col(WorkloadMembers::ScanId).eq(scan_id)))
+        .bound()
+        .execute(&mut *tx)
+        .await?;
 
         let mut pairs = std::collections::BTreeSet::new();
         for m in &members {
             pairs.insert(m.pair.clone());
-            let (sql, values) = Query::insert()
+            (Query::insert()
                 .into_table(WorkloadMembers::Table)
                 .columns([
                     WorkloadMembers::ScanId,
@@ -792,25 +781,23 @@ impl Store {
                     m.pair.workload.as_str().into(),
                     m.pair.environment.as_str().into(),
                     m.signal.as_str().into(),
-                ])
-                .build_sqlx(SqliteQueryBuilder);
-            sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .execute(&mut *tx)
-                .await?;
+                ]))
+            .bound()
+            .execute(&mut *tx)
+            .await?;
         }
         for PairKey { workload, environment } in &pairs {
-            let (sql, values) = Query::insert()
+            (Query::insert()
                 .into_table(Workloads::Table)
                 .columns([Workloads::Name])
                 .values_panic([workload.as_str().into()])
                 .on_conflict(
                     OnConflict::column(Workloads::Name).do_nothing().to_owned(),
-                )
-                .build_sqlx(SqliteQueryBuilder);
-            sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .execute(&mut *tx)
-                .await?;
-            let (sql, values) = Query::insert()
+                ))
+            .bound()
+            .execute(&mut *tx)
+            .await?;
+            let inserted = (Query::insert()
                 .into_table(WorkloadEnvironments::Table)
                 .columns([
                     WorkloadEnvironments::Workload,
@@ -829,14 +816,13 @@ impl Store {
                     ])
                     .do_nothing()
                     .to_owned(),
-                )
-                .build_sqlx(SqliteQueryBuilder);
-            let inserted = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
+                ))
+            .bound()
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
             if inserted > 0 {
-                let (sql, values) = Query::insert()
+                (Query::insert()
                     .into_table(DispositionHistory::Table)
                     .columns([
                         DispositionHistory::Workload,
@@ -850,12 +836,11 @@ impl Store {
                         environment.as_str().into(),
                         default.into(),
                         jiff::Timestamp::now().to_string().into(),
-                        SOURCE_DEFAULT.into(),
-                    ])
-                    .build_sqlx(SqliteQueryBuilder);
-                sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                    .execute(&mut *tx)
-                    .await?;
+                        DispositionSource::Default.as_str().into(),
+                    ]))
+                .bound()
+                .execute(&mut *tx)
+                .await?;
             }
         }
         tx.commit().await?;
@@ -879,7 +864,7 @@ impl Store {
 
     /// Resources present at scan `seq`.
     async fn live_resources(&self, seq: i64) -> Result<Vec<Resource>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 ResourceVersions::Arn,
                 ResourceVersions::Kind,
@@ -890,25 +875,21 @@ impl Store {
             ])
             .from(ResourceVersions::Table)
             .and_where(Expr::col(ResourceVersions::FirstSeenSeq).lte(seq))
-            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq))
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .and_where(Expr::col(ResourceVersions::LastSeenSeq).gte(seq)))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
-                let kind: String = row.try_get("kind")?;
                 let tags: String = row.try_get("tags")?;
                 let body: String = row.try_get("body")?;
                 Ok(Resource {
-                    arn: Arn::from(row.try_get::<String, _>("arn")?),
-                    account_id: AccountId::from(
-                        row.try_get::<String, _>("account_id")?,
-                    ),
-                    region: Region::from(row.try_get::<String, _>("region")?),
+                    arn: row.parsed("arn")?,
+                    account_id: row.parsed("account_id")?,
+                    region: row.parsed("region")?,
                     tags: serde_json::from_str(&tags)?,
                     body: precip_types::Body::from_value(
-                        kind.parse()?,
+                        row.parsed("kind")?,
                         serde_json::from_str(&body)?,
                     )?,
                 })
@@ -921,7 +902,7 @@ impl Store {
         &self,
         seq: i64,
     ) -> Result<Vec<Relationship>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 RelationshipVersions::FromArn,
                 RelationshipVersions::Edge,
@@ -929,18 +910,17 @@ impl Store {
             ])
             .from(RelationshipVersions::Table)
             .and_where(Expr::col(RelationshipVersions::FirstSeenSeq).lte(seq))
-            .and_where(Expr::col(RelationshipVersions::LastSeenSeq).gte(seq))
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .and_where(Expr::col(RelationshipVersions::LastSeenSeq).gte(seq)))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
                 let edge: String = row.try_get("edge")?;
                 Ok(Relationship {
-                    from_arn: Arn::from(row.try_get::<String, _>("from_arn")?),
+                    from_arn: row.parsed("from_arn")?,
                     edge: edge.parse()?,
-                    to_arn: Arn::from(row.try_get::<String, _>("to_arn")?),
+                    to_arn: row.parsed("to_arn")?,
                 })
             })
             .collect()
@@ -950,13 +930,12 @@ impl Store {
     pub async fn aliases(
         &self,
     ) -> Result<BTreeMap<WorkloadName, WorkloadName>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([WorkloadAliases::Alias, WorkloadAliases::Workload])
-            .from(WorkloadAliases::Table)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .from(WorkloadAliases::Table))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
                 Ok((
@@ -974,7 +953,7 @@ impl Store {
         alias: &str,
         workload: &str,
     ) -> Result<(), DbError> {
-        let (sql, values) = Query::insert()
+        (Query::insert()
             .into_table(WorkloadAliases::Table)
             .columns([WorkloadAliases::Alias, WorkloadAliases::Workload])
             .values_panic([alias.into(), workload.into()])
@@ -982,23 +961,21 @@ impl Store {
                 OnConflict::column(WorkloadAliases::Alias)
                     .update_column(WorkloadAliases::Workload)
                     .to_owned(),
-            )
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *conn)
-            .await?;
+            ))
+        .bound()
+        .execute(&mut *conn)
+        .await?;
         Ok(())
     }
 
     async fn seq_of(&self, scan_id: &str) -> Result<i64, DbError> {
-        let (sql, values) = Query::select()
+        let row = (Query::select()
             .column(Scans::Seq)
             .from(Scans::Table)
-            .and_where(Expr::col(Scans::Id).eq(scan_id))
-            .build_sqlx(SqliteQueryBuilder);
-        let row = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_one(&self.pool)
-            .await?;
+            .and_where(Expr::col(Scans::Id).eq(scan_id)))
+        .bound()
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row.try_get("seq")?)
     }
 
@@ -1007,7 +984,7 @@ impl Store {
         &self,
         scan_id: &str,
     ) -> Result<Vec<WorkloadMember>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 WorkloadMembers::Arn,
                 WorkloadMembers::Workload,
@@ -1018,16 +995,15 @@ impl Store {
             .and_where(Expr::col(WorkloadMembers::ScanId).eq(scan_id))
             .order_by(WorkloadMembers::Workload, Order::Asc)
             .order_by(WorkloadMembers::Environment, Order::Asc)
-            .order_by(WorkloadMembers::Arn, Order::Asc)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .order_by(WorkloadMembers::Arn, Order::Asc))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
                 let signal: String = row.try_get("signal")?;
                 Ok(WorkloadMember {
-                    arn: Arn::from(row.try_get::<String, _>("arn")?),
+                    arn: row.parsed("arn")?,
                     pair: PairKey::new(
                         row.try_get::<String, _>("workload")?,
                         row.try_get::<String, _>("environment")?,
@@ -1046,21 +1022,17 @@ impl Store {
         workload: &str,
         environment: &str,
     ) -> Result<Option<Disposition>, DbError> {
-        let (sql, values) = Query::select()
+        let row = (Query::select()
             .column(WorkloadEnvironments::Disposition)
             .from(WorkloadEnvironments::Table)
             .and_where(Expr::col(WorkloadEnvironments::Workload).eq(workload))
             .and_where(
                 Expr::col(WorkloadEnvironments::Environment).eq(environment),
-            )
-            .build_sqlx(SqliteQueryBuilder);
-        let row = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(|r| {
-            Ok(r.try_get::<String, _>("disposition")?.parse::<Disposition>()?)
-        })
-        .transpose()
+            ))
+        .bound()
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| r.parsed::<Disposition>("disposition")).transpose()
     }
 
     /// Change one pair's disposition and append the change to its history.
@@ -1070,40 +1042,37 @@ impl Store {
         workload: &str,
         environment: &str,
         disposition: Disposition,
-        source: &str,
+        source: DispositionSource,
         note: Option<&str>,
         at: jiff::Timestamp,
     ) -> Result<(), DbError> {
-        let (sql, values) = Query::select()
+        let previous: Option<String> = Query::select()
             .column(WorkloadEnvironments::Disposition)
             .from(WorkloadEnvironments::Table)
             .and_where(Expr::col(WorkloadEnvironments::Workload).eq(workload))
             .and_where(
                 Expr::col(WorkloadEnvironments::Environment).eq(environment),
             )
-            .build_sqlx(SqliteQueryBuilder);
-        let previous: Option<String> =
-            sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .fetch_optional(&mut *conn)
-                .await?
-                .map(|row| row.try_get("disposition"))
-                .transpose()?;
+            .bound()
+            .fetch_optional(&mut *conn)
+            .await?
+            .map(|row| row.try_get("disposition"))
+            .transpose()?;
         let name = disposition.as_str();
         if previous.as_deref() == Some(name) {
             return Ok(());
         }
-        let (sql, values) = Query::update()
+        (Query::update()
             .table(WorkloadEnvironments::Table)
             .value(WorkloadEnvironments::Disposition, name)
             .and_where(Expr::col(WorkloadEnvironments::Workload).eq(workload))
             .and_where(
                 Expr::col(WorkloadEnvironments::Environment).eq(environment),
-            )
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *conn)
-            .await?;
-        let (sql, values) = Query::insert()
+            ))
+        .bound()
+        .execute(&mut *conn)
+        .await?;
+        (Query::insert()
             .into_table(DispositionHistory::Table)
             .columns([
                 DispositionHistory::Workload,
@@ -1120,13 +1089,12 @@ impl Store {
                 name.into(),
                 previous.into(),
                 at.to_string().into(),
-                source.into(),
+                source.as_str().into(),
                 note.into(),
-            ])
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *conn)
-            .await?;
+            ]))
+        .bound()
+        .execute(&mut *conn)
+        .await?;
         Ok(())
     }
 
@@ -1136,7 +1104,7 @@ impl Store {
         workload: &str,
         environment: &str,
     ) -> Result<Vec<DispositionChange>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 DispositionHistory::Disposition,
                 DispositionHistory::Previous,
@@ -1149,25 +1117,19 @@ impl Store {
             .and_where(
                 Expr::col(DispositionHistory::Environment).eq(environment),
             )
-            .order_by(DispositionHistory::Id, Order::Asc)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .order_by(DispositionHistory::Id, Order::Asc))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
-                let d: String = row.try_get("disposition")?;
-                let prev: Option<String> = row.try_get("previous")?;
                 Ok(DispositionChange {
-                    disposition: d.parse()?,
-                    previous: prev
-                        .as_deref()
-                        .map(str::parse::<Disposition>)
-                        .transpose()?,
+                    disposition: row.parsed("disposition")?,
+                    previous: row.parsed_opt::<Disposition>("previous")?,
                     changed_at: row
                         .try_get::<String, _>("changed_at")?
                         .parse()?,
-                    source: row.try_get("source")?,
+                    source: row.parsed("source")?,
                     note: row.try_get("note")?,
                 })
             })
@@ -1181,7 +1143,7 @@ impl Store {
         scan_id: &str,
     ) -> Result<Vec<WorkloadSummary>, DbError> {
         let seq = self.seq_of(scan_id).await?;
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .column((WorkloadMembers::Table, WorkloadMembers::Workload))
             .column((WorkloadMembers::Table, WorkloadMembers::Environment))
             .column((
@@ -1261,14 +1223,12 @@ impl Store {
             .order_by(
                 (WorkloadMembers::Table, WorkloadMembers::Environment),
                 Order::Asc,
-            )
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            ))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
-                let d: String = row.try_get("disposition")?;
                 let split = |v: Option<String>| -> Vec<String> {
                     let mut out: Vec<String> = v
                         .unwrap_or_default()
@@ -1283,7 +1243,7 @@ impl Store {
                 Ok(WorkloadSummary {
                     workload: row.try_get("workload")?,
                     environment: row.try_get("environment")?,
-                    disposition: d.parse()?,
+                    disposition: row.parsed("disposition")?,
                     resources: row.try_get("resources")?,
                     accounts: split(row.try_get("accounts")?),
                     regions: split(row.try_get("regions")?),
@@ -1301,7 +1261,7 @@ impl Store {
         environment: &str,
     ) -> Result<Vec<MemberDetail>, DbError> {
         let seq = self.seq_of(scan_id).await?;
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .column((WorkloadMembers::Table, WorkloadMembers::Arn))
             .column((WorkloadMembers::Table, WorkloadMembers::Signal))
             .column((ResourceVersions::Table, ResourceVersions::Kind))
@@ -1343,11 +1303,10 @@ impl Store {
                     WorkloadMembers::Environment,
                 ))
                 .eq(environment),
-            )
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            ))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         let mut out: Vec<MemberDetail> = rows
             .into_iter()
             .map(|row| {
@@ -1398,26 +1357,24 @@ impl Store {
     pub(crate) async fn pair_dispositions_in(
         conn: &mut SqliteConnection,
     ) -> Result<BTreeMap<PairKey, Disposition>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 WorkloadEnvironments::Workload,
                 WorkloadEnvironments::Environment,
                 WorkloadEnvironments::Disposition,
             ])
-            .from(WorkloadEnvironments::Table)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&mut *conn)
-            .await?;
+            .from(WorkloadEnvironments::Table))
+        .bound()
+        .fetch_all(&mut *conn)
+        .await?;
         rows.into_iter()
             .map(|row| {
-                let d: String = row.try_get("disposition")?;
                 Ok((
                     PairKey::new(
                         row.try_get::<String, _>("workload")?,
                         row.try_get::<String, _>("environment")?,
                     ),
-                    d.parse()?,
+                    row.parsed("disposition")?,
                 ))
             })
             .collect()
@@ -1462,19 +1419,19 @@ impl Store {
         let mut user_changed: std::collections::HashSet<PairKey> =
             std::collections::HashSet::new();
         if keep_user_changed {
-            let (sql, values) = Query::select()
+            for row in (Query::select()
                 .columns([
                     DispositionHistory::Workload,
                     DispositionHistory::Environment,
                 ])
                 .from(DispositionHistory::Table)
                 .and_where(
-                    Expr::col(DispositionHistory::Source).ne(SOURCE_DEFAULT),
-                )
-                .build_sqlx(SqliteQueryBuilder);
-            for row in sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .fetch_all(&self.pool)
-                .await?
+                    Expr::col(DispositionHistory::Source)
+                        .ne(DispositionSource::Default.as_str()),
+                ))
+            .bound()
+            .fetch_all(&self.pool)
+            .await?
             {
                 user_changed.insert(PairKey::new(
                     row.try_get::<String, _>("workload")?,
@@ -1489,7 +1446,7 @@ impl Store {
             if live.contains(&pair) || user_changed.contains(&pair) {
                 continue;
             }
-            let (sql, values) = Query::delete()
+            (Query::delete()
                 .from_table(WorkloadEnvironments::Table)
                 .and_where(
                     Expr::col(WorkloadEnvironments::Workload)
@@ -1498,49 +1455,44 @@ impl Store {
                 .and_where(
                     Expr::col(WorkloadEnvironments::Environment)
                         .eq(pair.environment.as_str()),
-                )
-                .build_sqlx(SqliteQueryBuilder);
-            sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .execute(&mut *tx)
-                .await?;
+                ))
+            .bound()
+            .execute(&mut *tx)
+            .await?;
             removed += 1;
         }
         // Workloads with no environments left.
-        let (sql, values) = Query::delete()
-            .from_table(Workloads::Table)
-            .and_where(
-                Expr::col(Workloads::Name).not_in_subquery(
-                    Query::select()
-                        .column(WorkloadEnvironments::Workload)
-                        .from(WorkloadEnvironments::Table)
-                        .take(),
-                ),
-            )
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *tx)
-            .await?;
+        (Query::delete().from_table(Workloads::Table).and_where(
+            Expr::col(Workloads::Name).not_in_subquery(
+                Query::select()
+                    .column(WorkloadEnvironments::Workload)
+                    .from(WorkloadEnvironments::Table)
+                    .take(),
+            ),
+        ))
+        .bound()
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(removed)
     }
 
     /// Manual placements by ARN.
     pub async fn overrides(&self) -> Result<BTreeMap<Arn, PairKey>, DbError> {
-        let (sql, values) = Query::select()
+        let rows = (Query::select()
             .columns([
                 WorkloadOverrides::Arn,
                 WorkloadOverrides::Workload,
                 WorkloadOverrides::Environment,
             ])
-            .from(WorkloadOverrides::Table)
-            .build_sqlx(SqliteQueryBuilder);
-        let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
-            .await?;
+            .from(WorkloadOverrides::Table))
+        .bound()
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
                 Ok((
-                    Arn::from(row.try_get::<String, _>("arn")?),
+                    row.parsed("arn")?,
                     PairKey::new(
                         row.try_get::<String, _>("workload")?,
                         row.try_get::<String, _>("environment")?,
@@ -1841,7 +1793,7 @@ mod tests {
                 "billing",
                 "prod",
                 Disposition::Rehost,
-                "user",
+                DispositionSource::User,
                 Some("stakeholder review"),
             )
             .await
@@ -1943,7 +1895,8 @@ mod tests {
         assert_eq!(store.waves().await.unwrap().len(), 2);
 
         let today = date(2026, 10, 14);
-        let (_, s) = store.compute_schedule(today, "t").await.unwrap();
+        let (_, s) =
+            store.compute_schedule(today, Trigger::Command).await.unwrap();
         let erp = s.slots.iter().find(|x| x.pair.workload == "erp").unwrap();
         assert_eq!(erp.wave, 2);
         assert_eq!(
@@ -1994,7 +1947,8 @@ mod tests {
             store.pair_status("shop", "dev").await.unwrap().status,
             Status::RolledBack
         );
-        let (_, s) = store.compute_schedule(today, "t").await.unwrap();
+        let (_, s) =
+            store.compute_schedule(today, Trigger::Command).await.unwrap();
         let dev = s.slots.iter().find(|x| x.pair.environment == "dev").unwrap();
         assert!(dev.reason().starts_with("rolled back"));
         let m = store.metrics(today).await.unwrap();
@@ -2202,7 +2156,8 @@ mod tests {
         assert!(events[1..].iter().all(|e| e.version_id.is_some()));
         assert!(events[1..].iter().all(|e| e.ends.is_some()));
         assert!(events[1].event.describe().starts_with("rules: 2 per day"));
-        let (_, before) = store.compute_schedule(today, "t").await.unwrap();
+        let (_, before) =
+            store.compute_schedule(today, Trigger::Command).await.unwrap();
         let (latest_id, _, latest) =
             store.latest_schedule().await.unwrap().unwrap();
         assert_eq!(latest, before);
@@ -2214,7 +2169,7 @@ mod tests {
                 "shop",
                 "prod",
                 Disposition::Retire,
-                "user",
+                DispositionSource::User,
                 Some("unused"),
             )
             .await
@@ -2224,7 +2179,8 @@ mod tests {
             .await
             .unwrap();
         store.merge_workload("shop-eu", "shop").await.unwrap();
-        let (_, before) = store.compute_schedule(today, "t").await.unwrap();
+        let (_, before) =
+            store.compute_schedule(today, Trigger::Command).await.unwrap();
         assert_eq!(before.slots.len(), 1, "retired prod left the calendar");
 
         // Wipe the projections and rebuild them from the log alone.
@@ -2270,15 +2226,16 @@ mod tests {
         let events = store.events().await.unwrap().len();
         // A stored target the scheduler cannot read makes computing the
         // version fail after the event was projected and logged.
-        let (sql, values) = Query::update()
+        (Query::update()
             .table(Settings::Table)
             .value(Settings::Value, "not a date")
-            .and_where(Expr::col(Settings::Key).eq("schedule.target_end"))
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+            .and_where(
+                Expr::col(Settings::Key).eq(Setting::TargetEnd.as_str()),
+            ))
+        .bound()
+        .execute(&store.pool)
+        .await
+        .unwrap();
         let freeze = Blackout {
             name: "freeze".into(),
             start: jiff::civil::date(2026, 12, 24),
@@ -2309,7 +2266,7 @@ mod tests {
             duration_days: 1,
             weight: 1,
         };
-        let (sql, values) = Query::insert()
+        (Query::insert()
             .into_table(schema::PlanEvents::Table)
             .columns([
                 schema::PlanEvents::At,
@@ -2318,14 +2275,13 @@ mod tests {
             ])
             .values_panic([
                 jiff::Timestamp::now().to_string().into(),
-                bad.kind().into(),
+                bad.kind().as_str().into(),
                 serde_json::to_string(&bad).unwrap().into(),
-            ])
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+            ]))
+        .bound()
+        .execute(&store.pool)
+        .await
+        .unwrap();
         store.add_blackout(&freeze).await.unwrap();
         assert!(store.replay().await.is_err());
         assert_eq!(store.blackouts().await.unwrap(), vec![freeze]);
@@ -2364,7 +2320,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let (_, s1) = store.compute_schedule(today, "t").await.unwrap();
+        let (_, s1) =
+            store.compute_schedule(today, Trigger::Command).await.unwrap();
         assert_eq!(dev_date(&s1), date(2026, 10, 15), "today is taken by prod");
 
         store
@@ -2378,7 +2335,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let (_, s2) = store.compute_schedule(today, "t").await.unwrap();
+        let (_, s2) =
+            store.compute_schedule(today, Trigger::Command).await.unwrap();
         assert_eq!(
             dev_date(&s2),
             today,
@@ -2433,7 +2391,8 @@ mod tests {
             .unwrap();
 
         let today = date(2026, 10, 14);
-        let (v1, s1) = store.compute_schedule(today, "command").await.unwrap();
+        let (v1, s1) =
+            store.compute_schedule(today, Trigger::Command).await.unwrap();
         let by: BTreeMap<&str, &precip_engine::schedule::Slot> =
             s1.slots.iter().map(|x| (x.pair.environment.as_str(), x)).collect();
         assert_eq!(by["dev"].date, today);
@@ -2466,7 +2425,7 @@ mod tests {
             .await
             .unwrap();
         let (_, s2) =
-            store.compute_schedule(today, "status_change").await.unwrap();
+            store.compute_schedule(today, Trigger::StatusChange).await.unwrap();
         let prod =
             s2.slots.iter().find(|x| x.pair.environment == "prod").unwrap();
         assert!(prod.agreed);
@@ -2485,8 +2444,10 @@ mod tests {
             .unwrap();
 
         // Time passes the confirmed date with no migration: back to the pool.
-        let (_, s3) =
-            store.compute_schedule(date(2026, 10, 26), "open").await.unwrap();
+        let (_, s3) = store
+            .compute_schedule(date(2026, 10, 26), Trigger::Open)
+            .await
+            .unwrap();
         assert_eq!(
             s3.expired,
             vec![precip_types::PairKey::new("shop", "prod")]
@@ -2495,12 +2456,12 @@ mod tests {
             store.pair_status("shop", "prod").await.unwrap().status,
             Status::Missed
         );
-        let events: Vec<String> = store
+        let events: Vec<&str> = store
             .migration_events("shop", "prod")
             .await
             .unwrap()
             .into_iter()
-            .map(|e| e.event)
+            .map(|e| e.event.as_str())
             .collect();
         assert_eq!(events, vec!["confirmed", "missed"]);
 
@@ -2556,12 +2517,12 @@ mod tests {
             .unwrap();
         let st = store.pair_status("shop", "prod").await.unwrap();
         assert_eq!(st.confirmed_date, Some(date(2026, 11, 7)));
-        let events: Vec<String> = store
+        let events: Vec<&str> = store
             .migration_events("shop", "prod")
             .await
             .unwrap()
             .into_iter()
-            .map(|e| e.event)
+            .map(|e| e.event.as_str())
             .collect();
         assert_eq!(
             events,
@@ -2622,19 +2583,18 @@ mod tests {
         ))
         .await;
         assert_eq!(find(&m, I1).pair.workload, "x");
-        let (sql, values) = Query::insert()
+        (Query::insert()
             .into_table(WorkloadOverrides::Table)
             .columns([
                 WorkloadOverrides::Arn,
                 WorkloadOverrides::Workload,
                 WorkloadOverrides::Environment,
             ])
-            .values_panic([I1.into(), "legacy".into(), "prod".into()])
-            .build_sqlx(SqliteQueryBuilder);
-        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+            .values_panic([I1.into(), "legacy".into(), "prod".into()]))
+        .bound()
+        .execute(&store.pool)
+        .await
+        .unwrap();
         store.group_scan("s", &GroupingConfig::default()).await.unwrap();
         let m = store.members("s").await.unwrap();
         assert_eq!(m.len(), 1, "regrouping replaces, never duplicates");
