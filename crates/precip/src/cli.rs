@@ -10,8 +10,7 @@ use precip_types::{AccountId, Provider, Region};
 use crate::commands::default_workspaces_dir;
 
 /// Scan AWS, Azure, Google Cloud and OCI estates and size them for Oxide
-/// racks. With no
-/// subcommand, opens the terminal interface.
+/// racks. With no subcommand, opens the terminal interface.
 #[derive(Parser)]
 #[command(name = "precip", version)]
 pub(crate) struct Cli {
@@ -72,7 +71,9 @@ impl From<AzureCloudArg> for precip_azure::AzureCloud {
     }
 }
 
-/// How to reach the estate. Accepted before or after a subcommand.
+/// How to reach the estate. Accepted before or after a subcommand. Flags
+/// of two clouds together are refused by [`ScanArgs::provider`]: clap's
+/// argument groups do not reach subcommands, where global flags do.
 #[derive(Args, Clone)]
 pub(crate) struct ScanArgs {
     /// The cloud to scan. Without it, the selection flags decide; with
@@ -82,72 +83,89 @@ pub(crate) struct ScanArgs {
     pub(crate) cloud: Option<Cloud>,
 
     /// AWS CLI profile to use instead of the default credential chain.
-    #[arg(long, global = true, help_heading = "AWS")]
-    pub(crate) profile: Option<String>,
+    #[arg(long = "aws-profile", global = true, help_heading = "AWS")]
+    pub(crate) aws_profile: Option<String>,
     /// Role to try in each member account, in order (repeatable).
     /// Defaults to OrganizationAccountAccessRole, then
     /// AWSControlTowerExecution.
-    #[arg(long = "member-role", global = true, help_heading = "AWS")]
-    pub(crate) member_roles: Vec<String>,
-    /// Scan only these member account ids (repeatable).
-    #[arg(long = "account", global = true, help_heading = "AWS")]
-    pub(crate) accounts: Vec<AccountId>,
-    /// Skip these member account ids (repeatable).
-    #[arg(long = "exclude-account", global = true, help_heading = "AWS")]
-    pub(crate) exclude_accounts: Vec<AccountId>,
+    #[arg(long = "aws-member-role", global = true, help_heading = "AWS")]
+    pub(crate) aws_member_roles: Vec<String>,
+    /// Scan only these member accounts, by id or name (repeatable).
+    #[arg(long = "aws-account", global = true, help_heading = "AWS")]
+    pub(crate) aws_accounts: Vec<AccountId>,
+    /// Skip these member accounts, by id or name (repeatable).
+    #[arg(long = "aws-exclude-account", global = true, help_heading = "AWS")]
+    pub(crate) aws_exclude_accounts: Vec<AccountId>,
     /// Scan only the caller's account, even in a management account.
-    #[arg(long, global = true, help_heading = "AWS")]
-    pub(crate) single_account: bool,
+    #[arg(long = "aws-single-account", global = true, help_heading = "AWS")]
+    pub(crate) aws_single_account: bool,
 
     /// Azure cloud to scan. Defaults to AzureCloud, the public cloud. With
     /// the Azure CLI, run `az cloud set` to the same cloud first.
-    #[arg(long, global = true, value_enum, help_heading = "Azure")]
+    #[arg(
+        long = "azure-cloud",
+        global = true,
+        value_enum,
+        help_heading = "Azure"
+    )]
     pub(crate) azure_cloud: Option<AzureCloudArg>,
     /// Entra tenant to sign in to and scan.
-    #[arg(long, global = true, help_heading = "Azure")]
-    pub(crate) tenant: Option<String>,
-    /// Scan only these subscription ids (repeatable).
-    #[arg(long = "subscription", global = true, help_heading = "Azure")]
-    pub(crate) subscriptions: Vec<AccountId>,
-    /// Skip these subscription ids (repeatable).
+    #[arg(long = "azure-tenant", global = true, help_heading = "Azure")]
+    pub(crate) azure_tenant: Option<String>,
+    /// Scan only these subscriptions, by id or name (repeatable).
+    #[arg(long = "azure-subscription", global = true, help_heading = "Azure")]
+    pub(crate) azure_subscriptions: Vec<AccountId>,
+    /// Skip these subscriptions, by id or name (repeatable).
     #[arg(
-        long = "exclude-subscription",
+        long = "azure-exclude-subscription",
         global = true,
         help_heading = "Azure"
     )]
-    pub(crate) exclude_subscriptions: Vec<AccountId>,
+    pub(crate) azure_exclude_subscriptions: Vec<AccountId>,
     /// Scan only subscriptions under this management group, at any depth.
-    #[arg(long, global = true, help_heading = "Azure")]
-    pub(crate) management_group: Option<String>,
+    #[arg(
+        long = "azure-management-group",
+        global = true,
+        help_heading = "Azure"
+    )]
+    pub(crate) azure_management_group: Option<String>,
 
     /// Scan only projects under this organization number, listing the
     /// whole organization in one pass.
-    #[arg(long, global = true, help_heading = "Google Cloud")]
-    pub(crate) organization: Option<String>,
-    /// Scan only projects under this folder number, at any depth.
-    #[arg(long, global = true, help_heading = "Google Cloud")]
-    pub(crate) folder: Option<String>,
-    /// Scan only these project ids or numbers (repeatable).
-    #[arg(long = "project", global = true, help_heading = "Google Cloud")]
-    pub(crate) projects: Vec<AccountId>,
-    /// Skip these project ids or numbers (repeatable).
     #[arg(
-        long = "exclude-project",
+        long = "gcp-organization",
         global = true,
         help_heading = "Google Cloud"
     )]
-    pub(crate) exclude_projects: Vec<AccountId>,
+    pub(crate) gcp_organization: Option<String>,
+    /// Scan only projects under this folder number, at any depth.
+    #[arg(long = "gcp-folder", global = true, help_heading = "Google Cloud")]
+    pub(crate) gcp_folder: Option<String>,
+    /// Scan only these projects, by id or number (repeatable).
+    #[arg(long = "gcp-project", global = true, help_heading = "Google Cloud")]
+    pub(crate) gcp_projects: Vec<AccountId>,
+    /// Skip these projects, by id or number (repeatable).
+    #[arg(
+        long = "gcp-exclude-project",
+        global = true,
+        help_heading = "Google Cloud"
+    )]
+    pub(crate) gcp_exclude_projects: Vec<AccountId>,
 
     /// OCI CLI configuration profile to sign in with. Defaults to
     /// OCI_CLI_PROFILE, else DEFAULT.
-    #[arg(long, global = true, help_heading = "OCI")]
+    #[arg(long = "oci-profile", global = true, help_heading = "OCI")]
     pub(crate) oci_profile: Option<String>,
     /// Scan only these compartments, by OCID or name (repeatable).
-    #[arg(long = "compartment", global = true, help_heading = "OCI")]
-    pub(crate) compartments: Vec<String>,
+    #[arg(long = "oci-compartment", global = true, help_heading = "OCI")]
+    pub(crate) oci_compartments: Vec<String>,
     /// Skip these compartments, by OCID or name (repeatable).
-    #[arg(long = "exclude-compartment", global = true, help_heading = "OCI")]
-    pub(crate) exclude_compartments: Vec<String>,
+    #[arg(
+        long = "oci-exclude-compartment",
+        global = true,
+        help_heading = "OCI"
+    )]
+    pub(crate) oci_exclude_compartments: Vec<String>,
     /// Scan only these subscribed regions (repeatable).
     #[arg(long = "oci-region", global = true, help_heading = "OCI")]
     pub(crate) oci_regions: Vec<Region>,
@@ -155,30 +173,30 @@ pub(crate) struct ScanArgs {
 
 impl ScanArgs {
     fn aws_selection(&self) -> bool {
-        !self.member_roles.is_empty()
-            || !self.accounts.is_empty()
-            || !self.exclude_accounts.is_empty()
-            || self.single_account
+        !self.aws_member_roles.is_empty()
+            || !self.aws_accounts.is_empty()
+            || !self.aws_exclude_accounts.is_empty()
+            || self.aws_single_account
     }
 
     fn azure_selection(&self) -> bool {
         self.azure_cloud.is_some()
-            || self.tenant.is_some()
-            || !self.subscriptions.is_empty()
-            || !self.exclude_subscriptions.is_empty()
-            || self.management_group.is_some()
+            || self.azure_tenant.is_some()
+            || !self.azure_subscriptions.is_empty()
+            || !self.azure_exclude_subscriptions.is_empty()
+            || self.azure_management_group.is_some()
     }
 
     fn gcp_selection(&self) -> bool {
-        self.organization.is_some()
-            || self.folder.is_some()
-            || !self.projects.is_empty()
-            || !self.exclude_projects.is_empty()
+        self.gcp_organization.is_some()
+            || self.gcp_folder.is_some()
+            || !self.gcp_projects.is_empty()
+            || !self.gcp_exclude_projects.is_empty()
     }
 
     fn oci_selection(&self) -> bool {
-        !self.compartments.is_empty()
-            || !self.exclude_compartments.is_empty()
+        !self.oci_compartments.is_empty()
+            || !self.oci_exclude_compartments.is_empty()
             || !self.oci_regions.is_empty()
     }
 
@@ -186,7 +204,7 @@ impl ScanArgs {
     /// given. `None` when nothing says.
     pub(crate) fn provider(&self) -> anyhow::Result<Option<Provider>> {
         let flagged: Vec<Provider> = [
-            (Provider::Aws, self.aws_selection() || self.profile.is_some()),
+            (Provider::Aws, self.aws_selection() || self.aws_profile.is_some()),
             (Provider::Azure, self.azure_selection()),
             (Provider::Gcp, self.gcp_selection()),
             (Provider::Oci, self.oci_selection() || self.oci_profile.is_some()),
@@ -224,40 +242,40 @@ impl ScanArgs {
     pub(crate) fn aws_options(&self) -> precip_aws::Options {
         let defaults = precip_aws::Options::default();
         precip_aws::Options {
-            member_roles: if self.member_roles.is_empty() {
+            member_roles: if self.aws_member_roles.is_empty() {
                 defaults.member_roles
             } else {
-                self.member_roles.clone()
+                self.aws_member_roles.clone()
             },
-            accounts: self.accounts.clone(),
-            exclude_accounts: self.exclude_accounts.clone(),
-            single_account: self.single_account,
+            accounts: self.aws_accounts.clone(),
+            exclude_accounts: self.aws_exclude_accounts.clone(),
+            single_account: self.aws_single_account,
         }
     }
 
     pub(crate) fn azure_options(&self) -> precip_azure::Options {
         precip_azure::Options {
             cloud: self.azure_cloud.map(Into::into).unwrap_or_default(),
-            tenant: self.tenant.clone(),
-            subscriptions: self.subscriptions.clone(),
-            exclude_subscriptions: self.exclude_subscriptions.clone(),
-            management_group: self.management_group.clone(),
+            tenant: self.azure_tenant.clone(),
+            subscriptions: self.azure_subscriptions.clone(),
+            exclude_subscriptions: self.azure_exclude_subscriptions.clone(),
+            management_group: self.azure_management_group.clone(),
         }
     }
 
     pub(crate) fn gcp_options(&self) -> precip_gcp::Options {
         precip_gcp::Options {
-            organization: self.organization.clone(),
-            folder: self.folder.clone(),
-            projects: self.projects.clone(),
-            exclude_projects: self.exclude_projects.clone(),
+            organization: self.gcp_organization.clone(),
+            folder: self.gcp_folder.clone(),
+            projects: self.gcp_projects.clone(),
+            exclude_projects: self.gcp_exclude_projects.clone(),
         }
     }
 
     pub(crate) fn oci_options(&self) -> precip_oci::Options {
         precip_oci::Options {
-            compartments: self.compartments.clone(),
-            exclude_compartments: self.exclude_compartments.clone(),
+            compartments: self.oci_compartments.clone(),
+            exclude_compartments: self.oci_exclude_compartments.clone(),
             regions: self.oci_regions.clone(),
         }
     }
@@ -647,15 +665,16 @@ mod tests {
             Some(Provider::Azure)
         );
         assert_eq!(
-            provider(&["--profile", "mgmt", "scan"]).unwrap(),
+            provider(&["--aws-profile", "mgmt", "scan"]).unwrap(),
             Some(Provider::Aws)
         );
         assert_eq!(
-            provider(&["scan", "--subscription", "s1"]).unwrap(),
+            provider(&["scan", "--azure-subscription", "s1"]).unwrap(),
             Some(Provider::Azure)
         );
         assert_eq!(
-            provider(&["scan", "--cloud", "azure", "--tenant", "t"]).unwrap(),
+            provider(&["scan", "--cloud", "azure", "--azure-tenant", "t"])
+                .unwrap(),
             Some(Provider::Azure)
         );
     }
@@ -663,27 +682,35 @@ mod tests {
     #[test]
     fn flags_of_the_other_cloud_are_refused() {
         assert!(
-            provider(&["scan", "--cloud", "aws", "--tenant", "t"]).is_err()
-        );
-        assert!(
-            provider(&["scan", "--cloud", "azure", "--single-account"])
+            provider(&["scan", "--cloud", "aws", "--azure-tenant", "t"])
                 .is_err()
         );
         assert!(
-            provider(&["scan", "--account", "1", "--subscription", "s1"])
+            provider(&["scan", "--cloud", "azure", "--aws-single-account"])
                 .is_err()
+        );
+        assert!(
+            provider(&[
+                "scan",
+                "--aws-account",
+                "1",
+                "--azure-subscription",
+                "s1"
+            ])
+            .is_err()
         );
     }
 
     #[test]
     fn a_profile_alone_still_uses_the_saved_selection() {
-        let cli = Cli::try_parse_from(["precip", "--profile", "mgmt", "scan"])
-            .unwrap();
+        let cli =
+            Cli::try_parse_from(["precip", "--aws-profile", "mgmt", "scan"])
+                .unwrap();
         assert!(cli.scan.is_default(Provider::Aws));
         let cli = Cli::try_parse_from([
             "precip",
             "scan",
-            "--management-group",
+            "--azure-management-group",
             "prod",
         ])
         .unwrap();
@@ -722,7 +749,7 @@ mod tests {
     #[test]
     fn google_cloud_flags_select_gcp_and_conflict_with_other_clouds() {
         assert_eq!(
-            provider(&["scan", "--organization", "9"]).unwrap(),
+            provider(&["scan", "--gcp-organization", "9"]).unwrap(),
             Some(Provider::Gcp)
         );
         assert_eq!(
@@ -730,20 +757,21 @@ mod tests {
             Some(Provider::Gcp)
         );
         assert!(
-            provider(&["scan", "--cloud", "gcp", "--subscription", "s1"])
+            provider(&["scan", "--cloud", "gcp", "--azure-subscription", "s1"])
                 .is_err()
         );
         assert!(
-            provider(&["scan", "--project", "p", "--account", "1"]).is_err()
+            provider(&["scan", "--gcp-project", "p", "--aws-account", "1"])
+                .is_err()
         );
         let cli = Cli::try_parse_from([
             "precip",
             "scan",
-            "--folder",
+            "--gcp-folder",
             "5",
-            "--project",
+            "--gcp-project",
             "shop",
-            "--exclude-project",
+            "--gcp-exclude-project",
             "old",
         ])
         .unwrap();
@@ -758,7 +786,7 @@ mod tests {
     #[test]
     fn oci_flags_select_oci_and_a_profile_alone_keeps_the_saved_selection() {
         assert_eq!(
-            provider(&["scan", "--compartment", "shop"]).unwrap(),
+            provider(&["scan", "--oci-compartment", "shop"]).unwrap(),
             Some(Provider::Oci)
         );
         assert_eq!(
@@ -766,7 +794,8 @@ mod tests {
             Some(Provider::Oci)
         );
         assert!(
-            provider(&["scan", "--cloud", "oci", "--project", "p"]).is_err()
+            provider(&["scan", "--cloud", "oci", "--gcp-project", "p"])
+                .is_err()
         );
         let cli =
             Cli::try_parse_from(["precip", "--oci-profile", "prod", "scan"])
@@ -775,9 +804,9 @@ mod tests {
         let cli = Cli::try_parse_from([
             "precip",
             "scan",
-            "--compartment",
+            "--oci-compartment",
             "shop",
-            "--exclude-compartment",
+            "--oci-exclude-compartment",
             "sandbox",
             "--oci-region",
             "us-ashburn-1",

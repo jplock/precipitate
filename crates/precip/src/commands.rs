@@ -90,7 +90,7 @@ impl Estate {
         Ok(match provider {
             Provider::Aws => Self::Aws {
                 config: Box::new(
-                    precip_aws::load_config(args.profile.as_deref()).await,
+                    precip_aws::load_config(args.aws_profile.as_deref()).await,
                 ),
                 opts: selection(saved, "AWS", || args.aws_options())?,
             },
@@ -161,7 +161,7 @@ impl Estate {
     /// What the interface's header says the scan reads.
     pub(crate) fn describe(&self, args: &ScanArgs) -> String {
         match self {
-            Self::Aws { .. } => match &args.profile {
+            Self::Aws { .. } => match &args.aws_profile {
                 Some(p) => format!("aws profile {p}"),
                 None => "aws default chain".into(),
             },

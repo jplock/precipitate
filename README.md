@@ -35,16 +35,16 @@ AWS, Azure, Google Cloud and OCI estates. `--cloud aws`, `--cloud azure`,
 selection flags imply it.
 
 ```
-precip --profile mgmt                         # open the TUI
-precip --profile mgmt --workspace acme scan   # scan without the TUI
+precip --aws-profile mgmt                         # open the TUI
+precip --aws-profile mgmt --workspace acme scan   # scan without the TUI
 precip --workspace acme workloads             # list what the scan found
 precip --workspace acme size                  # count sleds and racks
 precip --workspace acme schedule show         # show the migration calendar
 precip --workspace acme export schedule --out plan.ics
 precip --help                                 # list every command
 precip --cloud azure --workspace acme scan    # scan Azure without the TUI
-precip --workspace acme scan --tenant <id> --management-group prod
-precip --workspace acme scan --organization <number>   # scan Google Cloud
+precip --workspace acme scan --azure-tenant <id> --azure-management-group prod
+precip --workspace acme scan --gcp-organization <number>   # scan Google Cloud
 precip --workspace acme --cloud oci scan               # scan OCI
 ```
 
@@ -53,13 +53,13 @@ member account. In each account it assumes `OrganizationAccountAccessRole`,
 then `AWSControlTowerExecution` if the first role fails. The read-only
 Identity and Access Management (IAM) policy precip needs is in
 `iam/precip-scan-policy.json`. precip finds AWS credentials the same way
-the AWS command line does. `--profile` selects a named profile. The
+the AWS command line does. `--aws-profile` selects a named profile. The
 profile or `AWS_REGION` must name a region; a GovCloud region such as
 `us-gov-west-1` scans the GovCloud partition.
 
 In Azure, precip scans every subscription the sign-in can read, or those
-named with `--subscription`, `--exclude-subscription`, `--tenant` and
-`--management-group`. It signs in with a service principal secret when
+named with `--azure-subscription`, `--azure-exclude-subscription`, `--azure-tenant` and
+`--azure-management-group`. It signs in with a service principal secret when
 `AZURE_CLIENT_SECRET`, `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` are set,
 with workload identity when `AZURE_FEDERATED_TOKEN_FILE` is set, and
 otherwise with the Azure CLI (`az login`) or Azure Developer CLI. The
@@ -70,8 +70,8 @@ Azure Government; with the Azure CLI, run
 `az cloud set --name AzureUSGovernment` first.
 
 In Google Cloud, precip scans every active project the sign-in can see,
-or those named with `--project` and `--exclude-project`. `--organization`
-or `--folder` (by number) limits the scan to projects under it and lists
+or those named with `--gcp-project` and `--gcp-exclude-project`. `--gcp-organization`
+or `--gcp-folder` (by number) limits the scan to projects under it and lists
 the whole organization or folder in one pass, which is faster than
 listing each project. precip signs in with Application Default
 Credentials: the key, workload identity federation or impersonation
@@ -85,8 +85,8 @@ Viewer roles are enough; a custom role with only the permissions precip
 uses is in `iam/gcp-precip-reader.yaml`.
 
 In OCI, precip scans every compartment the user can read in every region
-the tenancy subscribes to, or those named with `--compartment`,
-`--exclude-compartment` (by OCID or name) and `--oci-region`. It signs in
+the tenancy subscribes to, or those named with `--oci-compartment`,
+`--oci-exclude-compartment` (by OCID or name) and `--oci-region`. It signs in
 with a profile of the OCI CLI's configuration file (`~/.oci/config`, or
 `OCI_CLI_CONFIG_FILE`): `--oci-profile`, else `OCI_CLI_PROFILE`, else
 `DEFAULT`. A profile with an API key signs each request with it; a
