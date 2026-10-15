@@ -32,7 +32,11 @@ fn observed(d: Date) -> Date {
     match d.weekday() {
         Weekday::Saturday => d.yesterday().unwrap_or(d),
         Weekday::Sunday => d.tomorrow().unwrap_or(d),
-        _ => d,
+        Weekday::Monday
+        | Weekday::Tuesday
+        | Weekday::Wednesday
+        | Weekday::Thursday
+        | Weekday::Friday => d,
     }
 }
 

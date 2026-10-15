@@ -97,6 +97,7 @@ pub enum WorkloadAliases {
 #[derive(Iden)]
 pub enum DispositionHistory {
     Table,
+    Id,
     Workload,
     Environment,
     Disposition,

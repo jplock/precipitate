@@ -24,11 +24,14 @@ use precip_types::{
     Disposition, GroupingConfig, Override, Scan, WorkloadMember,
 };
 use sea_query::{
-    Expr, ExprTrait, OnConflict, Order, Query, SqliteQueryBuilder,
+    Expr, ExprTrait, Func, IntoColumnRef, OnConflict, Order, Query,
+    SqliteQueryBuilder,
 };
 use sea_query_sqlx::SqlxBinder;
 use sha2::{Digest, Sha256};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteConnection, SqlitePool, SqlitePoolOptions,
+};
 use sqlx::{Row, migrate::Migrator};
 use std::collections::{BTreeMap, HashMap};
 
@@ -39,6 +42,11 @@ use schema::{
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+/// The settings key holding the disposition new pairs get.
+const DEFAULT_DISPOSITION_KEY: &str = "default_disposition";
+/// The history source of a disposition a pair got when first seen.
+const SOURCE_DEFAULT: &str = "default";
 
 /// What grouping produced for one scan.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -157,6 +165,12 @@ fn enum_name<T: serde::Serialize>(v: T) -> Result<String, DbError> {
         .unwrap_or_default())
 }
 
+/// Every value of a column in the group, comma separated. Duplicates
+/// are kept; callers that need distinct values remove them.
+fn group_concat(col: impl IntoColumnRef) -> Expr {
+    Func::cust(sea_query::Alias::new("GROUP_CONCAT")).arg(Expr::col(col)).into()
+}
+
 fn disposition_from_name(s: &str) -> Result<Disposition, DbError> {
     Ok(serde_json::from_value(serde_json::Value::String(s.to_string()))?)
 }
@@ -206,7 +220,18 @@ impl Store {
             ])
             .values_panic([
                 scan.id.clone().into(),
-                Expr::cust("(SELECT COALESCE(MAX(seq), 0) + 1 FROM scans)"),
+                Expr::from(
+                    Query::select()
+                        .expr(
+                            Func::coalesce([
+                                Expr::col(Scans::Seq).max(),
+                                Expr::val(0),
+                            ])
+                            .add(1),
+                        )
+                        .from(Scans::Table)
+                        .take(),
+                ),
                 scan.started.to_string().into(),
                 scan.finished.map(|t| t.to_string()).into(),
                 scan.caller_arn.clone().into(),
@@ -578,11 +603,11 @@ impl Store {
 
         let (sql, values) = Query::select()
             .expr_as(
-                Expr::cust("COUNT(DISTINCT account_id)"),
+                Func::count_distinct(Expr::col(ResourceVersions::AccountId)),
                 sea_query::Alias::new("accounts"),
             )
             .expr_as(
-                Expr::cust("COUNT(DISTINCT region)"),
+                Func::count_distinct(Expr::col(ResourceVersions::Region)),
                 sea_query::Alias::new("regions"),
             )
             .from(ResourceVersions::Table)
@@ -665,7 +690,7 @@ impl Store {
         let (sql, values) = Query::select()
             .column(Settings::Value)
             .from(Settings::Table)
-            .and_where(Expr::col(Settings::Key).eq("default_disposition"))
+            .and_where(Expr::col(Settings::Key).eq(DEFAULT_DISPOSITION_KEY))
             .build_sqlx(SqliteQueryBuilder);
         let row = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
             .fetch_one(&self.pool)
@@ -675,22 +700,20 @@ impl Store {
     }
 
     pub(crate) async fn project_default_disposition(
-        &self,
+        conn: &mut SqliteConnection,
         disposition: Disposition,
         apply_to_existing: bool,
         at: jiff::Timestamp,
     ) -> Result<(), DbError> {
         let name = enum_name(disposition)?;
-        let mut tx = self.pool.begin().await?;
         let (sql, values) = Query::update()
             .table(Settings::Table)
-            .value(Settings::Value, name.clone())
-            .and_where(Expr::col(Settings::Key).eq("default_disposition"))
+            .value(Settings::Value, name)
+            .and_where(Expr::col(Settings::Key).eq(DEFAULT_DISPOSITION_KEY))
             .build_sqlx(SqliteQueryBuilder);
         sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
-        tx.commit().await?;
         if apply_to_existing {
             let (sql, values) = Query::select()
                 .columns([
@@ -700,13 +723,21 @@ impl Store {
                 .from(WorkloadEnvironments::Table)
                 .build_sqlx(SqliteQueryBuilder);
             let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *conn)
                 .await?;
             for row in rows {
                 let w: String = row.try_get("workload")?;
                 let e: String = row.try_get("environment")?;
-                self.project_disposition(&w, &e, disposition, "bulk", None, at)
-                    .await?;
+                Self::project_disposition(
+                    conn,
+                    &w,
+                    &e,
+                    disposition,
+                    "bulk",
+                    None,
+                    at,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -821,7 +852,7 @@ impl Store {
                         environment.clone().into(),
                         default.clone().into(),
                         jiff::Timestamp::now().to_string().into(),
-                        "default".into(),
+                        SOURCE_DEFAULT.into(),
                     ])
                     .build_sqlx(SqliteQueryBuilder);
                 sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
@@ -934,7 +965,7 @@ impl Store {
     /// Record that `alias` is the same workload as `workload`. Takes effect
     /// on the next grouping.
     pub(crate) async fn project_merge(
-        &self,
+        conn: &mut SqliteConnection,
         alias: &str,
         workload: &str,
     ) -> Result<(), DbError> {
@@ -949,7 +980,7 @@ impl Store {
             )
             .build_sqlx(SqliteQueryBuilder);
         sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await?;
         Ok(())
     }
@@ -1030,7 +1061,7 @@ impl Store {
     /// Change one pair's disposition and append the change to its history.
     /// A change to the value it already has is not recorded.
     pub(crate) async fn project_disposition(
-        &self,
+        conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
         disposition: Disposition,
@@ -1038,7 +1069,6 @@ impl Store {
         note: Option<&str>,
         at: jiff::Timestamp,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await?;
         let (sql, values) = Query::select()
             .column(WorkloadEnvironments::Disposition)
             .from(WorkloadEnvironments::Table)
@@ -1049,7 +1079,7 @@ impl Store {
             .build_sqlx(SqliteQueryBuilder);
         let previous: Option<String> =
             sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *conn)
                 .await?
                 .map(|row| row.try_get("disposition"))
                 .transpose()?;
@@ -1066,7 +1096,7 @@ impl Store {
             )
             .build_sqlx(SqliteQueryBuilder);
         sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
         let (sql, values) = Query::insert()
             .into_table(DispositionHistory::Table)
@@ -1090,9 +1120,8 @@ impl Store {
             ])
             .build_sqlx(SqliteQueryBuilder);
         sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
-        tx.commit().await?;
         Ok(())
     }
 
@@ -1115,7 +1144,7 @@ impl Store {
             .and_where(
                 Expr::col(DispositionHistory::Environment).eq(environment),
             )
-            .order_by(sea_query::Alias::new("id"), Order::Asc)
+            .order_by(DispositionHistory::Id, Order::Asc)
             .build_sqlx(SqliteQueryBuilder);
         let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
             .fetch_all(&self.pool)
@@ -1160,13 +1189,17 @@ impl Store {
                 sea_query::Alias::new("resources"),
             )
             .expr_as(
-                Expr::cust(
-                    "GROUP_CONCAT(DISTINCT resource_versions.account_id)",
-                ),
+                group_concat((
+                    ResourceVersions::Table,
+                    ResourceVersions::AccountId,
+                )),
                 sea_query::Alias::new("accounts"),
             )
             .expr_as(
-                Expr::cust("GROUP_CONCAT(DISTINCT resource_versions.region)"),
+                group_concat((
+                    ResourceVersions::Table,
+                    ResourceVersions::Region,
+                )),
                 sea_query::Alias::new("regions"),
             )
             .from(WorkloadMembers::Table)
@@ -1239,6 +1272,7 @@ impl Store {
                         .map(str::to_string)
                         .collect();
                     out.sort();
+                    out.dedup();
                     out
                 };
                 Ok(WorkloadSummary {
@@ -1352,6 +1386,13 @@ impl Store {
     pub async fn pair_dispositions(
         &self,
     ) -> Result<BTreeMap<(String, String), Disposition>, DbError> {
+        let mut conn = self.pool.acquire().await?;
+        Self::pair_dispositions_in(&mut conn).await
+    }
+
+    pub(crate) async fn pair_dispositions_in(
+        conn: &mut SqliteConnection,
+    ) -> Result<BTreeMap<(String, String), Disposition>, DbError> {
         let (sql, values) = Query::select()
             .columns([
                 WorkloadEnvironments::Workload,
@@ -1361,7 +1402,7 @@ impl Store {
             .from(WorkloadEnvironments::Table)
             .build_sqlx(SqliteQueryBuilder);
         let rows = sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *conn)
             .await?;
         rows.into_iter()
             .map(|row| {
@@ -1423,7 +1464,9 @@ impl Store {
                     DispositionHistory::Environment,
                 ])
                 .from(DispositionHistory::Table)
-                .and_where(Expr::col(DispositionHistory::Source).ne("default"))
+                .and_where(
+                    Expr::col(DispositionHistory::Source).ne(SOURCE_DEFAULT),
+                )
                 .build_sqlx(SqliteQueryBuilder);
             for row in sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
                 .fetch_all(&self.pool)
@@ -1459,11 +1502,20 @@ impl Store {
             removed += 1;
         }
         // Workloads with no environments left.
-        sqlx::raw_sql(
-            "DELETE FROM workloads WHERE name NOT IN (SELECT workload FROM workload_environments)",
-        )
-        .execute(&mut *tx)
-        .await?;
+        let (sql, values) = Query::delete()
+            .from_table(Workloads::Table)
+            .and_where(
+                Expr::col(Workloads::Name).not_in_subquery(
+                    Query::select()
+                        .column(WorkloadEnvironments::Workload)
+                        .from(WorkloadEnvironments::Table)
+                        .take(),
+                ),
+            )
+            .build_sqlx(SqliteQueryBuilder);
+        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(removed)
     }
@@ -1698,6 +1750,36 @@ mod tests {
             .iter()
             .find(|m| m.arn == arn)
             .unwrap_or_else(|| panic!("{arn} not placed"))
+    }
+
+    #[tokio::test]
+    async fn summaries_count_each_account_and_region_once() {
+        let mut west = inst("i-3", &[("app", "shop-prod")]);
+        west.region = "us-west-2".into();
+        west.arn = format!("arn:aws:ec2:us-west-2:{ACCT}:instance/i-3");
+        let (store, _) = grouped(fixture(
+            "s",
+            vec![
+                inst("i-1", &[("app", "shop-prod")]),
+                inst("i-2", &[("app", "shop-prod")]),
+                west,
+            ],
+            vec![],
+        ))
+        .await;
+        let summary = store.workload_summary("s").await.unwrap();
+        let shop = summary
+            .iter()
+            .find(|w| w.workload == "shop" && w.environment == "prod")
+            .unwrap();
+        assert_eq!(shop.resources, 3);
+        assert_eq!(shop.accounts, vec![ACCT.to_string()]);
+        assert_eq!(shop.regions, vec!["us-east-1", "us-west-2"]);
+        let overview = store.overview(1).await.unwrap();
+        assert_eq!((overview.accounts, overview.regions), (1, 2));
+        // Each new scan takes the next sequence number.
+        let next = store.record_scan(&scan("t", 2, vec![])).await.unwrap();
+        assert_eq!(next.seq, 2);
     }
 
     #[tokio::test]
@@ -2024,6 +2106,10 @@ mod tests {
 
         // Nothing agreed yet: there is no date to miss.
         assert!(refused(status(Status::Missed, None).await));
+        assert!(matches!(
+            status(Status::RolledBack, None).await,
+            Err(DbError::Invalid(msg)) if msg == "only a migrated pair can be rolled back"
+        ));
         // Production waits for its other environments by rule, so no
         // agreed date for prod until dev has migrated.
         assert!(matches!(
@@ -2042,6 +2128,8 @@ mod tests {
         assert!(refused(
             status(Status::Confirmed, Some(date(2026, 11, 1))).await
         ));
+        status(Status::RolledBack, None).await.unwrap();
+        assert!(refused(status(Status::RolledBack, None).await));
 
         let b = precip_engine::schedule::Blackout {
             name: "freeze".into(),
@@ -2164,6 +2252,74 @@ mod tests {
             m.scheduled, 1,
             "the status event replayed into migration_events"
         );
+    }
+
+    #[tokio::test]
+    async fn a_change_whose_schedule_fails_leaves_no_trace() {
+        use precip_engine::schedule::Blackout;
+        let store = memory_store().await;
+        let events = store.events().await.unwrap().len();
+        // A stored target the scheduler cannot read makes computing the
+        // version fail after the event was projected and logged.
+        let (sql, values) = Query::update()
+            .table(Settings::Table)
+            .value(Settings::Value, "not a date")
+            .and_where(Expr::col(Settings::Key).eq("schedule.target_end"))
+            .build_sqlx(SqliteQueryBuilder);
+        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let freeze = Blackout {
+            name: "freeze".into(),
+            start: jiff::civil::date(2026, 12, 24),
+            end: jiff::civil::date(2026, 12, 26),
+            pair: None,
+        };
+        assert!(store.add_blackout(&freeze).await.is_err());
+        assert!(store.blackouts().await.unwrap().is_empty());
+        assert_eq!(store.events().await.unwrap().len(), events);
+    }
+
+    #[tokio::test]
+    async fn a_replay_that_fails_keeps_the_plan_it_had() {
+        use precip_engine::schedule::Blackout;
+        let store = memory_store().await;
+        let freeze = Blackout {
+            name: "freeze".into(),
+            start: jiff::civil::date(2026, 12, 24),
+            end: jiff::civil::date(2026, 12, 26),
+            pair: None,
+        };
+        // An event no projection accepts, written past the checks, ahead
+        // of a change the replay would otherwise wipe.
+        let bad = PlanEvent::PairPlanSet {
+            workload: "shop".into(),
+            environment: "prod".into(),
+            wave: 0,
+            duration_days: 1,
+            weight: 1,
+        };
+        let (sql, values) = Query::insert()
+            .into_table(schema::PlanEvents::Table)
+            .columns([
+                schema::PlanEvents::At,
+                schema::PlanEvents::Kind,
+                schema::PlanEvents::Body,
+            ])
+            .values_panic([
+                jiff::Timestamp::now().to_string().into(),
+                bad.kind().into(),
+                serde_json::to_string(&bad).unwrap().into(),
+            ])
+            .build_sqlx(SqliteQueryBuilder);
+        sqlx::query_with(sqlx::AssertSqlSafe(sql), values)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.add_blackout(&freeze).await.unwrap();
+        assert!(store.replay().await.is_err());
+        assert_eq!(store.blackouts().await.unwrap(), vec![freeze]);
     }
 
     #[tokio::test]

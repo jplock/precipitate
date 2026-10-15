@@ -1,9 +1,10 @@
 //! Schedule persistence: rules, blackouts, status, events and versions.
 
 use crate::schema::{
-    MigrationEvents, MigrationStatus, PlanEvents, ResourceVersions,
-    ScheduleBlackouts, ScheduleDependencies, ScheduleRules, ScheduleSlots,
-    ScheduleVersions, ScheduleWaves, Settings, WorkloadMembers,
+    DispositionHistory, MigrationEvents, MigrationStatus, PlanEvents,
+    ResourceVersions, ScheduleBlackouts, ScheduleDependencies, ScheduleRules,
+    ScheduleSlots, ScheduleVersions, ScheduleWaves, Settings, WorkloadAliases,
+    WorkloadEnvironments, WorkloadMembers,
 };
 use crate::{DbError, Store};
 use jiff::civil::{Date, Weekday};
@@ -16,7 +17,7 @@ use sea_query::{
 };
 use sea_query_sqlx::SqlxBinder;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Row, SqliteConnection};
 
 /// Build a query and bind it, the one way every statement here runs.
 macro_rules! bound {
@@ -411,18 +412,30 @@ pub struct ScheduleVersion {
 
 impl Store {
     async fn setting(&self, key: &str) -> Result<Option<String>, DbError> {
+        let mut conn = self.pool.acquire().await?;
+        Self::setting_in(&mut conn, key).await
+    }
+
+    async fn setting_in(
+        conn: &mut SqliteConnection,
+        key: &str,
+    ) -> Result<Option<String>, DbError> {
         let row = bound!(
             Query::select()
                 .column(Settings::Value)
                 .from(Settings::Table)
                 .and_where(Expr::col(Settings::Key).eq(key))
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
         Ok(row.map(|r| r.get::<String, _>("value")))
     }
 
-    async fn set_setting(&self, key: &str, value: &str) -> Result<(), DbError> {
+    async fn set_setting(
+        conn: &mut SqliteConnection,
+        key: &str,
+        value: &str,
+    ) -> Result<(), DbError> {
         bound!(
             Query::insert()
                 .into_table(Settings::Table)
@@ -434,7 +447,7 @@ impl Store {
                         .to_owned(),
                 )
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
@@ -446,7 +459,8 @@ impl Store {
     }
 
     pub async fn save_scan_options(&self, json: &str) -> Result<(), DbError> {
-        self.set_setting("scan.options", json).await
+        let mut conn = self.pool.acquire().await?;
+        Self::set_setting(&mut conn, "scan.options", json).await
     }
 
     /// The sizing profile the workspace sizes with.
@@ -455,52 +469,84 @@ impl Store {
     }
 
     pub async fn set_sizing_profile(&self, name: &str) -> Result<(), DbError> {
-        self.set_setting("sizing.profile", name).await
+        let mut conn = self.pool.acquire().await?;
+        Self::set_setting(&mut conn, "sizing.profile", name).await
     }
 
     pub async fn global_rules(&self) -> Result<GlobalRules, DbError> {
+        let mut conn = self.pool.acquire().await?;
+        Self::global_rules_in(&mut conn).await
+    }
+
+    async fn global_rules_in(
+        conn: &mut SqliteConnection,
+    ) -> Result<GlobalRules, DbError> {
         let d = GlobalRules::default();
         let num = |v: Option<String>, default: u32| {
             v.and_then(|s| s.parse().ok()).unwrap_or(default)
         };
-        let target_end = match self.setting("schedule.target_end").await? {
-            Some(s) if !s.is_empty() => Some(parse_date(&s)?),
-            _ => None,
-        };
+        let target_end =
+            match Self::setting_in(conn, "schedule.target_end").await? {
+                Some(s) if !s.is_empty() => Some(parse_date(&s)?),
+                _ => None,
+            };
         Ok(GlobalRules {
-            per_day: num(self.setting("schedule.per_day").await?, d.per_day),
-            per_week: num(self.setting("schedule.per_week").await?, d.per_week),
+            per_day: num(
+                Self::setting_in(conn, "schedule.per_day").await?,
+                d.per_day,
+            ),
+            per_week: num(
+                Self::setting_in(conn, "schedule.per_week").await?,
+                d.per_week,
+            ),
             per_month: num(
-                self.setting("schedule.per_month").await?,
+                Self::setting_in(conn, "schedule.per_month").await?,
                 d.per_month,
             ),
             weekdays: parse_weekdays(
-                &self.setting("schedule.weekdays").await?.unwrap_or_default(),
+                &Self::setting_in(conn, "schedule.weekdays")
+                    .await?
+                    .unwrap_or_default(),
             ),
             target_end,
-            nonprod_before_prod: self
-                .setting("schedule.nonprod_before_prod")
-                .await?
-                .is_none_or(|v| v == "true"),
+            nonprod_before_prod: Self::setting_in(
+                conn,
+                "schedule.nonprod_before_prod",
+            )
+            .await?
+            .is_none_or(|v| v == "true"),
         })
     }
 
-    async fn project_rules(&self, rules: &GlobalRules) -> Result<(), DbError> {
-        self.set_setting("schedule.per_day", &rules.per_day.to_string())
+    async fn project_rules(
+        conn: &mut SqliteConnection,
+        rules: &GlobalRules,
+    ) -> Result<(), DbError> {
+        Self::set_setting(conn, "schedule.per_day", &rules.per_day.to_string())
             .await?;
-        self.set_setting("schedule.per_week", &rules.per_week.to_string())
-            .await?;
-        self.set_setting("schedule.per_month", &rules.per_month.to_string())
-            .await?;
+        Self::set_setting(
+            conn,
+            "schedule.per_week",
+            &rules.per_week.to_string(),
+        )
+        .await?;
+        Self::set_setting(
+            conn,
+            "schedule.per_month",
+            &rules.per_month.to_string(),
+        )
+        .await?;
         let days: Vec<&str> =
             rules.weekdays.iter().map(|w| weekday_name(*w)).collect();
-        self.set_setting("schedule.weekdays", &days.join(",")).await?;
-        self.set_setting(
+        Self::set_setting(conn, "schedule.weekdays", &days.join(",")).await?;
+        Self::set_setting(
+            conn,
             "schedule.target_end",
             &rules.target_end.map(|d| d.to_string()).unwrap_or_default(),
         )
         .await?;
-        self.set_setting(
+        Self::set_setting(
+            conn,
             "schedule.nonprod_before_prod",
             &rules.nonprod_before_prod.to_string(),
         )
@@ -509,7 +555,7 @@ impl Store {
     }
 
     async fn project_blackout_added(
-        &self,
+        conn: &mut SqliteConnection,
         b: &Blackout,
     ) -> Result<(), DbError> {
         bound!(
@@ -530,13 +576,13 @@ impl Store {
                     b.pair.as_ref().map(|p| p.1.clone()).into(),
                 ])
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
 
     async fn project_blackout_removed(
-        &self,
+        conn: &mut SqliteConnection,
         b: &Blackout,
     ) -> Result<(), DbError> {
         let mut q = Query::delete();
@@ -564,11 +610,18 @@ impl Store {
                     );
             }
         }
-        bound!(q).execute(&self.pool).await?;
+        bound!(q).execute(&mut *conn).await?;
         Ok(())
     }
 
     pub async fn blackouts(&self) -> Result<Vec<Blackout>, DbError> {
+        let mut conn = self.pool.acquire().await?;
+        Self::blackouts_in(&mut conn).await
+    }
+
+    async fn blackouts_in(
+        conn: &mut SqliteConnection,
+    ) -> Result<Vec<Blackout>, DbError> {
         let rows = bound!(
             Query::select()
                 .columns([
@@ -582,7 +635,7 @@ impl Store {
                 .order_by(ScheduleBlackouts::StartDate, Order::Asc)
                 .order_by(ScheduleBlackouts::Name, Order::Asc)
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         rows.into_iter()
             .map(|r| {
@@ -599,7 +652,7 @@ impl Store {
     }
 
     async fn project_pair_rule(
-        &self,
+        conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
         weekdays: &[Weekday],
@@ -638,7 +691,7 @@ impl Store {
                     .to_owned(),
                 )
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
@@ -646,7 +699,7 @@ impl Store {
     /// Which wave a pair is in, how many consecutive days its migration
     /// takes, and how many capacity units it uses on each of them.
     async fn project_pair_plan(
-        &self,
+        conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
         wave: u32,
@@ -688,13 +741,13 @@ impl Store {
                     .to_owned(),
                 )
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
 
     async fn project_wave(
-        &self,
+        conn: &mut SqliteConnection,
         number: u32,
         name: &str,
         target_end: Option<Date>,
@@ -724,26 +777,29 @@ impl Store {
                         .to_owned(),
                 )
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
 
-    async fn project_wave_removed(&self, number: u32) -> Result<(), DbError> {
+    async fn project_wave_removed(
+        conn: &mut SqliteConnection,
+        number: u32,
+    ) -> Result<(), DbError> {
         bound!(
             Query::update()
                 .table(ScheduleRules::Table)
                 .value(ScheduleRules::Wave, 1)
                 .and_where(Expr::col(ScheduleRules::Wave).eq(number))
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         bound!(
             Query::delete()
                 .from_table(ScheduleWaves::Table)
                 .and_where(Expr::col(ScheduleWaves::Wave).eq(number))
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
@@ -801,7 +857,7 @@ impl Store {
     }
 
     async fn project_dependency_added(
-        &self,
+        conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
         on_workload: &str,
@@ -833,13 +889,13 @@ impl Store {
                     .to_owned(),
                 )
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
 
     async fn project_dependency_removed(
-        &self,
+        conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
         on_workload: &str,
@@ -863,13 +919,22 @@ impl Store {
                         .eq(on_environment),
                 )
         )
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await?;
         Ok(())
     }
 
     pub async fn pair_status(
         &self,
+        workload: &str,
+        environment: &str,
+    ) -> Result<PairStatus, DbError> {
+        let mut conn = self.pool.acquire().await?;
+        Self::pair_status_in(&mut conn, workload, environment).await
+    }
+
+    async fn pair_status_in(
+        conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
     ) -> Result<PairStatus, DbError> {
@@ -886,7 +951,7 @@ impl Store {
                     Expr::col(MigrationStatus::Environment).eq(environment),
                 )
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
         let Some(r) = row else {
             return Ok(PairStatus {
@@ -909,7 +974,7 @@ impl Store {
     /// that is today or later.
     #[expect(clippy::too_many_arguments, reason = "projection of one event")]
     async fn project_status(
-        &self,
+        conn: &mut SqliteConnection,
         workload: &str,
         environment: &str,
         status: Status,
@@ -929,23 +994,23 @@ impl Store {
                 }
             }
         }
-        let current = self.pair_status(workload, environment).await?;
+        let current = Self::pair_status_in(conn, workload, environment).await?;
         // Transitions that cannot mean anything are refused with a reason
         // the screen can show, so a slip of the hand changes nothing.
         let refuse = |why: &str| Err(DbError::Invalid(why.to_string()));
         if validate && status == Status::Confirmed {
-            if let Some((w, e)) = self
-                .unfinished_dependencies(workload, environment)
-                .await?
-                .first()
+            if let Some((w, e)) =
+                Self::unfinished_dependencies_in(conn, workload, environment)
+                    .await?
+                    .first()
             {
                 return refuse(&format!(
                     "it waits for {w} / {e}, which has not migrated; agree that date first"
                 ));
             }
-            let pairs = self.schedule_inputs().await?;
-            let rules = self.global_rules().await?;
-            let blackouts = self.blackouts().await?;
+            let pairs = Self::schedule_inputs_in(conn).await?;
+            let rules = Self::global_rules_in(conn).await?;
+            let blackouts = Self::blackouts_in(conn).await?;
             if let (Some(me), Some(start)) = (
                 pairs.iter().find(|p| {
                     p.workload == workload && p.environment == environment
@@ -961,20 +1026,21 @@ impl Store {
         }
         if validate {
             match (current.status, status) {
-                (Status::Migrated, Status::Migrated) => {
-                    return refuse("already migrated");
+                (
+                    Status::Proposed
+                    | Status::Confirmed
+                    | Status::Missed
+                    | Status::RolledBack,
+                    Status::Proposed | Status::Confirmed | Status::Migrated,
+                )
+                | (Status::Migrated, Status::Proposed | Status::RolledBack) => {
                 }
-                (Status::Migrated, Status::Confirmed | Status::Missed) => {
-                    return refuse(
-                        "already migrated; mark it rolled back first if it moved back",
-                    );
-                }
-                (Status::Confirmed, Status::Missed)
-                    if current.confirmed_date.is_some_and(|d| d > today) =>
-                {
-                    return refuse(
-                        "its confirmed date has not arrived; agree another date instead",
-                    );
+                (Status::Confirmed, Status::Missed) => {
+                    if current.confirmed_date.is_some_and(|d| d > today) {
+                        return refuse(
+                            "its confirmed date has not arrived; agree another date instead",
+                        );
+                    }
                 }
                 (
                     Status::Proposed | Status::Missed | Status::RolledBack,
@@ -984,21 +1050,29 @@ impl Store {
                         "nothing was agreed for this pair; only a confirmed date can be missed",
                     );
                 }
-                _ => {}
+                (Status::Migrated, Status::Migrated) => {
+                    return refuse("already migrated");
+                }
+                (Status::Migrated, Status::Confirmed | Status::Missed) => {
+                    return refuse(
+                        "already migrated; mark it rolled back first if it moved back",
+                    );
+                }
+                (
+                    Status::Proposed
+                    | Status::Confirmed
+                    | Status::Missed
+                    | Status::RolledBack,
+                    Status::RolledBack,
+                ) => {
+                    return refuse("only a migrated pair can be rolled back");
+                }
             }
         }
         let name = serde_json::to_value(status)?
             .as_str()
             .unwrap_or_default()
             .to_string();
-        if validate
-            && status == Status::RolledBack
-            && current.status != Status::Migrated
-        {
-            return Err(DbError::Invalid(
-                "only a migrated pair can be rolled back".into(),
-            ));
-        }
         let (confirmed, migrated) = match status {
             Status::Confirmed => (date, None),
             Status::Migrated => (None, date.or(Some(today))),
@@ -1006,7 +1080,6 @@ impl Store {
                 (None, None)
             }
         };
-        let mut tx = self.pool.begin().await?;
         bound!(
             Query::insert()
                 .into_table(MigrationStatus::Table)
@@ -1037,7 +1110,7 @@ impl Store {
                     .to_owned(),
                 )
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
         // A confirmed date never moves: a second confirmation replaces it
         // and is recorded as a reschedule.
@@ -1078,9 +1151,8 @@ impl Store {
                     note.into(),
                 ])
         )
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 
@@ -1125,8 +1197,17 @@ impl Store {
         workload: &str,
         environment: &str,
     ) -> Result<Vec<(String, String)>, DbError> {
-        let pairs = self.schedule_inputs().await?;
-        let rules = self.global_rules().await?;
+        let mut conn = self.pool.acquire().await?;
+        Self::unfinished_dependencies_in(&mut conn, workload, environment).await
+    }
+
+    async fn unfinished_dependencies_in(
+        conn: &mut SqliteConnection,
+        workload: &str,
+        environment: &str,
+    ) -> Result<Vec<(String, String)>, DbError> {
+        let pairs = Self::schedule_inputs_in(conn).await?;
+        let rules = Self::global_rules_in(conn).await?;
         let Some(me) = pairs
             .iter()
             .find(|p| p.workload == workload && p.environment == environment)
@@ -1148,7 +1229,14 @@ impl Store {
     /// Every pair that migrates (any disposition but retire and retain),
     /// with its rules, dependencies and status, as scheduler input.
     pub async fn schedule_inputs(&self) -> Result<Vec<PairInput>, DbError> {
-        let dispositions = self.pair_dispositions().await?;
+        let mut conn = self.pool.acquire().await?;
+        Self::schedule_inputs_in(&mut conn).await
+    }
+
+    async fn schedule_inputs_in(
+        conn: &mut SqliteConnection,
+    ) -> Result<Vec<PairInput>, DbError> {
+        let dispositions = Self::pair_dispositions_in(conn).await?;
         let mut out = Vec::new();
         for ((workload, environment), d) in dispositions {
             if matches!(
@@ -1177,7 +1265,7 @@ impl Store {
                             .eq(environment.clone()),
                     )
             )
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await?;
             let small = |r: &sqlx::sqlite::SqliteRow, col: &str| -> u32 {
                 Ord::max(r.get::<i64, _>(col).try_into().unwrap_or(1), 1)
@@ -1213,12 +1301,13 @@ impl Store {
                             .eq(environment.clone()),
                     )
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *conn)
             .await?
             .into_iter()
             .map(|r| (r.get("on_workload"), r.get("on_environment")))
             .collect();
-            let status = self.pair_status(&workload, &environment).await?;
+            let status =
+                Self::pair_status_in(conn, &workload, &environment).await?;
             out.push(PairInput {
                 workload,
                 environment,
@@ -1243,26 +1332,31 @@ impl Store {
         today: Date,
         trigger: &str,
     ) -> Result<(i64, Schedule), DbError> {
-        self.compute_version(today, trigger, None).await
+        let mut tx = self.pool.begin().await?;
+        let out = self.compute_version(&mut tx, today, trigger, None).await?;
+        tx.commit().await?;
+        Ok(out)
     }
 
     async fn compute_version(
         &self,
+        conn: &mut SqliteConnection,
         today: Date,
         trigger: &str,
         event_id: Option<i64>,
     ) -> Result<(i64, Schedule), DbError> {
-        let pairs = self.schedule_inputs().await?;
-        let rules = self.global_rules().await?;
-        let blackouts = self.blackouts().await?;
+        let pairs = Self::schedule_inputs_in(conn).await?;
+        let rules = Self::global_rules_in(conn).await?;
+        let blackouts = Self::blackouts_in(conn).await?;
         let schedule =
             precip_engine::schedule::compute(&pairs, &rules, &blackouts, today);
 
         // A confirmed date that passed is itself a change to the plan,
         // recorded like any other, without computing again.
         for (w, e) in &schedule.expired {
-            let prior = self.pair_status(w, e).await?;
-            self.record(
+            let prior = Self::pair_status_in(conn, w, e).await?;
+            Self::record(
+                conn,
                 &PlanEvent::StatusChanged {
                     workload: w.clone(),
                     environment: e.clone(),
@@ -1278,7 +1372,6 @@ impl Store {
             .await?;
         }
 
-        let mut tx = self.pool.begin().await?;
         let id: i64 = bound!(
             Query::insert()
                 .into_table(ScheduleVersions::Table)
@@ -1306,7 +1399,7 @@ impl Store {
                 ])
                 .returning_col(ScheduleVersions::Id)
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?
         .get("id");
         for s in &schedule.slots {
@@ -1338,7 +1431,7 @@ impl Store {
                         alts.join(",").into(),
                     ])
             )
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
         }
         if let Some(event_id) = event_id {
@@ -1348,10 +1441,9 @@ impl Store {
                     .value(PlanEvents::VersionId, id)
                     .and_where(Expr::col(PlanEvents::Id).eq(event_id))
             )
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
         }
-        tx.commit().await?;
         Ok((id, schedule))
     }
 
@@ -1387,12 +1479,12 @@ impl Store {
 
     /// Append an event and project it, without computing a schedule.
     async fn record(
-        &self,
+        conn: &mut SqliteConnection,
         event: &PlanEvent,
         at: jiff::Timestamp,
         today: Date,
     ) -> Result<i64, DbError> {
-        self.project(event, at, today, true).await?;
+        Self::project(conn, event, at, today, true).await?;
         let id: i64 = bound!(
             Query::insert()
                 .into_table(PlanEvents::Table)
@@ -1404,7 +1496,7 @@ impl Store {
                 ])
                 .returning_col(PlanEvents::Id)
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?
         .get("id");
         Ok(id)
@@ -1426,12 +1518,20 @@ impl Store {
         event: PlanEvent,
         today: Date,
     ) -> Result<(i64, Schedule), DbError> {
-        let id = self.record(&event, jiff::Timestamp::now(), today).await?;
-        self.compute_version(today, event.kind(), Some(id)).await
+        // The event, its projection and the version it leads to commit
+        // together, so the log and the tables built from it cannot differ.
+        let mut tx = self.pool.begin().await?;
+        let id = Self::record(&mut tx, &event, jiff::Timestamp::now(), today)
+            .await?;
+        let out = self
+            .compute_version(&mut tx, today, event.kind(), Some(id))
+            .await?;
+        tx.commit().await?;
+        Ok(out)
     }
 
     async fn project(
-        &self,
+        conn: &mut SqliteConnection,
         event: &PlanEvent,
         at: jiff::Timestamp,
         today: Date,
@@ -1446,14 +1546,17 @@ impl Store {
                 target_end,
                 nonprod_before_prod,
             } => {
-                self.project_rules(&GlobalRules {
-                    per_day: *per_day,
-                    per_week: *per_week,
-                    per_month: *per_month,
-                    weekdays: parse_weekdays(weekdays),
-                    target_end: *target_end,
-                    nonprod_before_prod: *nonprod_before_prod,
-                })
+                Self::project_rules(
+                    conn,
+                    &GlobalRules {
+                        per_day: *per_day,
+                        per_week: *per_week,
+                        per_month: *per_month,
+                        weekdays: parse_weekdays(weekdays),
+                        target_end: *target_end,
+                        nonprod_before_prod: *nonprod_before_prod,
+                    },
+                )
                 .await
             }
             PlanEvent::BlackoutAdded {
@@ -1463,12 +1566,15 @@ impl Store {
                 workload,
                 environment,
             } => {
-                self.project_blackout_added(&Blackout {
-                    name: name.clone(),
-                    start: *start,
-                    end: *end,
-                    pair: workload.clone().zip(environment.clone()),
-                })
+                Self::project_blackout_added(
+                    conn,
+                    &Blackout {
+                        name: name.clone(),
+                        start: *start,
+                        end: *end,
+                        pair: workload.clone().zip(environment.clone()),
+                    },
+                )
                 .await
             }
             PlanEvent::BlackoutRemoved {
@@ -1478,12 +1584,15 @@ impl Store {
                 workload,
                 environment,
             } => {
-                self.project_blackout_removed(&Blackout {
-                    name: name.clone(),
-                    start: *start,
-                    end: *end,
-                    pair: workload.clone().zip(environment.clone()),
-                })
+                Self::project_blackout_removed(
+                    conn,
+                    &Blackout {
+                        name: name.clone(),
+                        start: *start,
+                        end: *end,
+                        pair: workload.clone().zip(environment.clone()),
+                    },
+                )
                 .await
             }
             PlanEvent::PairRuleSet {
@@ -1493,7 +1602,8 @@ impl Store {
                 earliest,
                 priority,
             } => {
-                self.project_pair_rule(
+                Self::project_pair_rule(
+                    conn,
                     workload,
                     environment,
                     &parse_weekdays(weekdays),
@@ -1509,7 +1619,8 @@ impl Store {
                 duration_days,
                 weight,
             } => {
-                self.project_pair_plan(
+                Self::project_pair_plan(
+                    conn,
                     workload,
                     environment,
                     *wave,
@@ -1519,10 +1630,10 @@ impl Store {
                 .await
             }
             PlanEvent::WaveSet { number, name, target_end } => {
-                self.project_wave(*number, name, *target_end).await
+                Self::project_wave(conn, *number, name, *target_end).await
             }
             PlanEvent::WaveRemoved { number } => {
-                self.project_wave_removed(*number).await
+                Self::project_wave_removed(conn, *number).await
             }
             PlanEvent::DependencyAdded {
                 workload,
@@ -1530,7 +1641,8 @@ impl Store {
                 on_workload,
                 on_environment,
             } => {
-                self.project_dependency_added(
+                Self::project_dependency_added(
+                    conn,
                     workload,
                     environment,
                     on_workload,
@@ -1544,7 +1656,8 @@ impl Store {
                 on_workload,
                 on_environment,
             } => {
-                self.project_dependency_removed(
+                Self::project_dependency_removed(
+                    conn,
                     workload,
                     environment,
                     on_workload,
@@ -1559,7 +1672,8 @@ impl Store {
                 source,
                 note,
             } => {
-                self.project_disposition(
+                Self::project_disposition(
+                    conn,
                     workload,
                     environment,
                     *disposition,
@@ -1573,7 +1687,8 @@ impl Store {
                 disposition,
                 apply_to_existing,
             } => {
-                self.project_default_disposition(
+                Self::project_default_disposition(
+                    conn,
                     *disposition,
                     *apply_to_existing,
                     at,
@@ -1581,7 +1696,7 @@ impl Store {
                 .await
             }
             PlanEvent::WorkloadMerged { alias, into } => {
-                self.project_merge(alias, into).await
+                Self::project_merge(conn, alias, into).await
             }
             PlanEvent::StatusChanged {
                 workload,
@@ -1590,7 +1705,8 @@ impl Store {
                 date,
                 note,
             } => {
-                self.project_status(
+                Self::project_status(
+                    conn,
                     workload,
                     environment,
                     *status,
@@ -1640,34 +1756,33 @@ impl Store {
     }
 
     /// Rebuild every projection from the log and compute the schedule
-    /// once at the end. Proves the log is the source of truth.
+    /// once at the end. Proves the log is the source of truth. The wipe
+    /// and the re-projection commit together, so a failed replay leaves
+    /// the tables as they were.
     pub async fn replay(&self) -> Result<(i64, Schedule), DbError> {
         let events = self.events().await?;
-        for table in [
-            "schedule_blackouts",
-            "schedule_rules",
-            "schedule_waves",
-            "schedule_dependencies",
-            "migration_status",
-            "migration_events",
+        let mut tx = self.pool.begin().await?;
+        for stmt in [
+            Query::delete().from_table(ScheduleBlackouts::Table).to_owned(),
+            Query::delete().from_table(ScheduleRules::Table).to_owned(),
+            Query::delete().from_table(ScheduleWaves::Table).to_owned(),
+            Query::delete().from_table(ScheduleDependencies::Table).to_owned(),
+            Query::delete().from_table(MigrationStatus::Table).to_owned(),
+            Query::delete().from_table(MigrationEvents::Table).to_owned(),
         ] {
-            sqlx::query_with(
-                sqlx::AssertSqlSafe(format!("DELETE FROM {table}")),
-                sqlx::sqlite::SqliteArguments::default(),
-            )
-            .execute(&self.pool)
-            .await?;
+            bound!(stmt).execute(&mut *tx).await?;
         }
-        self.project_rules(&GlobalRules::default()).await?;
+        Self::project_rules(&mut tx, &GlobalRules::default()).await?;
         // Dispositions start from the built-in default and the merges
         // from none; the log brings both back.
-        self.reset_dispositions().await?;
+        Self::reset_dispositions(&mut tx).await?;
         for e in &events {
             // The log is accepted as written: each event passed the
             // checks of its day, and those checks may have changed since.
             let day = e.at.to_zoned(jiff::tz::TimeZone::UTC).date();
-            self.project(&e.event, e.at, day, false).await?;
+            Self::project(&mut tx, &e.event, e.at, day, false).await?;
         }
+        tx.commit().await?;
         if let Some(latest) = self.list_scans().await?.into_iter().next() {
             self.group_scan(
                 &latest.id,
@@ -1675,25 +1790,42 @@ impl Store {
             )
             .await?;
         }
-        self.compute_version(self.today(), "replay", None).await
+        self.compute_schedule(self.today(), "replay").await
     }
 
     /// Every pair back to the built-in default, user and bulk history
     /// cleared, aliases cleared; only the log can set them again.
-    async fn reset_dispositions(&self) -> Result<(), DbError> {
-        for sql in [
-            "UPDATE settings SET value = 'rehost' WHERE key = 'default_disposition'",
-            "UPDATE workload_environments SET disposition = 'rehost'",
-            "DELETE FROM disposition_history WHERE source != 'default'",
-            "DELETE FROM workload_aliases",
-        ] {
-            sqlx::query_with(
-                sqlx::AssertSqlSafe(sql.to_string()),
-                sqlx::sqlite::SqliteArguments::default(),
+    async fn reset_dispositions(
+        conn: &mut SqliteConnection,
+    ) -> Result<(), DbError> {
+        let builtin = disposition_name(precip_types::Disposition::Rehost);
+        bound!(
+            Query::update()
+                .table(Settings::Table)
+                .value(Settings::Value, builtin.clone())
+                .and_where(
+                    Expr::col(Settings::Key).eq(crate::DEFAULT_DISPOSITION_KEY)
+                )
+        )
+        .execute(&mut *conn)
+        .await?;
+        bound!(
+            Query::update()
+                .table(WorkloadEnvironments::Table)
+                .value(WorkloadEnvironments::Disposition, builtin)
+        )
+        .execute(&mut *conn)
+        .await?;
+        bound!(
+            Query::delete().from_table(DispositionHistory::Table).and_where(
+                Expr::col(DispositionHistory::Source).ne(crate::SOURCE_DEFAULT)
             )
-            .execute(&self.pool)
+        )
+        .execute(&mut *conn)
+        .await?;
+        bound!(Query::delete().from_table(WorkloadAliases::Table))
+            .execute(&mut *conn)
             .await?;
-        }
         Ok(())
     }
 
