@@ -31,6 +31,7 @@ pub(crate) fn draw_date_picker(app: &mut App, frame: &mut Frame) {
         .enumerate()
         .map(|(i, d)| {
             ListItem::new(Line::from(vec![
+                key_label(i),
                 Span::styled(
                     format!("{d}  {}", day_name(d.weekday())),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -62,7 +63,7 @@ pub(crate) fn draw_date_picker(app: &mut App, frame: &mut Frame) {
                         accent().add_modifier(Modifier::BOLD),
                     ))
                     .title_bottom(Span::styled(
-                        " enter to confirm   esc to cancel ",
+                        " a number or enter to confirm   esc to cancel ",
                         dim(),
                     ))
                     .padding(Padding::new(1, 1, 1, 0)),
@@ -71,6 +72,17 @@ pub(crate) fn draw_date_picker(app: &mut App, frame: &mut Frame) {
         popup,
         &mut p.state,
     );
+}
+
+/// The number key that picks row `i`, as a label: `[1]` to `[9]`, `[0]`
+/// for the tenth row, and blank beyond.
+pub(crate) fn key_label(i: usize) -> Span<'static> {
+    let text = match i {
+        0..=8 => format!("[{}] ", i + 1),
+        9 => "[0] ".to_string(),
+        _ => "    ".to_string(),
+    };
+    Span::styled(text, accent())
 }
 
 /// A centred rectangle for a popup, clamped to the terminal.
@@ -115,15 +127,9 @@ pub(crate) fn draw_action_menu(app: &mut App, frame: &mut Frame) {
         .iter()
         .enumerate()
         .map(|(i, a)| {
-            // Rows past the ninth have no number key.
-            let key = if i < 9 {
-                format!("[{}] ", i + 1)
-            } else {
-                "    ".to_string()
-            };
             ListItem::new(vec![
                 Line::from(vec![
-                    Span::styled(key, accent()),
+                    key_label(i),
                     Span::styled(
                         a.label(),
                         Style::default().add_modifier(Modifier::BOLD),
@@ -138,7 +144,9 @@ pub(crate) fn draw_action_menu(app: &mut App, frame: &mut Frame) {
             format!("{}? enter again to confirm, esc to go back", a.label()),
             warn(),
         ),
-        None => ("1-9 or enter to choose   esc to close".to_string(), dim()),
+        None => {
+            ("a number or enter to choose   esc to close".to_string(), dim())
+        }
     };
     frame.render_stateful_widget(
         List::new(items)
@@ -460,9 +468,11 @@ pub(crate) fn draw_holiday_picker(app: &mut App, frame: &mut Frame) {
         .holidays
         .iter()
         .zip(&p.chosen)
-        .map(|(h, on)| {
+        .enumerate()
+        .map(|(i, (h, on))| {
             let mark = if *on { "[x] " } else { "[ ] " };
             ListItem::new(Line::from(vec![
+                key_label(i),
                 Span::styled(mark, if *on { accent() } else { dim() }),
                 Span::raw(format!("{:<8}", short_date(h.date, today))),
                 Span::raw(h.name),
@@ -473,7 +483,7 @@ pub(crate) fn draw_holiday_picker(app: &mut App, frame: &mut Frame) {
         List::new(items)
             .block(popup_block(
                 format!("Which US federal holidays of {} do you observe?", p.year),
-                "space to tick or untick   enter to add the ticked ones   esc to cancel".into(),
+                "space or a number to tick   enter to add the ticked ones   esc to cancel".into(),
                 dim(),
             ))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
@@ -492,12 +502,17 @@ pub(crate) fn draw_reason_picker(app: &mut App, frame: &mut Frame) {
     frame.render_widget(Clear, popup);
     let mut items: Vec<ListItem> = precip_db::RESCHEDULE_REASONS
         .iter()
-        .map(|r| ListItem::new(Line::from((*r).to_string())))
+        .enumerate()
+        .map(|(i, r)| {
+            ListItem::new(Line::from(vec![key_label(i), Span::raw(*r)]))
+        })
         .collect();
-    items.push(ListItem::new(Line::from(match &p.custom {
+    let mut other = vec![key_label(items.len())];
+    other.extend(match &p.custom {
         Some(text) => vec![Span::raw("other: "), value(format!("{text}_"))],
         None => vec![Span::styled("other, typed in", dim())],
-    })));
+    });
+    items.push(ListItem::new(Line::from(other)));
     let (what, title) = match &p.pending {
         crate::Pending::Missed { workload, environment } => {
             ("didn't happen", format!("{workload} / {environment}"))
@@ -509,7 +524,7 @@ pub(crate) fn draw_reason_picker(app: &mut App, frame: &mut Frame) {
     let hint = if p.custom.is_some() {
         "type the reason, enter to save   esc to pick from the list"
     } else {
-        "enter to choose   esc to cancel"
+        "a number or enter to choose   esc to cancel"
     };
     frame.render_stateful_widget(
         List::new(items)
@@ -535,13 +550,19 @@ pub(crate) fn draw_depends_picker(app: &mut App, frame: &mut Frame) {
     let items: Vec<ListItem> = p
         .candidates
         .iter()
-        .map(|pair| ListItem::new(Line::from(pair.to_string())))
+        .enumerate()
+        .map(|(i, pair)| {
+            ListItem::new(Line::from(vec![
+                key_label(i),
+                Span::raw(pair.to_string()),
+            ]))
+        })
         .collect();
     frame.render_stateful_widget(
         List::new(items)
             .block(popup_block(
                 "Wait for which pair?".into(),
-                "enter to choose   esc to cancel".into(),
+                "a number or enter to choose   esc to cancel".into(),
                 dim(),
             ))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
@@ -675,7 +696,10 @@ pub(crate) fn draw_weekday_picker(app: &mut App, frame: &mut Frame) {
             };
             let mark = if on { "[x] " } else { "[ ] " };
             let style = if on { accent() } else { Style::default() };
-            let mut spans = vec![Span::styled(format!("{mark}{label}"), style)];
+            let mut spans = vec![
+                key_label(i),
+                Span::styled(format!("{mark}{label}"), style),
+            ];
             if i == 2 {
                 spans.push(Span::styled("   presets above, days below", dim()));
             }
@@ -693,7 +717,7 @@ pub(crate) fn draw_weekday_picker(app: &mut App, frame: &mut Frame) {
                         accent().add_modifier(Modifier::BOLD),
                     ))
                     .title_bottom(Span::styled(
-                        " space to toggle   enter to save ",
+                        " space or a number to toggle   enter to save ",
                         dim(),
                     ))
                     .padding(Padding::new(1, 1, 1, 0)),
@@ -756,7 +780,7 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
             ))));
         }
         items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("[{}] ", i + 1), accent()),
+            key_label(i),
             Span::styled(
                 format!("{d:<12}"),
                 Style::default().add_modifier(Modifier::BOLD),
@@ -779,10 +803,7 @@ pub(crate) fn draw_picker_popup(app: &mut App, frame: &mut Frame) {
                         accent().add_modifier(Modifier::BOLD),
                     ))
                     .title_bottom(Span::styled(
-                        format!(
-                            " 1-{} or enter to set   esc to cancel ",
-                            DISPOSITIONS.len()
-                        ),
+                        " a number or enter to set   esc to cancel ",
                         dim(),
                     ))
                     .padding(Padding::new(1, 1, 1, 0)),

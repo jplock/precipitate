@@ -258,15 +258,23 @@ impl ReasonPicker {
     }
 }
 
-/// The row a number key picks: `1` is the first row, up to `9`.
+/// The row a number key picks: `1` is the first row up to `9`, and `0`
+/// the tenth, as on the keyboard.
 pub(crate) fn hotkey_row(code: KeyCode) -> Option<usize> {
     let KeyCode::Char(c) = code else { return None };
-    let n = c.to_digit(10)?;
-    (1..=9).contains(&n).then(|| (n - 1) as usize)
+    match c.to_digit(10)? {
+        0 => Some(9),
+        n => Some((n - 1) as usize),
+    }
 }
 
-/// Keys for a plain list: arrows move, Enter submits, Esc closes.
+/// Keys for a plain list: arrows move, a number picks its row and
+/// submits it, Enter submits, Esc closes.
 fn list_key(state: &mut ListState, len: usize, code: KeyCode) -> Outcome {
+    if let Some(row) = hotkey_row(code).filter(|r| *r < len) {
+        state.select(Some(row));
+        return Outcome::Submit;
+    }
     if code == KeyCode::Esc {
         Outcome::Close
     } else if code == KeyCode::Enter {
@@ -305,7 +313,16 @@ impl MergePrompt {
 }
 
 impl HolidayPicker {
+    /// Space ticks the selected row; a number ticks its own.
     fn key(&mut self, code: KeyCode) -> Outcome {
+        if let Some(row) = hotkey_row(code).filter(|r| *r < self.holidays.len())
+        {
+            self.state.select(Some(row));
+            if let Some(chosen) = self.chosen.get_mut(row) {
+                *chosen = !*chosen;
+            }
+            return Outcome::Stay;
+        }
         if code == KeyCode::Char(' ') {
             if let Some(chosen) =
                 self.state.selected().and_then(|i| self.chosen.get_mut(i))
@@ -325,8 +342,15 @@ impl DependsPicker {
 }
 
 impl WeekdayPicker {
-    /// Esc and Enter both save: the ticks are the answer.
+    /// Esc and Enter both save: the ticks are the answer. Space toggles
+    /// the selected row; a number toggles its own.
     fn key(&mut self, code: KeyCode) -> Outcome {
+        if let Some(row) = hotkey_row(code).filter(|r| *r < WEEKDAY_ROWS.len())
+        {
+            self.state.select(Some(row));
+            self.toggle_selected();
+            return Outcome::Stay;
+        }
         if code == KeyCode::Char(' ') {
             self.toggle_selected();
             return Outcome::Stay;
@@ -390,12 +414,6 @@ impl DatePicker {
 
 impl DispositionPicker {
     fn key(&mut self, code: KeyCode) -> Outcome {
-        // A number picks its disposition and sets it, as Enter would.
-        if let Some(row) = hotkey_row(code).filter(|r| *r < DISPOSITIONS.len())
-        {
-            self.state.select(Some(row));
-            return Outcome::Submit;
-        }
         list_key(&mut self.state, DISPOSITIONS.len(), code)
     }
 }
@@ -404,6 +422,9 @@ impl DispositionPicker {
 mod tests {
     use super::*;
     use crate::Action;
+    use crate::editors::WeekdayTarget;
+    use jiff::civil::Weekday;
+    use precip_engine::schedule::Weekdays;
 
     fn history() -> HistoryView {
         HistoryView { events: Vec::new(), state: ListState::default() }
@@ -499,10 +520,11 @@ mod tests {
             "the same number confirms"
         );
         assert_eq!(m.key(KeyCode::Char('4')), Outcome::Stay, "no fourth row");
-        assert_eq!(m.key(KeyCode::Char('0')), Outcome::Stay);
+        assert_eq!(m.key(KeyCode::Char('0')), Outcome::Stay, "no tenth row");
         assert_eq!(m.state.selected(), Some(1));
         assert_eq!(hotkey_row(KeyCode::Char('1')), Some(0));
         assert_eq!(hotkey_row(KeyCode::Char('9')), Some(8));
+        assert_eq!(hotkey_row(KeyCode::Char('0')), Some(9));
         assert_eq!(hotkey_row(KeyCode::Char('a')), None);
         assert_eq!(hotkey_row(KeyCode::Enter), None);
     }
@@ -523,5 +545,36 @@ mod tests {
             "seven dispositions"
         );
         assert_eq!(p.state.selected(), Some(3));
+    }
+
+    #[test]
+    fn number_keys_choose_from_lists_and_tick_in_tick_lists() {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        assert_eq!(
+            list_key(&mut state, 3, KeyCode::Char('3')),
+            Outcome::Submit
+        );
+        assert_eq!(state.selected(), Some(2));
+        assert_eq!(list_key(&mut state, 3, KeyCode::Char('4')), Outcome::Stay);
+        assert_eq!(
+            state.selected(),
+            Some(2),
+            "a number past the end does nothing"
+        );
+
+        let mut days = WeekdayPicker {
+            days: Weekdays::only([Weekday::Monday]),
+            state: ListState::default(),
+            target: WeekdayTarget::Global,
+        };
+        assert_eq!(
+            days.key(KeyCode::Char('0')),
+            Outcome::Stay,
+            "0 is the tenth row"
+        );
+        assert_eq!(days.state.selected(), Some(9));
+        assert!(days.days.contains(Weekday::Sunday));
+        assert!(days.days.contains(Weekday::Monday));
     }
 }
