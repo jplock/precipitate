@@ -61,8 +61,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Static musl binaries through zig, as `make release-musl` builds
-          # them, each on its own architecture so the smoke test runs.
+          # Static musl binaries built natively in Alpine, each on its own
+          # architecture so the smoke test runs.
           - name: linux-amd64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
@@ -183,18 +183,20 @@ jobs:
       # No rust-cache: release builds are rare, and release-profile caches
       # would crowd the ones that keep every push fast.
 
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        if: matrix.platform == 'linux'
-        with:
-          version: 0.17.0
-
-      - name: Build (zig, static musl)
+      # Only cargo runs in the container: the runner cannot exec JavaScript
+      # actions inside musl containers on arm64. Keep the image tag in sync
+      # with rust-toolchain.toml.
+      - name: Build (Alpine, static musl)
         if: matrix.platform == 'linux'
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          cargo install --locked cargo-zigbuild@0.23.4
-          cargo zigbuild --release --locked -p precip --target "${TARGET}"
+          docker run --rm -v "$PWD:/work" -w /work -e TARGET \
+            rust:1.99.0-alpine sh -ec '
+              apk add --no-cache musl-dev
+              cargo build --release --locked -p precip --target "${TARGET}"
+            '
+          sudo chown -R "$(id -u):$(id -g)" target
 
       - name: Build
         if: matrix.platform != 'linux'
