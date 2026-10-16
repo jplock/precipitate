@@ -31,9 +31,11 @@ serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing = { workspace = true, features = ["std"] }
-xdg = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "ansi", "env-filter", "std"] }
 
+# XDG directories exist only on Unix; Windows uses %LOCALAPPDATA%.
+[target.'cfg(unix)'.dependencies]
+xdg = { workspace = true }
 
 [lints]
 workspace = true

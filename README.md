@@ -21,6 +21,11 @@ make release-musl   # static Linux binaries; needs cargo-zigbuild
 make hooks          # install the prek git hooks
 ```
 
+To release, set `version` in the workspace `Cargo.toml`, merge, and push
+the matching tag (`v0.2.0`). `.github/workflows/release.yml` publishes
+static Linux (amd64, arm64), macOS (arm64) and Windows (amd64, arm64)
+binaries, signed where the secrets are set, with `SHA256SUMS`.
+
 ## Run
 
 A workspace is one SQLite file under `$XDG_DATA_HOME/precip/workspaces/`
