@@ -48,12 +48,28 @@ impl Env {
 
 /// `$XDG_DATA_HOME/precip/workspaces`, which is `~/.local/share/precip/
 /// workspaces` unless the variable is set.
+#[cfg(unix)]
 pub(crate) fn default_workspaces_dir() -> Utf8PathBuf {
     xdg::BaseDirectories::with_prefix("precip")
         .get_data_home()
         .and_then(|p| Utf8PathBuf::from_path_buf(p).ok())
-        .map(|p| p.join("workspaces"))
-        .unwrap_or_else(|| Utf8PathBuf::from(".precip").join("workspaces"))
+        .map_or_else(fallback_workspaces_dir, |p| p.join("workspaces"))
+}
+
+/// `%LOCALAPPDATA%\precip\workspaces`: XDG has no meaning on Windows.
+#[cfg(windows)]
+pub(crate) fn default_workspaces_dir() -> Utf8PathBuf {
+    std::env::var("LOCALAPPDATA")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map_or_else(fallback_workspaces_dir, |p| {
+            Utf8PathBuf::from(p).join("precip").join("workspaces")
+        })
+}
+
+/// Next to where precip runs, when the platform names no data directory.
+fn fallback_workspaces_dir() -> Utf8PathBuf {
+    Utf8PathBuf::from(".precip").join("workspaces")
 }
 
 /// One cloud estate to scan: how to sign in and what to select.

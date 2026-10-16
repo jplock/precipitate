@@ -1,0 +1,327 @@
+# Builds, signs and attests the release binaries. Build and attest run in
+# this reusable workflow so the Sigstore certificate names it as the
+# builder; nothing here holds `contents: write`, and release.yml publishes
+# what this uploads.
+#
+# Verify a published archive:
+#   gh attestation verify precip-<version>-<target>.tar.gz --owner jplock \
+#     --signer-workflow jplock/precipitate/.github/workflows/release-build.yml
+name: release-build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "The version in archive names, without a v"
+        required: true
+        type: string
+    secrets:
+      # All optional: a missing credential leaves that platform's binary
+      # unsigned, with a warning, rather than failing the release.
+      APPLE_CERTIFICATE_P12_BASE64:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_CERTIFICATE_NAME:
+        required: false
+      MACOS_KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_ID_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      TRUSTED_SIGNING_ENDPOINT:
+        required: false
+      TRUSTED_SIGNING_ACCOUNT:
+        required: false
+      CERTIFICATE_PROFILE:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  binaries:
+    name: binary (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static musl binaries through zig, as `make release-musl` builds
+          # them, each on its own architecture so the smoke test runs.
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            platform: linux
+            binary: precip
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux
+            binary: precip
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos
+            binary: precip
+          - name: windows-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            binary: precip.exe
+          - name: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            binary: precip.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check signing credentials
+        id: signing
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          REF_TYPE: ${{ github.ref_type }}
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_CERTIFICATE_NAME: ${{ secrets.APPLE_CERTIFICATE_NAME }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          CERTIFICATE_PROFILE: ${{ secrets.CERTIFICATE_PROFILE }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+
+          macos_sign=false
+          if [ -n "${APPLE_CERTIFICATE_P12_BASE64}" ] \
+            && [ -n "${APPLE_CERTIFICATE_PASSWORD}" ] \
+            && [ -n "${APPLE_CERTIFICATE_NAME}" ] \
+            && [ -n "${MACOS_KEYCHAIN_PASSWORD}" ]; then
+            macos_sign=true
+          fi
+
+          macos_notarize=false
+          if [ "${macos_sign}" = true ] \
+            && [ -n "${APPLE_ID}" ] \
+            && [ -n "${APPLE_ID_PASSWORD}" ] \
+            && [ -n "${APPLE_TEAM_ID}" ]; then
+            macos_notarize=true
+          fi
+
+          # Azure Artifact Signing trusts this repository's OIDC token only
+          # on tag runs (the federated credential's subject), so any other
+          # run stays unsigned instead of failing the token exchange.
+          windows_sign=false
+          if [ "${REF_TYPE}" = "tag" ] \
+            && [ -n "${TRUSTED_SIGNING_ENDPOINT}" ] \
+            && [ -n "${TRUSTED_SIGNING_ACCOUNT}" ] \
+            && [ -n "${CERTIFICATE_PROFILE}" ] \
+            && [ -n "${AZURE_CLIENT_ID}" ] \
+            && [ -n "${AZURE_TENANT_ID}" ]; then
+            windows_sign=true
+          fi
+
+          {
+            echo "macos_sign=${macos_sign}"
+            echo "macos_notarize=${macos_notarize}"
+            echo "windows_sign=${windows_sign}"
+          } >> "$GITHUB_OUTPUT"
+
+          warn() {
+            echo "::warning title=Unsigned release binary::$1"
+            echo "> [!WARNING]" >> "$GITHUB_STEP_SUMMARY"
+            echo "> $1" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          case "${PLATFORM}" in
+            macos)
+              if [ "${macos_sign}" != true ]; then
+                warn "The macOS binary is neither signed nor notarized: set APPLE_CERTIFICATE_P12_BASE64, APPLE_CERTIFICATE_PASSWORD, APPLE_CERTIFICATE_NAME and MACOS_KEYCHAIN_PASSWORD."
+              elif [ "${macos_notarize}" != true ]; then
+                warn "The macOS binary is signed but not notarized: set APPLE_ID, APPLE_ID_PASSWORD and APPLE_TEAM_ID."
+              fi
+              ;;
+            windows)
+              if [ "${windows_sign}" != true ] && [ "${REF_TYPE}" != "tag" ]; then
+                warn "The Windows binary is not signed: Azure Artifact Signing trusts this repository only on a tag."
+              elif [ "${windows_sign}" != true ]; then
+                warn "The Windows binary is not signed: set TRUSTED_SIGNING_ENDPOINT, TRUSTED_SIGNING_ACCOUNT, CERTIFICATE_PROFILE, AZURE_CLIENT_ID and AZURE_TENANT_ID."
+              fi
+              ;;
+          esac
+
+      - name: Install the pinned toolchain and target
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup show active-toolchain
+          rustup target add "${TARGET}"
+
+      # No rust-cache: release builds are rare, and release-profile caches
+      # would crowd the ones that keep every push fast.
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: matrix.platform == 'linux'
+        with:
+          version: 0.17.0
+
+      - name: Build (zig, static musl)
+        if: matrix.platform == 'linux'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo install --locked cargo-zigbuild@0.23.4
+          cargo zigbuild --release --locked -p precip --target "${TARGET}"
+
+      - name: Build
+        if: matrix.platform != 'linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked -p precip --target "${TARGET}"
+
+      - name: Smoke test
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          "./target/${TARGET}/release/${BINARY}" --version
+          "./target/${TARGET}/release/${BINARY}" --help > /dev/null
+
+      - name: Import the Apple Developer ID certificate
+        if: matrix.platform == 'macos' && steps.signing.outputs.macos_sign == 'true'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > certificate.p12
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$MACOS_KEYCHAIN_PASSWORD" build.keychain
+          rm certificate.p12
+
+      - name: Sign the macOS binary
+        if: matrix.platform == 'macos' && steps.signing.outputs.macos_sign == 'true'
+        env:
+          APPLE_CERTIFICATE_NAME: ${{ secrets.APPLE_CERTIFICATE_NAME }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          /usr/bin/codesign --force --sign "$APPLE_CERTIFICATE_NAME" \
+            --options runtime --timestamp "target/${TARGET}/release/precip"
+          /usr/bin/codesign --verify --strict --verbose=2 "target/${TARGET}/release/precip"
+
+      - name: Notarize the macOS binary
+        if: matrix.platform == 'macos' && steps.signing.outputs.macos_notarize == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          xcrun notarytool store-credentials "notarytool-profile" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_ID_PASSWORD"
+          # A bare binary cannot be stapled, so the ticket stays with Apple
+          # and Gatekeeper checks it online; the submission is still needed.
+          mkdir -p notarize-staging
+          cp "target/${TARGET}/release/precip" notarize-staging/
+          ditto -c -k --keepParent notarize-staging "precip-notarize-${VERSION}.zip"
+          xcrun notarytool submit "precip-notarize-${VERSION}.zip" \
+            --keychain-profile "notarytool-profile" --wait
+          rm -rf notarize-staging "precip-notarize-${VERSION}.zip"
+
+      - name: Sign the Windows binary
+        # Azure Artifact Signing over GitHub OIDC; the signing tool is an
+        # x86_64 executable, which the arm64 runner runs under emulation.
+        if: matrix.platform == 'windows' && steps.signing.outputs.windows_sign == 'true'
+        uses: skeeto/aas-sign@0008af00d4dd2ff2e482ba5ede70831d78f9da59 # v1.1.0
+        with:
+          version: v1.1.0
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          account: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          profile: ${{ secrets.CERTIFICATE_PROFILE }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          files: |
+            target/${{ matrix.target }}/release/precip.exe
+
+      - name: Archive (tar.gz)
+        if: matrix.platform != 'windows'
+        id: tar
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="precip-${VERSION}-${TARGET}.tar.gz"
+          mkdir -p dist stage
+          cp "target/${TARGET}/release/precip" LICENSE NOTICE stage/
+          tar -C stage -czf "dist/${archive}" precip LICENSE NOTICE
+          (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
+          echo "asset=dist/${archive}" >> "$GITHUB_OUTPUT"
+
+      - name: Archive (zip)
+        if: matrix.platform == 'windows'
+        id: zip
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="precip-${VERSION}-${TARGET}.zip"
+          mkdir -p dist stage
+          cp "target/${TARGET}/release/precip.exe" LICENSE NOTICE stage/
+          # 7-Zip ships with the Windows runner images; git-bash has no zip.
+          (cd stage && 7z a "../dist/${archive}" precip.exe LICENSE NOTICE)
+          (cd dist && sha256sum "${archive}" > "${archive}.sha256")
+          echo "asset=dist/${archive}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binaries-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.tar.outputs.asset || steps.zip.outputs.asset }}
+
+      - name: Remove the macOS keychain
+        if: always() && matrix.platform == 'macos'
+        run: security delete-keychain build.keychain || true
