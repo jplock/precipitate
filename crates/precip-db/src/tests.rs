@@ -1,6 +1,7 @@
 use super::*;
 use crate::kinds::Setting;
 use crate::query::Bound;
+use crate::scans::content_hash;
 use crate::schema::{Settings, WorkloadOverrides};
 use precip_engine::schedule::{Blackout, Schedule, Slot, Weekdays};
 use precip_types::body::Instance;
@@ -1332,5 +1333,16 @@ async fn scan_selections_are_saved_per_provider() {
     assert_eq!(
         store.saved_scan_options(Provider::Azure).await.unwrap().as_deref(),
         Some(r#"{"z":1}"#)
+    );
+}
+
+#[test]
+fn content_hash_is_lowercase_hex_sha256() {
+    let tags = BTreeMap::from([("k".to_owned(), "v".to_owned())]);
+    let body = serde_json::json!({"a": 1});
+    // printf '{"k":"v"}\n{"a":1}' | shasum -a 256
+    assert_eq!(
+        content_hash(&tags, &body).expect("hash"),
+        "df8a0a0976988645d45605ec599e118fd2ea0a5b1a7a9a07e889a310c65f3bea"
     );
 }

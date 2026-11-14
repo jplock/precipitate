@@ -74,6 +74,7 @@ ignore = [
     #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish
     #{ crate = "a-crate-that-is-yanked@0.1.1", reason = "you can specify why you are ignoring the yanked crate" },
+    { id = "RUSTSEC-2026-0459", reason = "fixed in libsqlite3-sys 0.39.0, but sqlx-sqlite 0.9.0 requires <0.38.0; remove once sqlx allows it" },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
@@ -115,6 +116,9 @@ exceptions = [
     # Mozilla's CA root certificates, which reqwest's rustls verifier falls
     # back to; the data is published under CDLA-Permissive-2.0.
     { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs" },
+    # CBOR codec behind aws-smithy-cbor, which the Resource Groups Tagging
+    # SDK uses for its wire protocol.
+    { allow = ["BlueOak-1.0.0"], crate = "minicbor" },
 ]
 
 # Some crates don't have (easily) machine readable licensing information,

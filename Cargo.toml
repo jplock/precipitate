@@ -14,10 +14,10 @@ members = [
 ]
 
 [workspace.package]
-version = "2026.10.1"
+version = "2026.11.1"
 edition = "2024"
 license = "MPL-2.0"
-rust-version = "1.99"
+rust-version = "1.100"
 repository = "https://github.com/jplock/precipitate"
 
 # Every dependency is pinned to an exact version with default features off.
@@ -37,33 +37,34 @@ anyhow = { version = "=1.0.104", default-features = false }
 async-trait = { version = "=0.1.92", default-features = false }
 azure_core = { version = "=1.1.0", default-features = false }
 azure_identity = { version = "=1.0.0", default-features = false }
-aws-lc-rs = { version = "=1.18.2", default-features = false }
-aws-config = { version = "=1.12.0", default-features = false }
-aws-credential-types = { version = "=1.3.0", default-features = false }
-aws-sdk-autoscaling = { version = "=1.135.0", default-features = false }
-aws-sdk-cloudformation = { version = "=1.131.0", default-features = false }
-aws-sdk-dynamodb = { version = "=1.130.0", default-features = false }
-aws-sdk-ec2 = { version = "=1.268.0", default-features = false }
-aws-sdk-ecs = { version = "=1.150.0", default-features = false }
-aws-sdk-efs = { version = "=1.118.0", default-features = false }
-aws-sdk-eks = { version = "=1.154.0", default-features = false }
-aws-sdk-elasticache = { version = "=1.124.0", default-features = false }
-aws-sdk-elasticloadbalancingv2 = { version = "=1.129.0", default-features = false }
-aws-sdk-lambda = { version = "=1.151.0", default-features = false }
-aws-sdk-organizations = { version = "=1.132.0", default-features = false }
-aws-sdk-rds = { version = "=1.154.0", default-features = false }
-aws-sdk-resourceexplorer2 = { version = "=1.119.0", default-features = false }
-aws-sdk-resourcegroupstagging = { version = "=1.114.0", default-features = false }
-aws-sdk-sts = { version = "=1.119.0", default-features = false }
+aws-lc-rs = { version = "=1.19.0", default-features = false }
+aws-config = { version = "=1.13.2", default-features = false }
+aws-credential-types = { version = "=1.3.1", default-features = false }
+aws-sdk-autoscaling = { version = "=1.144.0", default-features = false }
+aws-sdk-cloudformation = { version = "=1.139.0", default-features = false }
+aws-sdk-dynamodb = { version = "=1.139.0", default-features = false }
+aws-sdk-ec2 = { version = "=1.280.0", default-features = false }
+aws-sdk-ecs = { version = "=1.159.0", default-features = false }
+aws-sdk-efs = { version = "=1.125.0", default-features = false }
+aws-sdk-eks = { version = "=1.162.0", default-features = false }
+aws-sdk-elasticache = { version = "=1.131.0", default-features = false }
+aws-sdk-elasticloadbalancingv2 = { version = "=1.136.0", default-features = false }
+aws-sdk-lambda = { version = "=1.159.0", default-features = false }
+aws-sdk-organizations = { version = "=1.140.0", default-features = false }
+aws-sdk-rds = { version = "=1.162.0", default-features = false }
+aws-sdk-resourceexplorer2 = { version = "=1.126.0", default-features = false }
+aws-sdk-resourcegroupstagging = { version = "=1.122.0", default-features = false }
+aws-sdk-sts = { version = "=1.126.0", default-features = false }
 # The pagination stream type the SDK crates return; pinned to the version
 # they use so one helper can page through any of them.
-aws-smithy-async = { version = "=1.3.0", default-features = false }
-google-cloud-auth = { version = "=1.17.0", default-features = false }
-hcl-rs = { version = "=0.19.9", default-features = false }
+aws-smithy-async = { version = "=1.3.1", default-features = false }
+google-cloud-auth = { version = "=1.19.0", default-features = false }
+hcl-rs = { version = "=0.20.0", default-features = false }
+hex = { version = "=0.4.3", default-features = false }
 http = { version = "=1.5.0", default-features = false }
 base64 = { version = "=0.23.1", default-features = false }
 camino = { version = "=1.2.6", default-features = false }
-jiff = { version = "=0.2.38", default-features = false }
+jiff = { version = "=0.2.43", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false }
 clap = { version = "=4.6.7", default-features = false }
 configparser = { version = "=3.3.0", default-features = false }
@@ -73,15 +74,15 @@ sea-query = { version = "=1.0.2", default-features = false }
 sea-query-sqlx = { version = "=0.9.1", default-features = false }
 reqwest = { version = "=0.13.5", default-features = false }
 serde = { version = "=1.0.229", default-features = false }
-sha2 = { version = "=0.10.9", default-features = false }
+sha2 = { version = "=0.11.1", default-features = false }
 serde_json = { version = "=1.0.154", default-features = false }
 sqlx = { version = "=0.9.0", default-features = false }
 thiserror = { version = "=2.0.21", default-features = false }
-tokio = { version = "=1.53.3", default-features = false }
-toml = { version = "=1.1.8", default-features = false }
+tokio = { version = "=1.54.1", default-features = false }
+toml = { version = "=1.2.1", default-features = false }
 tracing = { version = "=0.1.44", default-features = false }
 tracing-subscriber = { version = "=0.3.23", default-features = false }
-uuid = { version = "=1.28.0", default-features = false }
+uuid = { version = "=1.29.2", default-features = false }
 xdg = { version = "=3.0.0", default-features = false }
 
 [workspace.lints.rust]
@@ -119,3 +120,10 @@ absolute_paths = "deny"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Release builds on pull requests and manual runs, which only check that
+# the release workflow still works; tag builds keep fat LTO.
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

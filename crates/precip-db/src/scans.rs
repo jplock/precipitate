@@ -67,7 +67,7 @@ pub(crate) fn content_hash(
     h.update(serde_json::to_vec(tags)?);
     h.update(b"\n");
     h.update(serde_json::to_vec(body)?);
-    Ok(format!("{:x}", h.finalize()))
+    Ok(hex::encode(h.finalize()))
 }
 
 /// The latest version row of one ARN.

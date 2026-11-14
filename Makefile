@@ -25,7 +25,7 @@ clippy:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
 test:
-	$(CARGO) test --workspace
+	$(CARGO) nextest run --workspace
 
 deny:
 	$(CARGO) deny check
