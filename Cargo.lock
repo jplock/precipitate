@@ -3144,6 +3144,7 @@ name = "precip-db"
 version = "2026.11.1"
 dependencies = [
  "camino",
+ "hex",
  "jiff",
  "precip-engine",
  "precip-types",
