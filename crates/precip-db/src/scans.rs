@@ -12,6 +12,7 @@ use sea_query::{Expr, ExprTrait, Func, OnConflict, Order, Query};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 
 /// What recording a scan changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,7 +68,12 @@ pub(crate) fn content_hash(
     h.update(serde_json::to_vec(tags)?);
     h.update(b"\n");
     h.update(serde_json::to_vec(body)?);
-    Ok(format!("{:x}", h.finalize()))
+    let mut hex = String::with_capacity(64);
+    for b in h.finalize() {
+        // Writing to a String cannot fail.
+        let _ = write!(hex, "{b:02x}");
+    }
+    Ok(hex)
 }
 
 /// The latest version row of one ARN.

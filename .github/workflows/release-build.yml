@@ -192,7 +192,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           docker run --rm -v "$PWD:/work" -w /work -e TARGET \
-            rust:1.99.0-alpine sh -ec '
+            rust:1.100.0-alpine sh -ec '
               apk add --no-cache musl-dev
               cargo build --release --locked -p precip --target "${TARGET}"
             '
