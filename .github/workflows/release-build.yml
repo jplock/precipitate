@@ -180,7 +180,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          rustup show active-toolchain
+          rustup install
           rustup target add "${TARGET}"
 
       # No rust-cache: release builds are rare, and release-profile caches
