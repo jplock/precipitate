@@ -120,3 +120,10 @@ absolute_paths = "deny"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Release builds on pull requests and manual runs, which only check that
+# the release workflow still works; tag builds keep fat LTO.
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

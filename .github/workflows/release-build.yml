@@ -48,6 +48,9 @@ permissions: {}
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # Tags ship fat-LTO binaries; other runs only check the workflow, so they
+  # use the faster thin-LTO profile from Cargo.toml.
+  PROFILE: ${{ github.ref_type == 'tag' && 'release' || 'ci' }}
 
 jobs:
   binaries:
@@ -191,10 +194,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          docker run --rm -v "$PWD:/work" -w /work -e TARGET \
+          docker run --rm -v "$PWD:/work" -w /work -e TARGET -e PROFILE \
             rust:1.100.0-alpine sh -ec '
               apk add --no-cache musl-dev
-              cargo build --release --locked -p precip --target "${TARGET}"
+              cargo build --profile "${PROFILE}" --locked -p precip --target "${TARGET}"
             '
           sudo chown -R "$(id -u):$(id -g)" target
 
@@ -203,7 +206,7 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo build --release --locked -p precip --target "${TARGET}"
+        run: cargo build --profile "${PROFILE}" --locked -p precip --target "${TARGET}"
 
       - name: Smoke test
         shell: bash
@@ -211,8 +214,8 @@ jobs:
           TARGET: ${{ matrix.target }}
           BINARY: ${{ matrix.binary }}
         run: |
-          "./target/${TARGET}/release/${BINARY}" --version
-          "./target/${TARGET}/release/${BINARY}" --help > /dev/null
+          "./target/${TARGET}/${PROFILE}/${BINARY}" --version
+          "./target/${TARGET}/${PROFILE}/${BINARY}" --help > /dev/null
 
       - name: Import the Apple Developer ID certificate
         if: matrix.platform == 'macos' && steps.signing.outputs.macos_sign == 'true'
@@ -240,8 +243,8 @@ jobs:
         run: |
           set -euo pipefail
           /usr/bin/codesign --force --sign "$APPLE_CERTIFICATE_NAME" \
-            --options runtime --timestamp "target/${TARGET}/release/precip"
-          /usr/bin/codesign --verify --strict --verbose=2 "target/${TARGET}/release/precip"
+            --options runtime --timestamp "target/${TARGET}/${PROFILE}/precip"
+          /usr/bin/codesign --verify --strict --verbose=2 "target/${TARGET}/${PROFILE}/precip"
 
       - name: Notarize the macOS binary
         if: matrix.platform == 'macos' && steps.signing.outputs.macos_notarize == 'true'
@@ -258,7 +261,7 @@ jobs:
           # A bare binary cannot be stapled, so the ticket stays with Apple
           # and Gatekeeper checks it online; the submission is still needed.
           mkdir -p notarize-staging
-          cp "target/${TARGET}/release/precip" notarize-staging/
+          cp "target/${TARGET}/${PROFILE}/precip" notarize-staging/
           ditto -c -k --keepParent notarize-staging "precip-notarize-${VERSION}.zip"
           xcrun notarytool submit "precip-notarize-${VERSION}.zip" \
             --keychain-profile "notarytool-profile" --wait
@@ -277,7 +280,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           files: |
-            target/${{ matrix.target }}/release/precip.exe
+            target/${{ matrix.target }}/${{ env.PROFILE }}/precip.exe
 
       - name: Archive (tar.gz)
         if: matrix.platform != 'windows'
@@ -290,7 +293,7 @@ jobs:
           set -euo pipefail
           archive="precip-${VERSION}-${TARGET}.tar.gz"
           mkdir -p dist stage
-          cp "target/${TARGET}/release/precip" LICENSE NOTICE stage/
+          cp "target/${TARGET}/${PROFILE}/precip" LICENSE NOTICE stage/
           tar -C stage -czf "dist/${archive}" precip LICENSE NOTICE
           (cd dist && shasum -a 256 "${archive}" > "${archive}.sha256")
           echo "asset=dist/${archive}" >> "$GITHUB_OUTPUT"
@@ -306,7 +309,7 @@ jobs:
           set -euo pipefail
           archive="precip-${VERSION}-${TARGET}.zip"
           mkdir -p dist stage
-          cp "target/${TARGET}/release/precip.exe" LICENSE NOTICE stage/
+          cp "target/${TARGET}/${PROFILE}/precip.exe" LICENSE NOTICE stage/
           # 7-Zip ships with the Windows runner images; git-bash has no zip.
           (cd stage && 7z a "../dist/${archive}" precip.exe LICENSE NOTICE)
           (cd dist && sha256sum "${archive}" > "${archive}.sha256")
